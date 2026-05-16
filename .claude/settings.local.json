@@ -3,7 +3,12 @@
     "allow": [
       "PowerShell(Get-ChildItem 'C:\\\\Users\\\\laure\\\\.vscode\\\\extensions' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'cpptools|codelldb|cppdbg|debugger-for' } | Select-Object Name)",
       "Bash(odin check:*)",
-      "Bash(odin build:*)"
+      "Bash(odin build:*)",
+      "Bash(ls /d/odit/*.ttf /d/odit/assets/ /d/odit/fonts/ /d/odit/res/)",
+      "Bash(odin doc:*)",
+      "Bash(odin run:*)",
+      "Bash(find /d/odit -name *.dll)",
+      "Bash(timeout 4 ./odit.exe)"
     ]
   }
 }
