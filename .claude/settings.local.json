@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "PowerShell(Get-ChildItem 'C:\\\\Users\\\\laure\\\\.vscode\\\\extensions' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'cpptools|codelldb|cppdbg|debugger-for' } | Select-Object Name)"
+      "PowerShell(Get-ChildItem 'C:\\\\Users\\\\laure\\\\.vscode\\\\extensions' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'cpptools|codelldb|cppdbg|debugger-for' } | Select-Object Name)",
+      "Bash(odin check:*)",
+      "Bash(odin build:*)"
     ]
   }
 }
