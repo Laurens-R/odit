@@ -1,4 +1,4 @@
-package odin
+package document
 
 import "core:bytes"
 import "core:strings"
@@ -39,9 +39,9 @@ PieceTree :: struct {
 
 // --- Initialization / Destruction ---
 
-piecetree_init :: proc(tree: ^PieceTree, initial := "") {
+piecetree_init :: proc(tree: ^PieceTree, initial: string) {
 	document_buffer_init(&tree.source_buffer, .Source, initial)
-	document_buffer_init(&tree.edit_buffer, .Edit)
+	document_buffer_init(&tree.edit_buffer, .Edit, "")
 	tree.root = nil
 	tree.total_length = 0
 	tree.total_lines = 1

@@ -1,4 +1,4 @@
-package odin
+package document
 
 import "core:strings"
 import "core:bytes"
@@ -45,7 +45,7 @@ Document :: struct {
 
 // --- DocumentBuffer procs (used internally by PieceTree) ---
 
-document_buffer_init :: proc(buffer: ^DocumentBuffer, kind: DocumentBufferKind, initial := "") {
+document_buffer_init :: proc(buffer: ^DocumentBuffer, kind: DocumentBufferKind, initial: string) {
 	buffer.kind = kind
 	if len(initial) > 0 {
 		bytes.buffer_init_string(&buffer.buffer, initial)
@@ -62,7 +62,7 @@ document_buffer_append :: proc(buffer: ^DocumentBuffer, str: string) {
 
 // --- Document lifecycle ---
 
-document_init :: proc(doc: ^Document, initial := "") {
+document_init :: proc(doc: ^Document, initial: string) {
 	piecetree_init(&doc.tree, initial)
 	doc.undo_stack.ops = make([dynamic]EditOp)
 	doc.undo_stack.position = 0
