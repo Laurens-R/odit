@@ -8,7 +8,8 @@
       "Bash(odin doc:*)",
       "Bash(odin run:*)",
       "Bash(find /d/odit -name *.dll)",
-      "Bash(timeout 4 ./odit.exe)"
+      "Bash(timeout 4 ./odit.exe)",
+      "Bash(odin root *)"
     ]
   }
 }

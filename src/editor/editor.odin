@@ -29,20 +29,23 @@ Editor :: struct {
 	line_height:    i32, // line height in pixels
 	padding_x:      i32, // left padding
 	padding_y:      i32, // top padding
+	gutter_width:   i32, // line-number gutter width in pixels (set during render)
 
 	// Blink
 	cursor_visible: bool,
 	cursor_timer:   f64, // seconds accumulator
 
-	// Selection (for future use)
+	// Selection
 	sel_active:     bool,
-	sel_anchor:     u32, // byte offset of selection start
+	sel_anchor:     u32, // byte offset of selection anchor (other end is cursor_offset)
+	mouse_dragging: bool, // left mouse button held; motion extends selection
 
 	// Colors (terminal palette)
 	bg_color:       sdl3.FColor,
 	fg_color:       sdl3.FColor,
 	cursor_color:   sdl3.FColor,
 	line_num_color: sdl3.FColor,
+	sel_color:      sdl3.FColor,
 	status_bg:      sdl3.FColor,
 	status_fg:      sdl3.FColor,
 }
@@ -80,6 +83,7 @@ editor_init :: proc(ed: ^Editor, engine: ^ttf.TextEngine, font: ^ttf.Font, font_
 	ed.fg_color       = sdl3.FColor{0.85, 0.85, 0.85, 1.0}
 	ed.cursor_color   = sdl3.FColor{0.9, 0.9, 0.9, 1.0}
 	ed.line_num_color = sdl3.FColor{0.4, 0.45, 0.5, 1.0}
+	ed.sel_color      = sdl3.FColor{0.22, 0.36, 0.60, 1.0}
 	ed.status_bg      = sdl3.FColor{0.18, 0.20, 0.25, 1.0}
 	ed.status_fg      = sdl3.FColor{0.7, 0.75, 0.8, 1.0}
 }
@@ -95,6 +99,7 @@ editor_open_string :: proc(ed: ^Editor, content: string) {
 	ed.cursor_col = 0
 	ed.cursor_offset = 0
 	ed.scroll_line = 0
+	ed.sel_active = false
 }
 
 // --- Input handling ---
@@ -115,6 +120,25 @@ editor_handle_event :: proc(ed: ^Editor, event: ^sdl3.Event) {
 		ctrl := .LCTRL in mod || .RCTRL in mod
 		if ctrl {
 			editor_zoom(ed, event.wheel.y)
+		} else {
+			editor_scroll(ed, -i32(event.wheel.y * 3))
+		}
+
+	case .MOUSE_BUTTON_DOWN:
+		if event.button.button == sdl3.BUTTON_LEFT {
+			mod := sdl3.GetModState()
+			shift := .LSHIFT in mod || .RSHIFT in mod
+			editor_mouse_down(ed, event.button.x, event.button.y, shift)
+		}
+
+	case .MOUSE_BUTTON_UP:
+		if event.button.button == sdl3.BUTTON_LEFT {
+			ed.mouse_dragging = false
+		}
+
+	case .MOUSE_MOTION:
+		if ed.mouse_dragging {
+			editor_mouse_drag(ed, event.motion.x, event.motion.y)
 		}
 	}
 }
@@ -124,7 +148,8 @@ editor_handle_key :: proc(ed: ^Editor, event: ^sdl3.Event) {
 	key := event.key.key
 	mod := event.key.mod
 
-	ctrl := .LCTRL in mod || .RCTRL in mod
+	ctrl  := .LCTRL  in mod || .RCTRL  in mod
+	shift := .LSHIFT in mod || .RSHIFT in mod
 
 	// Reset cursor blink on any keypress
 	ed.cursor_visible = true
@@ -133,19 +158,33 @@ editor_handle_key :: proc(ed: ^Editor, event: ^sdl3.Event) {
 	if ctrl {
 		switch key {
 		case sdl3.K_Z:
-			if .LSHIFT in mod || .RSHIFT in mod {
-				document.document_redo(&ed.doc)
+			if shift {
+				if new_offset, ok := document.document_redo(&ed.doc); ok {
+					ed.cursor_offset = new_offset
+				}
 			} else {
-				document.document_undo(&ed.doc)
+				if new_offset, ok := document.document_undo(&ed.doc); ok {
+					ed.cursor_offset = new_offset
+				}
 			}
+			ed.sel_active = false
 			sync_cursor_from_offset(ed)
 			return
 		case sdl3.K_Y:
-			document.document_redo(&ed.doc)
+			if new_offset, ok := document.document_redo(&ed.doc); ok {
+				ed.cursor_offset = new_offset
+			}
+			ed.sel_active = false
 			sync_cursor_from_offset(ed)
 			return
 		case sdl3.K_A:
 			// Select all (future)
+			return
+		case sdl3.K_C:
+			clipboard_copy(ed)
+			return
+		case sdl3.K_V:
+			clipboard_paste(ed)
 			return
 		}
 	}
@@ -158,6 +197,7 @@ editor_handle_key :: proc(ed: ^Editor, event: ^sdl3.Event) {
 		editor_insert_text(ed, "    ") // 4 spaces, terminal style
 
 	case sdl3.K_BACKSPACE:
+		if delete_selection(ed) { return }
 		if ed.cursor_offset > 0 {
 			// Delete one character (handle UTF-8 backwards)
 			del_len := prev_char_len(ed)
@@ -167,6 +207,7 @@ editor_handle_key :: proc(ed: ^Editor, event: ^sdl3.Event) {
 		}
 
 	case sdl3.K_DELETE:
+		if delete_selection(ed) { return }
 		doc_len := document.document_length(&ed.doc)
 		if ed.cursor_offset < doc_len {
 			del_len := next_char_len(ed)
@@ -175,12 +216,16 @@ editor_handle_key :: proc(ed: ^Editor, event: ^sdl3.Event) {
 		}
 
 	case sdl3.K_LEFT:
+		if !shift && collapse_selection(ed, false) { return }
+		update_selection_for_nav(ed, shift)
 		if ed.cursor_offset > 0 {
 			ed.cursor_offset -= prev_char_len(ed)
 			sync_cursor_from_offset(ed)
 		}
 
 	case sdl3.K_RIGHT:
+		if !shift && collapse_selection(ed, true) { return }
+		update_selection_for_nav(ed, shift)
 		doc_len := document.document_length(&ed.doc)
 		if ed.cursor_offset < doc_len {
 			ed.cursor_offset += next_char_len(ed)
@@ -188,17 +233,20 @@ editor_handle_key :: proc(ed: ^Editor, event: ^sdl3.Event) {
 		}
 
 	case sdl3.K_UP:
+		update_selection_for_nav(ed, shift)
 		if ed.cursor_line > 0 {
 			move_cursor_vertical(ed, -1)
 		}
 
 	case sdl3.K_DOWN:
+		update_selection_for_nav(ed, shift)
 		line_count := document.document_line_count(&ed.doc)
 		if ed.cursor_line < line_count - 1 {
 			move_cursor_vertical(ed, 1)
 		}
 
 	case sdl3.K_HOME:
+		update_selection_for_nav(ed, shift)
 		if ctrl {
 			ed.cursor_offset = 0
 		} else {
@@ -207,6 +255,7 @@ editor_handle_key :: proc(ed: ^Editor, event: ^sdl3.Event) {
 		sync_cursor_from_offset(ed)
 
 	case sdl3.K_END:
+		update_selection_for_nav(ed, shift)
 		if ctrl {
 			ed.cursor_offset = document.document_length(&ed.doc)
 		} else {
@@ -217,6 +266,7 @@ editor_handle_key :: proc(ed: ^Editor, event: ^sdl3.Event) {
 		sync_cursor_from_offset(ed)
 
 	case sdl3.K_PAGEUP:
+		update_selection_for_nav(ed, shift)
 		lines_to_move := ed.visible_lines > 1 ? ed.visible_lines - 1 : 1
 		if ed.cursor_line >= lines_to_move {
 			move_cursor_vertical(ed, -i32(lines_to_move))
@@ -225,6 +275,7 @@ editor_handle_key :: proc(ed: ^Editor, event: ^sdl3.Event) {
 		}
 
 	case sdl3.K_PAGEDOWN:
+		update_selection_for_nav(ed, shift)
 		line_count := document.document_line_count(&ed.doc)
 		lines_to_move := ed.visible_lines > 1 ? ed.visible_lines - 1 : 1
 		remaining := line_count - 1 - ed.cursor_line
@@ -234,6 +285,77 @@ editor_handle_key :: proc(ed: ^Editor, event: ^sdl3.Event) {
 			move_cursor_vertical(ed, i32(remaining))
 		}
 	}
+}
+
+@(private="file")
+editor_scroll :: proc(ed: ^Editor, delta_lines: i32) {
+	if delta_lines == 0 { return }
+	line_count := i32(document.document_line_count(&ed.doc))
+	visible := i32(ed.visible_lines)
+	if visible == 0 { visible = 1 }
+	max_scroll := max(i32(0), line_count - visible)
+	new_scroll := i32(ed.scroll_line) + delta_lines
+	new_scroll = clamp(new_scroll, 0, max_scroll)
+	ed.scroll_line = u32(new_scroll)
+}
+
+@(private="file")
+screen_to_offset :: proc(ed: ^Editor, x: f32, y: f32) -> u32 {
+	// Y → line
+	rel_y := i32(y) - ed.padding_y
+	row: i32 = 0
+	if rel_y > 0 && ed.line_height > 0 {
+		row = rel_y / ed.line_height
+	}
+	line_count := document.document_line_count(&ed.doc)
+	target_line := ed.scroll_line + u32(max(i32(0), row))
+	if target_line >= line_count { target_line = line_count - 1 }
+
+	// X → byte column within the line
+	rel_x := i32(x) - ed.padding_x - ed.gutter_width
+	col: i32 = 0
+	if rel_x > 0 && ed.char_width > 0 {
+		// Round to nearest char boundary for natural click feel
+		col = (rel_x + ed.char_width / 2) / ed.char_width
+	}
+	line_start := document.document_line_start(&ed.doc, target_line)
+	line_text := document.document_get_line(&ed.doc, target_line)
+	line_len := i32(len(line_text))
+	if col > line_len { col = line_len }
+	if col < 0 { col = 0 }
+
+	return line_start + u32(col)
+}
+
+@(private="file")
+editor_mouse_down :: proc(ed: ^Editor, x: f32, y: f32, shift: bool) {
+	offset := screen_to_offset(ed, x, y)
+
+	if shift {
+		if !ed.sel_active {
+			ed.sel_anchor = ed.cursor_offset
+			ed.sel_active = true
+		}
+	} else {
+		ed.sel_anchor = offset
+		ed.sel_active = true // empty range; promoted to a real selection on drag
+	}
+	ed.cursor_offset = offset
+	ed.mouse_dragging = true
+	ed.cursor_visible = true
+	ed.cursor_timer = 0
+	sync_cursor_from_offset(ed)
+}
+
+@(private="file")
+editor_mouse_drag :: proc(ed: ^Editor, x: f32, y: f32) {
+	offset := screen_to_offset(ed, x, y)
+	if offset == ed.cursor_offset { return }
+	ed.cursor_offset = offset
+	ed.sel_active = true
+	ed.cursor_visible = true
+	ed.cursor_timer = 0
+	sync_cursor_from_offset(ed)
 }
 
 @(private="file")
@@ -258,9 +380,81 @@ editor_zoom :: proc(ed: ^Editor, direction: f32) {
 
 @(private="file")
 editor_insert_text :: proc(ed: ^Editor, text: string) {
+	delete_selection(ed)
 	document.document_insert(&ed.doc, ed.cursor_offset, text)
 	ed.cursor_offset += u32(len(text))
 	sync_cursor_from_offset(ed)
+}
+
+// --- Selection helpers ---
+
+@(private="file")
+selection_range :: proc(ed: ^Editor) -> (lo: u32, hi: u32, has: bool) {
+	if !ed.sel_active { return 0, 0, false }
+	lo = min(ed.sel_anchor, ed.cursor_offset)
+	hi = max(ed.sel_anchor, ed.cursor_offset)
+	has = lo != hi
+	return
+}
+
+// Delete the active selection (if any) and place cursor at its start.
+// Returns true if a non-empty selection was deleted.
+@(private="file")
+delete_selection :: proc(ed: ^Editor) -> bool {
+	lo, hi, has := selection_range(ed)
+	ed.sel_active = false
+	if !has { return false }
+	document.document_delete(&ed.doc, lo, hi - lo)
+	ed.cursor_offset = lo
+	sync_cursor_from_offset(ed)
+	return true
+}
+
+// Collapse selection to one side without further movement.
+// Returns true if a non-empty selection was collapsed.
+@(private="file")
+collapse_selection :: proc(ed: ^Editor, to_end: bool) -> bool {
+	lo, hi, has := selection_range(ed)
+	ed.sel_active = false
+	if !has { return false }
+	ed.cursor_offset = to_end ? hi : lo
+	sync_cursor_from_offset(ed)
+	return true
+}
+
+// On shift+nav: start (or keep) a selection anchored at the current cursor.
+// On plain nav: clear any existing selection.
+@(private="file")
+update_selection_for_nav :: proc(ed: ^Editor, shift: bool) {
+	if shift {
+		if !ed.sel_active {
+			ed.sel_anchor = ed.cursor_offset
+			ed.sel_active = true
+		}
+	} else {
+		ed.sel_active = false
+	}
+}
+
+// --- Clipboard ---
+
+@(private="file")
+clipboard_copy :: proc(ed: ^Editor) {
+	lo, hi, has := selection_range(ed)
+	if !has { return }
+	text := document.document_get_slice(&ed.doc, lo, hi - lo, context.temp_allocator)
+	cstr := strings.clone_to_cstring(text, context.temp_allocator)
+	_ = sdl3.SetClipboardText(cstr)
+}
+
+@(private="file")
+clipboard_paste :: proc(ed: ^Editor) {
+	raw := sdl3.GetClipboardText()
+	if raw == nil { return }
+	defer sdl3.free(rawptr(raw))
+	text := string(cstring(raw))
+	if len(text) == 0 { return }
+	editor_insert_text(ed, text)
 }
 
 // --- Cursor management ---
@@ -357,6 +551,7 @@ editor_render :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, width: i32, height:
 	line_count := document.document_line_count(&ed.doc)
 	gutter_chars := max(digit_count(line_count), 3)
 	gutter_width := i32(gutter_chars + 1) * ed.char_width
+	ed.gutter_width = gutter_width
 
 	// Draw background
 	sdl3.SetRenderDrawColorFloat(renderer, ed.bg_color.r, ed.bg_color.g, ed.bg_color.b, ed.bg_color.a)
@@ -364,6 +559,8 @@ editor_render :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, width: i32, height:
 
 	// Render visible lines
 	end_line := min(ed.scroll_line + ed.visible_lines, line_count)
+
+	sel_lo, sel_hi, has_sel := selection_range(ed)
 
 	for line_idx := ed.scroll_line; line_idx < end_line; line_idx += 1 {
 		screen_y := ed.padding_y + i32(line_idx - ed.scroll_line) * ed.line_height
@@ -375,6 +572,32 @@ editor_render :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, width: i32, height:
 		// Draw line content
 		line_text := document.document_get_line(&ed.doc, line_idx)
 		text_x := ed.padding_x + gutter_width
+
+		// Draw selection highlight for this line (behind text/cursor)
+		if has_sel {
+			line_byte_start := document.document_line_start(&ed.doc, line_idx)
+			line_byte_end := line_byte_start + u32(len(line_text)) // position of newline (or EOF)
+			if sel_hi > line_byte_start && sel_lo <= line_byte_end {
+				lo_col := i32(sel_lo > line_byte_start ? sel_lo - line_byte_start : 0)
+				hi_col: i32
+				if sel_hi > line_byte_end {
+					// Selection continues past EOL — extend one char to indicate newline included
+					hi_col = i32(len(line_text)) + 1
+				} else {
+					hi_col = i32(sel_hi - line_byte_start)
+				}
+				if hi_col > lo_col {
+					rect := sdl3.FRect{
+						f32(text_x + lo_col * ed.char_width),
+						f32(screen_y),
+						f32((hi_col - lo_col) * ed.char_width),
+						f32(ed.line_height),
+					}
+					sdl3.SetRenderDrawColorFloat(renderer, ed.sel_color.r, ed.sel_color.g, ed.sel_color.b, ed.sel_color.a)
+					sdl3.RenderFillRect(renderer, &rect)
+				}
+			}
+		}
 
 		is_cursor_line := line_idx == ed.cursor_line && ed.cursor_visible
 		cursor_col_byte := int(ed.cursor_col)

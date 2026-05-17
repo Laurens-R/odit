@@ -129,6 +129,12 @@ main :: proc() {
 				editor.editor_handle_event(&ed, &event)
 			case .MOUSE_WHEEL:
 				editor.editor_handle_event(&ed, &event)
+			case .MOUSE_BUTTON_DOWN:
+				editor.editor_handle_event(&ed, &event)
+			case .MOUSE_BUTTON_UP:
+				editor.editor_handle_event(&ed, &event)
+			case .MOUSE_MOTION:
+				editor.editor_handle_event(&ed, &event)
 			}
 		}
 

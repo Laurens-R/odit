@@ -132,10 +132,11 @@ document_delete :: proc(doc: ^Document, offset: u32, length: u32) {
 
 // --- Undo / Redo ---
 
-// Undo the last operation. Returns true if an operation was undone.
-document_undo :: proc(doc: ^Document) -> bool {
+// Undo the last operation. Returns the cursor offset after the undo and whether
+// an operation was undone.
+document_undo :: proc(doc: ^Document) -> (cursor_offset: u32, ok: bool) {
 	if doc.undo_stack.position <= 0 {
-		return false
+		return 0, false
 	}
 
 	doc.undo_stack.position -= 1
@@ -145,19 +146,23 @@ document_undo :: proc(doc: ^Document) -> bool {
 	case .Insert:
 		// Undo an insert = delete the inserted text
 		piecetree_delete(&doc.tree, op.offset, op.length)
+		cursor_offset = op.offset
 	case .Delete:
 		// Undo a delete = re-insert the deleted text
 		piecetree_insert(&doc.tree, op.offset, op.text)
+		cursor_offset = op.offset + op.length
 	}
 
 	doc.dirty = true
-	return true
+	ok = true
+	return
 }
 
-// Redo the last undone operation. Returns true if an operation was redone.
-document_redo :: proc(doc: ^Document) -> bool {
+// Redo the last undone operation. Returns the cursor offset after the redo and
+// whether an operation was redone.
+document_redo :: proc(doc: ^Document) -> (cursor_offset: u32, ok: bool) {
 	if doc.undo_stack.position >= len(doc.undo_stack.ops) {
-		return false
+		return 0, false
 	}
 
 	op := &doc.undo_stack.ops[doc.undo_stack.position]
@@ -167,13 +172,16 @@ document_redo :: proc(doc: ^Document) -> bool {
 	case .Insert:
 		// Redo an insert = insert again
 		piecetree_insert(&doc.tree, op.offset, op.text)
+		cursor_offset = op.offset + op.length
 	case .Delete:
 		// Redo a delete = delete again
 		piecetree_delete(&doc.tree, op.offset, op.length)
+		cursor_offset = op.offset
 	}
 
 	doc.dirty = true
-	return true
+	ok = true
+	return
 }
 
 // --- Document query API (delegates to PieceTree) ---
