@@ -150,6 +150,10 @@
       "kind": "Variable"
     },
     {
+      "pattern": "{NOTHING} {OPTIONAL:static} {OPTIONAL:const} {OPTIONAL:constexpr} {ANY} < ... {ANY} {OPTIONAL:*} {OPTIONAL:&} {NOT:.} {NAME} = ... ;",
+      "kind": "Variable"
+    },
+    {
       "pattern": "{NOTHING} {OPTIONAL:static} {OPTIONAL:const} {ANY} {NAME} ( ... ) ;",
       "kind": "Variable"
     },

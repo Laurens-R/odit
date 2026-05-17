@@ -7,6 +7,7 @@ import "vendor:sdl3/ttf"
 
 import "../document"
 import "../syntax"
+import "../terminal"
 import "../ui"
 
 TAB_WIDTH :: 4
@@ -18,46 +19,46 @@ build_line_display :: proc(line: string, allocator := context.temp_allocator) ->
 
 	cols := make([]int, len(line) + 1, allocator)
 	col := 0
-	i := 0
-	for i < len(line) {
-		c := line[i]
+	current_character_index := 0
+	for current_character_index < len(line) {
+		current_character := line[current_character_index]
 
 		rune_len := 1
-		if c >= 0xC0 {
+		if current_character >= 0xC0 {
 			switch {
-			case c < 0xE0: rune_len = 2
-			case c < 0xF0: rune_len = 3
+			case current_character < 0xE0: rune_len = 2
+			case current_character < 0xF0: rune_len = 3
 			case:          rune_len = 4
 			}
-			if i + rune_len > len(line) { rune_len = len(line) - i }
+			if current_character_index + rune_len > len(line) { rune_len = len(line) - current_character_index }
 		}
 
 		for k in 0..<rune_len {
-			cols[i + k] = col
+			cols[current_character_index + k] = col
 		}
 
 		if rune_len == 1 {
 			switch {
-			case c == '\t':
+			case current_character == '\t':
 				spaces := TAB_WIDTH - (col % TAB_WIDTH)
 				for _ in 0..<spaces { strings.write_byte(&sb, ' ') }
 				col += spaces
-			case c == '\r':
-			case c < 0x20 || c == 0x7F:
+			case current_character == '\r':
+			case current_character < 0x20 || current_character == 0x7F:
 				strings.write_byte(&sb, '?')
 				col += 1
 			case:
-				strings.write_byte(&sb, c)
+				strings.write_byte(&sb, current_character)
 				col += 1
 			}
 		} else {
 			for k in 0..<rune_len {
-				strings.write_byte(&sb, line[i + k])
+				strings.write_byte(&sb, line[current_character_index + k])
 			}
 			col += 1
 		}
 
-		i += rune_len
+		current_character_index += rune_len
 	}
 	cols[len(line)] = col
 	return strings.to_string(sb), cols
@@ -77,11 +78,24 @@ editor_update :: proc(ed: ^Editor, dt: f64) {
 			}
 		}
 	} else {
-		// Per-pane content updates (smooth-scroll for editor panes, etc.).
+		// Per-pane content updates (smooth-scroll for editor panes, byte
+		// drain + cursor blink for terminal panes).
 		for i in 0..<len(ed.panes) {
 			#partial switch &c in ed.panes[i].content {
 			case EditorPane:
 				editor_pane_update(ed, &c, dt)
+			case TerminalPane:
+				if c.term != nil {
+					title_h := editor_title_bar_height(ed)
+					body := sdl3.Rect{
+						ed.panes[i].rect.x,
+						ed.panes[i].rect.y + title_h,
+						ed.panes[i].rect.w,
+						ed.panes[i].rect.h - title_h,
+					}
+					terminal.terminal_set_geometry(c.term, body, ed.char_width, ed.line_height)
+					terminal.terminal_update(c.term, dt)
+				}
 			}
 		}
 	}
@@ -135,15 +149,30 @@ editor_render :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, width: i32, height:
 	sdl3.SetRenderDrawColorFloat(renderer, ed.bg_color.r, ed.bg_color.g, ed.bg_color.b, ed.bg_color.a)
 	sdl3.RenderFillRect(renderer, &sdl3.FRect{0, 0, f32(width), f32(height)})
 
-	// Compute per-pane rectangles.
+	// Compute per-pane rectangles. The divider sits at `split_ratio` of the
+	// total width and is clamped so neither pane can drop below a usable
+	// minimum (~10 character cells, falling back to 80 px if the font hasn't
+	// been measured yet).
 	visible := editor_visible_pane_count(ed)
 	if visible == 1 {
 		ed.panes[0].rect = sdl3.Rect{0, 0, width, text_area_height}
 	} else {
 		divider_w: i32 = 2
-		half := (width - divider_w) / 2
-		ed.panes[0].rect = sdl3.Rect{0, 0, half, text_area_height}
-		ed.panes[1].rect = sdl3.Rect{half + divider_w, 0, width - half - divider_w, text_area_height}
+		usable := width - divider_w
+
+		min_pane: i32 = 80
+		if ed.char_width > 0 { min_pane = ed.char_width * 10 }
+		if min_pane > usable/2 { min_pane = usable / 2 }
+
+		ratio := ed.split_ratio
+		if ratio < 0.05 { ratio = 0.05 }
+		if ratio > 0.95 { ratio = 0.95 }
+		left := i32(f32(usable) * ratio)
+		if left < min_pane              { left = min_pane }
+		if left > usable - min_pane     { left = usable - min_pane }
+
+		ed.panes[0].rect = sdl3.Rect{0,                0, left,                 text_area_height}
+		ed.panes[1].rect = sdl3.Rect{left + divider_w, 0, usable - left,        text_area_height}
 	}
 
 	// Render each visible pane by dispatching on its content type.
@@ -153,6 +182,19 @@ editor_render :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, width: i32, height:
 		#partial switch &c in pane.content {
 		case EditorPane:
 			render_editor_pane(ed, renderer, pane, &c, is_active, i)
+		case TerminalPane:
+			if c.term != nil {
+				title_h := editor_title_bar_height(ed)
+				render_pane_title_strip(ed, renderer, pane.rect.x, pane.rect.y, pane.rect.w, title_h, "Terminal", is_active)
+				body := sdl3.Rect{
+					pane.rect.x,
+					pane.rect.y + title_h,
+					pane.rect.w,
+					pane.rect.h - title_h,
+				}
+				terminal.terminal_set_geometry(c.term, body, ed.char_width, ed.line_height)
+				terminal.terminal_render(c.term, renderer, ed.font, ed.engine)
+			}
 		}
 	}
 
@@ -200,6 +242,9 @@ editor_render :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, width: i32, height:
 	}
 	if ed.show_help {
 		help_render(ed, renderer, width, height)
+	}
+	if ed.show_terminal_close_confirm {
+		terminal_close_confirm_render(ed, renderer, width, height)
 	}
 }
 
@@ -270,20 +315,28 @@ render_editor_pane :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pane, v
 // muted so focus is unambiguous at a glance.
 @(private="file")
 render_pane_title_bar :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, v: ^EditorPane, x, y, w, h: i32, is_active: bool) {
+	name := v.file_path != "" ? filepath_base(v.file_path) : "untitled"
+	dirty := document.document_is_dirty(&v.doc) ? " *" : ""
+	label := fmt.tprintf("%s%s", name, dirty)
+	render_pane_title_strip(ed, renderer, x, y, w, h, label, is_active)
+}
+
+// Generic pane title strip: tinted bar, active-pane accent stripe along the
+// bottom, label on the left. Shared by editor panes (filename + dirty flag)
+// and terminal panes (static "Terminal" label) so the visual treatment stays
+// consistent.
+@(private)
+render_pane_title_strip :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, x, y, w, h: i32, label: string, is_active: bool) {
 	bar := sdl3.FRect{f32(x), f32(y), f32(w), f32(h)}
 	sdl3.SetRenderDrawColorFloat(renderer, ed.status_bg.r, ed.status_bg.g, ed.status_bg.b, ed.status_bg.a)
 	sdl3.RenderFillRect(renderer, &bar)
 
-	// Active-pane accent stripe along the bottom of the title bar.
 	if is_active {
 		stripe := sdl3.FRect{f32(x), f32(y + h - 1), f32(w), 1}
 		sdl3.SetRenderDrawColorFloat(renderer, ed.cursor_color.r, ed.cursor_color.g, ed.cursor_color.b, 1.0)
 		sdl3.RenderFillRect(renderer, &stripe)
 	}
 
-	name := v.file_path != "" ? filepath_base(v.file_path) : "untitled"
-	dirty := document.document_is_dirty(&v.doc) ? " *" : ""
-	label := fmt.tprintf("%s%s", name, dirty)
 	text_color := is_active ? ed.status_fg : ed.line_num_color
 	render_string(ed, renderer, label, x + ed.padding_x, y + 3, text_color)
 }

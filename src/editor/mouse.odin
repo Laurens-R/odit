@@ -1,6 +1,29 @@
 package editor
 
+import "vendor:sdl3"
+
 import "../document"
+
+// Set the OS cursor to `c` if it's not already the active one. Centralised so
+// hover, drag, and release paths don't fight each other over the cursor.
+@(private="file")
+set_cursor :: proc(ed: ^Editor, c: ^sdl3.Cursor) {
+	if c == nil || ed.current_cursor == c { return }
+	_ = sdl3.SetCursor(c)
+	ed.current_cursor = c
+}
+
+// Pick a cursor shape based on what (x,y) is over right now plus the active
+// drag state. EW-resize on the divider hot-zone or whenever a divider drag is
+// in progress; default arrow otherwise.
+@(private)
+editor_update_cursor :: proc(ed: ^Editor, x, y: f32) {
+	if ed.divider_dragging || divider_hit_test(ed, x, y) {
+		set_cursor(ed, ed.cursor_resize_ew)
+	} else {
+		set_cursor(ed, ed.cursor_default)
+	}
+}
 
 // Scroll the active pane (if it's an editor pane) by `delta_lines`. In diff
 // mode the shared diff-state scroll is moved instead so both panes stay in
@@ -19,59 +42,102 @@ editor_scroll :: proc(ed: ^Editor, delta_lines: i32) {
 		return
 	}
 
-	v := editor_active_editor_pane(ed); if v == nil { return }
-	line_count := i32(document.document_line_count(&v.doc))
-	visible := i32(v.visible_lines)
+	active_editor_pane := editor_active_editor_pane(ed); if active_editor_pane == nil { return }
+	line_count := i32(document.document_line_count(&active_editor_pane.doc))
+	visible := i32(active_editor_pane.visible_lines)
 	if visible == 0 { visible = 1 }
 	max_scroll_lines := max(i32(0), line_count - visible)
 	max_scroll_y := f32(max_scroll_lines * ed.line_height)
-	new_target := v.scroll_y_target + f32(delta_lines * ed.line_height)
-	v.scroll_y_target = clamp(new_target, 0, max_scroll_y)
+	new_target := active_editor_pane.scroll_y_target + f32(delta_lines * ed.line_height)
+	active_editor_pane.scroll_y_target = clamp(new_target, 0, max_scroll_y)
 }
 
 @(private)
-editor_mouse_down :: proc(ed: ^Editor, x: f32, y: f32, shift: bool) {
-	hit := editor_pane_at(ed, x, y)
-	if hit < 0 { return }
-	ed.active = hit
+editor_mouse_down :: proc(editor: ^Editor, x: f32, y: f32, shift: bool) {
+	// Grab the divider first when both panes are showing — the hit zone is
+	// generous (a few pixels either side of the 2-px line) because the line
+	// itself is hard to hit precisely.
+	if divider_hit_test(editor, x, y) {
+		editor.divider_dragging = true
+		return
+	}
 
-	pane := &ed.panes[hit]
+	hit := editor_pane_at(editor, x, y)
+	if hit < 0 { return }
+	editor.active = hit
+
+	pane := &editor.panes[hit]
 	#partial switch &c in pane.content {
 	case EditorPane:
-		editor_pane_mouse_down(ed, pane, &c, x, y, shift)
+		editor_pane_mouse_down(editor, pane, &c, x, y, shift)
 	}
+}
+
+// True when (x,y) is inside the resize-handle zone around the divider. The
+// physical divider is 2 px wide; we accept ±4 px on either side so the user
+// can actually grab it. Only applicable when a split is currently active.
+@(private="file")
+divider_hit_test :: proc(ed: ^Editor, x, y: f32) -> bool {
+	if !ed.split_active                    { return false }
+	if editor_visible_pane_count(ed) != 2  { return false }
+	// Divider runs vertically between the two pane rects.
+	left_rect  := ed.panes[0].rect
+	right_rect := ed.panes[1].rect
+	divider_x := f32(left_rect.x + left_rect.w)
+	divider_w := f32(right_rect.x) - divider_x
+	if divider_w <= 0 { return false }
+	pad: f32 = 4
+	return x >= divider_x - pad && x < divider_x + divider_w + pad &&
+	       y >= f32(left_rect.y) && y < f32(left_rect.y + left_rect.h)
 }
 
 @(private="file")
-editor_pane_mouse_down :: proc(ed: ^Editor, pane: ^Pane, v: ^EditorPane, x: f32, y: f32, shift: bool) {
-	offset := screen_to_offset(ed, pane, v, x, y)
+editor_pane_mouse_down :: proc(editor: ^Editor, pane: ^Pane, editor_pane: ^EditorPane, x: f32, y: f32, shift: bool) {
+	offset := screen_to_offset(editor, pane, editor_pane, x, y)
 
 	if shift {
-		if !v.sel_active {
-			v.sel_anchor = v.cursor_offset
-			v.sel_active = true
+		if !editor_pane.sel_active {
+			editor_pane.sel_anchor = editor_pane.cursor_offset
+			editor_pane.sel_active = true
 		}
 	} else {
-		v.sel_anchor = offset
-		v.sel_active = true
+		editor_pane.sel_anchor = offset
+		editor_pane.sel_active = true
 	}
-	v.cursor_offset = offset
-	v.mouse_dragging = true
-	ed.cursor_visible = true
-	ed.cursor_timer = 0
-	sync_cursor_from_offset(ed)
+	editor_pane.cursor_offset = offset
+	editor_pane.mouse_dragging = true
+	editor.cursor_visible = true
+	editor.cursor_timer = 0
+	sync_cursor_from_offset(editor)
 }
 
 @(private)
-editor_mouse_drag :: proc(ed: ^Editor, x: f32, y: f32) {
+editor_mouse_drag :: proc(editor: ^Editor, x: f32, y: f32) {
+	// Divider drag takes priority — once it's grabbed, the cursor owns the
+	// split position until release. Update `split_ratio` from the current
+	// mouse x; render's clamp keeps both panes above the usable minimum.
+	if editor.divider_dragging {
+		total_w := editor.panes[0].rect.w + editor.panes[1].rect.w
+		// The divider itself is 2 px; account for it so the math matches
+		// what `editor_render` uses to lay out the panes.
+		divider_w: i32 = 2
+		usable := total_w + divider_w
+		if usable <= 0 { return }
+		ratio := x / f32(usable)
+		if ratio < 0.05 { ratio = 0.05 }
+		if ratio > 0.95 { ratio = 0.95 }
+		editor.split_ratio = ratio
+		return
+	}
+
 	// Drag stays locked to the pane that started the drag.
-	for i in 0..<editor_visible_pane_count(ed) {
-		pane := &ed.panes[i]
+	for i in 0..<editor_visible_pane_count(editor) {
+		pane := &editor.panes[i]
 		#partial switch &c in pane.content {
 		case EditorPane:
 			if c.mouse_dragging {
-				ed.active = i
-				editor_pane_mouse_drag(ed, pane, &c, x, y)
+				editor.active = i
+				editor_pane_mouse_drag(editor, pane, &c, x, y)
 				return
 			}
 		}
@@ -90,13 +156,17 @@ editor_pane_mouse_drag :: proc(ed: ^Editor, pane: ^Pane, v: ^EditorPane, x: f32,
 }
 
 @(private)
-editor_mouse_up :: proc(ed: ^Editor) {
+editor_mouse_up :: proc(ed: ^Editor, x, y: f32) {
+	ed.divider_dragging = false
 	for i in 0..<len(ed.panes) {
 		#partial switch &c in ed.panes[i].content {
 		case EditorPane:
 			c.mouse_dragging = false
 		}
 	}
+	// Update cursor based on the release position so it snaps back to the
+	// default arrow if the user has moved off the divider while dragging.
+	editor_update_cursor(ed, x, y)
 }
 
 @(private="file")

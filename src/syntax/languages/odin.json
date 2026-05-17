@@ -93,7 +93,7 @@
   ],
   "symbol_patterns": [
     {
-      "pattern": "{NOTHING} {NAME} :: {...} proc",
+      "pattern": "{NOTHING} {NAME} :: ... proc ( ... )",
       "kind": "Function"
     },
     {

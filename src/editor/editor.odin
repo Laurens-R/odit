@@ -6,6 +6,7 @@ import "vendor:sdl3/ttf"
 
 import "../document"
 import "../syntax"
+import "../terminal"
 
 // --- Pane types -----------------------------------------------------------
 //
@@ -53,17 +54,37 @@ EditorPane :: struct {
 	last_analysis_time:   f64,
 }
 
+// A pane that hosts an embedded terminal emulator instead of a document.
+// The terminal owns a child shell process, a read thread, and a cell-grid
+// screen — see the `terminal` package. We store a pointer rather than the
+// terminal by value so the union variant stays a single word and the
+// terminal's internal pointers (mutex, thread handle) are address-stable.
+TerminalPane :: struct {
+	term: ^terminal.Terminal,
+}
+
 // Tagged union of all pane content kinds. Add variants here as new pane types
 // are introduced.
 PaneContent :: union {
 	EditorPane,
+	TerminalPane,
 }
 
 // A pane is a generic container that owns a screen rectangle and one piece of
 // content. The renderer/input dispatcher type-switches on `content`.
+//
+// `saved_content` is a stash slot. When F9 turns a pane into a terminal we
+// move the previous content (typically an EditorPane) into `saved_content`
+// so the original document is preserved untouched while the terminal runs.
+// `saved_split_active` remembers `Editor.split_active` at the same moment so
+// F9-close can put the editor back into single- vs split-pane mode exactly
+// the way the user left it.
 Pane :: struct {
-	rect:    sdl3.Rect, // pixel rectangle this pane was last drawn into
-	content: PaneContent,
+	rect:                sdl3.Rect,
+	content:             PaneContent,
+	saved_content:       PaneContent, // zero-value when nothing stashed
+	saved_split_active:  bool,
+	has_saved:           bool,
 }
 
 // Top-level editor state. Shared resources (font, modals, palette) live here;
@@ -74,6 +95,21 @@ Editor :: struct {
 	panes:           [2]Pane,
 	active:          int,  // 0 or 1
 	split_active:    bool, // when false, only panes[0] is rendered (full width)
+
+	// Split divider position when `split_active`. Stored as a fraction of
+	// the full window width (left pane share), so the layout adapts to
+	// window resizes for free. Initialized in `editor_init`; updated by the
+	// drag handler in `mouse.odin`.
+	split_ratio:      f32,
+	divider_dragging: bool,
+
+	// System cursors cached at startup so we can swap shapes on hover /
+	// drag of the pane divider without paying the per-frame cost of
+	// CreateSystemCursor. `current_cursor` lets us avoid redundant
+	// SetCursor calls each frame.
+	cursor_default:   ^sdl3.Cursor,
+	cursor_resize_ew: ^sdl3.Cursor,
+	current_cursor:   ^sdl3.Cursor,
 
 	// Rendering (shared between panes)
 	font:            ^ttf.Font,
@@ -136,6 +172,12 @@ Editor :: struct {
 	// Symbol-jump (F6) dialog state
 	show_symbols:   bool,
 	symbols_dialog: SymbolsDialog,
+
+	// Confirm-close dialog for the embedded terminal (F9). When the user
+	// hits F9 while a terminal is running we show this modal instead of
+	// killing the shell immediately.
+	show_terminal_close_confirm: bool,
+	terminal_close_confirm:      TerminalCloseConfirm,
 }
 
 CURSOR_BLINK_RATE :: 0.53 // seconds
@@ -156,6 +198,16 @@ editor_init :: proc(ed: ^Editor, engine: ^ttf.TextEngine, font: ^ttf.Font, font_
 	}
 	ed.active = 0
 	ed.split_active = false
+	ed.split_ratio  = 0.5 // default 50/50 when the split is opened
+
+	// Cache the two cursors we ever swap between. `EW_RESIZE` is the
+	// closest system cursor to a "grab the column divider" indicator; SDL3
+	// doesn't expose a dedicated grab/grabbing shape, and on Windows it
+	// renders as the familiar double-headed left/right arrow.
+	ed.cursor_default   = sdl3.CreateSystemCursor(.DEFAULT)
+	ed.cursor_resize_ew = sdl3.CreateSystemCursor(.EW_RESIZE)
+	ed.current_cursor   = ed.cursor_default
+	if ed.cursor_default != nil { _ = sdl3.SetCursor(ed.cursor_default) }
 
 	ed.font = font
 	ed.engine = engine
@@ -210,12 +262,26 @@ editor_destroy :: proc(ed: ^Editor) {
 	diff_state_destroy(&ed.diff_state)
 	symbols_dialog_destroy(&ed.symbols_dialog)
 	syntax.destroy()
+	if ed.cursor_default   != nil { sdl3.DestroyCursor(ed.cursor_default)   }
+	if ed.cursor_resize_ew != nil { sdl3.DestroyCursor(ed.cursor_resize_ew) }
 }
 
 // Per-content cleanup. Add cases here as new content types are introduced.
 @(private)
 pane_destroy :: proc(p: ^Pane) {
-	#partial switch &c in p.content {
+	pane_content_destroy(&p.content)
+	if p.has_saved {
+		pane_content_destroy(&p.saved_content)
+		p.has_saved = false
+	}
+}
+
+// Tear down a single PaneContent without touching the surrounding Pane.
+// Factored so the terminal stash/restore dance can release whatever the
+// pane's previous content held.
+@(private)
+pane_content_destroy :: proc(content: ^PaneContent) {
+	#partial switch &c in content {
 	case EditorPane:
 		document.document_destroy(&c.doc)
 		if len(c.file_path) > 0 {
@@ -225,6 +291,11 @@ pane_destroy :: proc(p: ^Pane) {
 		for s in c.symbols { delete(s.name) }
 		delete(c.symbols)
 		delete(c.symbol_names)
+	case TerminalPane:
+		if c.term != nil {
+			terminal.terminal_destroy(c.term)
+			c.term = nil
+		}
 	}
 }
 
@@ -284,6 +355,102 @@ editor_focus_other_pane :: proc(ed: ^Editor) {
 	ed.cursor_timer = 0
 }
 
+// --- Terminal pane toggle (F9) --------------------------------------------
+
+// Open the embedded terminal in the right pane. If a document is already
+// there it gets stashed (untouched) and restored on the next toggle. If a
+// terminal is already running this is a no-op so a stray F9 press doesn't
+// kill a working shell.
+@(private)
+editor_open_terminal :: proc(ed: ^Editor) {
+	pane_idx := 1
+	pane := &ed.panes[pane_idx]
+
+	// Already a terminal — nothing to do.
+	if _, ok := pane.content.(TerminalPane); ok { return }
+
+	rect := pane.rect
+	if rect.w == 0 || rect.h == 0 {
+		// Pane hasn't been laid out yet; conjure something reasonable so
+		// the shell gets a sane initial size and the renderer adjusts on
+		// the next frame.
+		rect = sdl3.Rect{ x = 0, y = 0, w = 720, h = 480 }
+	}
+	cw := ed.char_width;  if cw <= 0 { cw = 8 }
+	lh := ed.line_height; if lh <= 0 { lh = 16 }
+
+	rows := max(i32(4),  (rect.h - editor_title_bar_height(ed)) / lh)
+	cols := max(i32(10), rect.w / cw)
+
+	// Match the terminal's default colors to the editor palette so plain
+	// shell output blends with the surrounding UI instead of sitting on a
+	// black slab.
+	fg := terminal.Color{ ed.fg_color.r, ed.fg_color.g, ed.fg_color.b, ed.fg_color.a }
+	bg := terminal.Color{ ed.bg_color.r, ed.bg_color.g, ed.bg_color.b, ed.bg_color.a }
+
+	term := terminal.terminal_new(rows, cols, fg, bg)
+	if term == nil { return }
+
+	// Stash both the previous content AND the previous split state so
+	// closing the terminal puts the editor back exactly as it was — single
+	// pane if it started single, split with the original right-side doc if
+	// it started split. Drop any prior stash defensively.
+	if pane.has_saved {
+		pane_content_destroy(&pane.saved_content)
+		pane.has_saved = false
+	}
+	pane.saved_content      = pane.content
+	pane.saved_split_active = ed.split_active
+	pane.has_saved          = true
+
+	pane.content       = TerminalPane{ term = term }
+	ed.split_active    = true
+	ed.active          = pane_idx
+}
+
+// F9-again: shut the terminal down and restore both the document that was
+// stashed when it opened AND the split state that was in effect then.
+@(private)
+editor_close_terminal :: proc(ed: ^Editor) {
+	pane_idx := 1
+	pane := &ed.panes[pane_idx]
+
+	tp, ok := &pane.content.(TerminalPane)
+	if !ok { return }
+
+	if tp.term != nil {
+		terminal.terminal_destroy(tp.term)
+		tp.term = nil
+	}
+
+	if pane.has_saved {
+		pane.content            = pane.saved_content
+		ed.split_active         = pane.saved_split_active
+		pane.saved_content      = PaneContent{}
+		pane.saved_split_active = false
+		pane.has_saved          = false
+	} else {
+		// No stash recorded — defensively reset to single-pane mode.
+		pane.content    = PaneContent{}
+		ed.split_active = false
+	}
+
+	// If we ended up single-pane, focus has to be on pane 0.
+	if !ed.split_active { ed.active = 0 }
+}
+
+// Single entry point bound to F9. Opening a fresh terminal is fire-and-
+// forget; closing one prompts with a Yes/No dialog so an accidental press
+// doesn't nuke a running shell.
+@(private)
+editor_toggle_terminal :: proc(ed: ^Editor) {
+	if _, ok := ed.panes[1].content.(TerminalPane); ok {
+		terminal_close_confirm_open(ed)
+	} else {
+		editor_open_terminal(ed)
+	}
+}
+
 // --- Public open-string entry points --------------------------------------
 
 editor_open_string :: proc(ed: ^Editor, content: string) {
@@ -323,5 +490,5 @@ editor_open_string_in_pane :: proc(ed: ^Editor, pane_idx: int, content: string, 
 
 // True when a modal dialog (help, browse, future popups) currently owns input.
 editor_is_modal_open :: proc(ed: ^Editor) -> bool {
-	return ed.show_help || ed.show_browse || ed.show_symbols
+	return ed.show_help || ed.show_browse || ed.show_symbols || ed.show_terminal_close_confirm
 }

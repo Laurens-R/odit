@@ -4,6 +4,7 @@ import "vendor:sdl3"
 import "vendor:sdl3/ttf"
 
 import "../document"
+import "../terminal"
 
 editor_handle_event :: proc(ed: ^Editor, event: ^sdl3.Event) {
 	// Stamp the "last keystroke" clock on any key activity so the
@@ -51,6 +52,10 @@ editor_handle_event :: proc(ed: ^Editor, event: ^sdl3.Event) {
 		symbols_dialog_handle_event(ed, event)
 		return
 	}
+	if ed.show_terminal_close_confirm {
+		terminal_close_confirm_handle_event(ed, event)
+		return
+	}
 
 	#partial switch event.type {
 	case .TEXT_INPUT:
@@ -61,6 +66,10 @@ editor_handle_event :: proc(ed: ^Editor, event: ^sdl3.Event) {
 			input_text := string(event.text.text)
 			if len(input_text) > 0 {
 				editor_insert_text(ed, input_text)
+			}
+		case TerminalPane:
+			if c.term != nil {
+				terminal.terminal_handle_event(c.term, event)
 			}
 		}
 
@@ -86,6 +95,10 @@ editor_handle_event :: proc(ed: ^Editor, event: ^sdl3.Event) {
 			diff_toggle(ed)
 			return
 		}
+		if key == sdl3.K_F9 {
+			editor_toggle_terminal(ed)
+			return
+		}
 		if ctrl && key == sdl3.K_TAB {
 			editor_focus_other_pane(ed)
 			return
@@ -95,6 +108,10 @@ editor_handle_event :: proc(ed: ^Editor, event: ^sdl3.Event) {
 		#partial switch &c in editor_active_pane(ed).content {
 		case EditorPane:
 			editor_handle_key(ed, event)
+		case TerminalPane:
+			if c.term != nil {
+				terminal.terminal_handle_event(c.term, event)
+			}
 		}
 
 	case .MOUSE_WHEEL:
@@ -122,10 +139,11 @@ editor_handle_event :: proc(ed: ^Editor, event: ^sdl3.Event) {
 
 	case .MOUSE_BUTTON_UP:
 		if event.button.button == sdl3.BUTTON_LEFT {
-			editor_mouse_up(ed)
+			editor_mouse_up(ed, event.button.x, event.button.y)
 		}
 
 	case .MOUSE_MOTION:
+		editor_update_cursor(ed, event.motion.x, event.motion.y)
 		editor_mouse_drag(ed, event.motion.x, event.motion.y)
 	}
 }
