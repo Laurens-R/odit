@@ -8,6 +8,7 @@ editor_insert_text :: proc(ed: ^Editor, text: string) {
 	delete_selection(ed)
 	document.document_insert(&v.doc, v.cursor_offset, text)
 	v.cursor_offset += u32(len(text))
+	v.symbols_dirty = true
 	sync_cursor_from_offset(ed)
 }
 
@@ -35,6 +36,7 @@ editor_outdent_line :: proc(ed: ^Editor) {
 	if remove_count == 0 { return }
 
 	document.document_delete(&v.doc, line_start, remove_count)
+	v.symbols_dirty = true
 
 	if v.cursor_offset >= line_start + remove_count {
 		v.cursor_offset -= remove_count

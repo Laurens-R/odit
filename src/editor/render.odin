@@ -64,6 +64,8 @@ build_line_display :: proc(line: string, allocator := context.temp_allocator) ->
 }
 
 editor_update :: proc(ed: ^Editor, dt: f64) {
+	ed.clock += dt
+
 	if ed.diff_state.active {
 		// Animate the shared diff scroll.
 		if ed.diff_state.scroll_y != ed.diff_state.scroll_y_target {
@@ -88,6 +90,26 @@ editor_update :: proc(ed: ^Editor, dt: f64) {
 	if ed.cursor_timer >= CURSOR_BLINK_RATE {
 		ed.cursor_timer -= CURSOR_BLINK_RATE
 		ed.cursor_visible = !ed.cursor_visible
+	}
+
+	// Auto-reanalyze symbols once the user has paused. All three gates must
+	// hold: the pane's doc has been mutated, at least 2 s have passed since
+	// its last rebuild, and at least 1 s has passed since the most recent
+	// keystroke anywhere in the editor. F6 is skipped — opening it already
+	// forces a fresh rebuild, and rebuilding while its filtered_idx slice
+	// is live would invalidate the dialog's indices.
+	if !ed.show_symbols {
+		for i in 0..<len(ed.panes) {
+			#partial switch &c in ed.panes[i].content {
+			case EditorPane:
+				if !c.symbols_dirty                                { continue }
+				if ed.clock - c.last_analysis_time   < 2.0         { continue }
+				if ed.clock - ed.last_keystroke_time < 1.0         { continue }
+				pane_rebuild_symbols(&c)
+				c.symbols_dirty      = false
+				c.last_analysis_time = ed.clock
+			}
+		}
 	}
 }
 
@@ -172,6 +194,9 @@ editor_render :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, width: i32, height:
 	// Modal overlays render on top of everything else.
 	if ed.show_browse {
 		browse_render(ed, renderer, width, height)
+	}
+	if ed.show_symbols {
+		symbols_dialog_render(ed, renderer, width, height)
 	}
 	if ed.show_help {
 		help_render(ed, renderer, width, height)
@@ -401,7 +426,7 @@ render_doc_line_into :: proc(
 	}
 
 	if len(display) > 0 {
-		render_line_with_syntax(ed, renderer, v.language, display, text_x, screen_y)
+		render_line_with_syntax(ed, renderer, v, display, text_x, screen_y)
 	}
 
 	if is_active && cursor_on_this_line && ed.cursor_visible {
@@ -439,15 +464,15 @@ render_doc_line_into :: proc(
 // chars → '?'). When language is nil, we render in a single pass with the
 // default foreground.
 @(private="file")
-render_line_with_syntax :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, language: ^syntax.Definition, display: string, text_x, screen_y: i32) {
-	if language == nil {
+render_line_with_syntax :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, v: ^EditorPane, display: string, text_x, screen_y: i32) {
+	if v.language == nil {
 		render_string(ed, renderer, display, text_x, screen_y, ed.fg_color)
 		return
 	}
 
 	// Per-frame token buffer in the temp arena.
 	tokens := make([dynamic]syntax.Token, 0, 16, context.temp_allocator)
-	syntax.tokenize_line(language, display, &tokens)
+	syntax.tokenize_line(v.language, display, &tokens, v.symbol_names)
 
 	for tok in tokens {
 		if tok.end <= tok.start { continue }
@@ -467,6 +492,7 @@ syntax_color_for :: proc(ed: ^Editor, kind: syntax.TokenKind) -> sdl3.FColor {
 	case .Number:       return ed.syntax_number_fg
 	case .Comment:      return ed.syntax_comment_fg
 	case .Preprocessor: return ed.syntax_preprocessor_fg
+	case .Symbol:       return ed.syntax_symbol_fg
 	case .Punctuation:  return ed.fg_color
 	case .Default:      return ed.fg_color
 	}

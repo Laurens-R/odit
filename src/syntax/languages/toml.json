@@ -1,17 +1,17 @@
 {
-  "name": "JSON",
+  "name": "TOML",
   "extensions": [
-    "json",
-    "jsonc"
+    "toml"
   ],
-  "line_comment": "",
+  "line_comment": "#",
   "block_comment_start": "",
   "block_comment_end": "",
   "preprocessor_prefix": "",
   "keywords": [
     "true",
     "false",
-    "null"
+    "inf",
+    "nan"
   ],
   "types": []
 }

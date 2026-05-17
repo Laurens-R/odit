@@ -1,26 +1,160 @@
 {
   "name": "TypeScript",
-  "extensions": ["ts", "tsx", "mts", "cts"],
+  "extensions": [
+    "ts",
+    "tsx",
+    "mts",
+    "cts"
+  ],
   "line_comment": "//",
   "block_comment_start": "/*",
   "block_comment_end": "*/",
   "preprocessor_prefix": "",
   "keywords": [
-    "var", "let", "const", "function", "return",
-    "if", "else", "for", "while", "do", "switch", "case", "default", "break", "continue",
-    "in", "of", "typeof", "instanceof", "keyof", "infer", "is", "delete", "void",
-    "new", "this", "super", "class", "extends", "implements", "interface", "type", "enum", "namespace", "module",
-    "throw", "try", "catch", "finally",
-    "async", "await", "yield",
-    "import", "export", "from", "as", "default",
-    "static", "readonly", "public", "private", "protected", "abstract", "override",
-    "get", "set", "declare", "satisfies"
+    "var",
+    "let",
+    "const",
+    "function",
+    "return",
+    "if",
+    "else",
+    "for",
+    "while",
+    "do",
+    "switch",
+    "case",
+    "default",
+    "break",
+    "continue",
+    "in",
+    "of",
+    "typeof",
+    "instanceof",
+    "keyof",
+    "infer",
+    "is",
+    "delete",
+    "void",
+    "new",
+    "this",
+    "super",
+    "class",
+    "extends",
+    "implements",
+    "interface",
+    "type",
+    "enum",
+    "namespace",
+    "module",
+    "throw",
+    "try",
+    "catch",
+    "finally",
+    "async",
+    "await",
+    "yield",
+    "import",
+    "export",
+    "from",
+    "as",
+    "default",
+    "static",
+    "readonly",
+    "public",
+    "private",
+    "protected",
+    "abstract",
+    "override",
+    "get",
+    "set",
+    "declare",
+    "satisfies"
   ],
   "types": [
-    "true", "false", "null", "undefined",
-    "any", "unknown", "never", "void", "object",
-    "number", "string", "boolean", "bigint", "symbol",
-    "Array", "Object", "String", "Number", "Boolean", "Date", "RegExp", "Map", "Set", "Promise",
-    "Symbol", "BigInt", "Error", "Function", "Math", "JSON", "Record", "Partial", "Readonly", "Pick", "Omit"
+    "true",
+    "false",
+    "null",
+    "undefined",
+    "any",
+    "unknown",
+    "never",
+    "void",
+    "object",
+    "number",
+    "string",
+    "boolean",
+    "bigint",
+    "symbol",
+    "Array",
+    "Object",
+    "String",
+    "Number",
+    "Boolean",
+    "Date",
+    "RegExp",
+    "Map",
+    "Set",
+    "Promise",
+    "Symbol",
+    "BigInt",
+    "Error",
+    "Function",
+    "Math",
+    "JSON",
+    "Record",
+    "Partial",
+    "Readonly",
+    "Pick",
+    "Omit"
+  ],
+  "symbol_patterns": [
+    {
+      "pattern": "function NAME",
+      "kind": "Function"
+    },
+    {
+      "pattern": "async function NAME",
+      "kind": "Function"
+    },
+    {
+      "pattern": "class NAME",
+      "kind": "Type"
+    },
+    {
+      "pattern": "interface NAME",
+      "kind": "Type"
+    },
+    {
+      "pattern": "type NAME =",
+      "kind": "Type"
+    },
+    {
+      "pattern": "enum NAME",
+      "kind": "Type"
+    },
+    {
+      "pattern": "namespace NAME",
+      "kind": "Module"
+    },
+    {
+      "pattern": "const NAME =",
+      "kind": "Variable"
+    },
+    {
+      "pattern": "const NAME :",
+      "kind": "Variable"
+    },
+    {
+      "pattern": "let NAME =",
+      "kind": "Variable"
+    },
+    {
+      "pattern": "let NAME :",
+      "kind": "Variable"
+    },
+    {
+      "pattern": "var NAME =",
+      "kind": "Variable"
+    }
   ]
 }

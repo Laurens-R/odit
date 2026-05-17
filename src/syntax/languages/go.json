@@ -1,0 +1,75 @@
+{
+  "name": "Go",
+  "extensions": [
+    "go"
+  ],
+  "line_comment": "//",
+  "block_comment_start": "/*",
+  "block_comment_end": "*/",
+  "preprocessor_prefix": "",
+  "keywords": [
+    "package",
+    "import",
+    "func",
+    "return",
+    "var",
+    "const",
+    "type",
+    "struct",
+    "interface",
+    "map",
+    "chan",
+    "go",
+    "defer",
+    "select",
+    "if",
+    "else",
+    "for",
+    "range",
+    "switch",
+    "case",
+    "default",
+    "break",
+    "continue",
+    "fallthrough",
+    "goto"
+  ],
+  "types": [
+    "bool",
+    "byte",
+    "rune",
+    "string",
+    "error",
+    "int",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "uint",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "uintptr",
+    "float32",
+    "float64",
+    "complex64",
+    "complex128",
+    "any",
+    "comparable",
+    "true",
+    "false",
+    "nil",
+    "iota"
+  ],
+  "symbol_patterns": [
+    {
+      "pattern": "func NAME",
+      "kind": "Function"
+    },
+    {
+      "pattern": "type NAME",
+      "kind": "Type"
+    }
+  ]
+}

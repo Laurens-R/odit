@@ -6,6 +6,15 @@ import "vendor:sdl3/ttf"
 import "../document"
 
 editor_handle_event :: proc(ed: ^Editor, event: ^sdl3.Event) {
+	// Stamp the "last keystroke" clock on any key activity so the
+	// symbol-reanalyze gate in editor_update can debounce around active
+	// typing. We do this before any modal-dialog dispatch so that pressing
+	// keys inside the browse / help / symbols dialogs also resets the timer.
+	#partial switch event.type {
+	case .KEY_DOWN, .KEY_UP, .TEXT_INPUT:
+		ed.last_keystroke_time = ed.clock
+	}
+
 	// Modal dialogs intercept input.
 	if ed.show_help {
 		#partial switch event.type {
@@ -38,6 +47,10 @@ editor_handle_event :: proc(ed: ^Editor, event: ^sdl3.Event) {
 		browse_handle_event(ed, event)
 		return
 	}
+	if ed.show_symbols {
+		symbols_dialog_handle_event(ed, event)
+		return
+	}
 
 	#partial switch event.type {
 	case .TEXT_INPUT:
@@ -63,6 +76,10 @@ editor_handle_event :: proc(ed: ^Editor, event: ^sdl3.Event) {
 		}
 		if key == sdl3.K_F2 {
 			browse_open(ed)
+			return
+		}
+		if key == sdl3.K_F6 {
+			symbols_dialog_open(ed)
 			return
 		}
 		if key == sdl3.K_F8 {
@@ -187,6 +204,7 @@ editor_handle_key :: proc(ed: ^Editor, event: ^sdl3.Event) {
 			del_len := prev_char_len(ed)
 			document.document_delete(&v.doc, v.cursor_offset - del_len, del_len)
 			v.cursor_offset -= del_len
+			v.symbols_dirty = true
 			sync_cursor_from_offset(ed)
 		}
 
@@ -197,6 +215,7 @@ editor_handle_key :: proc(ed: ^Editor, event: ^sdl3.Event) {
 		if v.cursor_offset < doc_len {
 			del_len := next_char_len(ed)
 			document.document_delete(&v.doc, v.cursor_offset, del_len)
+			v.symbols_dirty = true
 			sync_cursor_from_offset(ed)
 		}
 

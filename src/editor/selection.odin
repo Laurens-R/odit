@@ -28,6 +28,7 @@ delete_selection :: proc(ed: ^Editor) -> bool {
 	v.sel_active = false
 	if !has { return false }
 	document.document_delete(&v.doc, lo, hi - lo)
+	v.symbols_dirty = true
 	v.cursor_offset = lo
 	sync_cursor_from_offset(ed)
 	return true

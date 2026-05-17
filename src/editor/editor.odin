@@ -24,6 +24,8 @@ EditorPane :: struct {
 	doc:             document.Document,
 	file_path:       string, // owned absolute path; "" for an untitled doc
 	language:        ^syntax.Definition, // nil → plain text rendering
+	symbols:         [dynamic]syntax.Symbol,           // declarations found in this doc (owned names)
+	symbol_names:    map[string]syntax.SymbolKind,     // set view of `symbols` for fast highlighter lookup
 
 	// Cursor position (in document coordinates)
 	cursor_line:     u32,
@@ -42,6 +44,13 @@ EditorPane :: struct {
 	mouse_dragging:  bool, // left mouse button held; motion extends selection
 
 	gutter_width:    i32, // line-number gutter width in pixels (set during render)
+
+	// Symbol re-analysis bookkeeping. `symbols_dirty` flips true whenever the
+	// pane's document is mutated; `last_analysis_time` is `ed.clock` at the
+	// last rebuild. Together with `Editor.last_keystroke_time` they gate the
+	// auto-reanalyze pass in `editor_update`.
+	symbols_dirty:        bool,
+	last_analysis_time:   f64,
 }
 
 // Tagged union of all pane content kinds. Add variants here as new pane types
@@ -78,6 +87,11 @@ Editor :: struct {
 	// Blink (shared rhythm; cursor only drawn in the active pane's editor)
 	cursor_visible:  bool,
 	cursor_timer:    f64,
+
+	// Monotonic clock (seconds) accumulated from `editor_update`'s dt. Used
+	// as the time base for auto-reanalysis debouncing.
+	clock:                f64,
+	last_keystroke_time:  f64,
 
 	// Modal UI
 	show_help:       bool,
@@ -117,6 +131,11 @@ Editor :: struct {
 	syntax_number_fg:       sdl3.FColor,
 	syntax_comment_fg:      sdl3.FColor,
 	syntax_preprocessor_fg: sdl3.FColor,
+	syntax_symbol_fg:       sdl3.FColor,
+
+	// Symbol-jump (F6) dialog state
+	show_symbols:   bool,
+	symbols_dialog: SymbolsDialog,
 }
 
 CURSOR_BLINK_RATE :: 0.53 // seconds
@@ -178,6 +197,7 @@ editor_init :: proc(ed: ^Editor, engine: ^ttf.TextEngine, font: ^ttf.Font, font_
 	ed.syntax_number_fg       = sdl3.FColor{0.92, 0.70, 0.45, 1.0} // orange
 	ed.syntax_comment_fg      = sdl3.FColor{0.45, 0.50, 0.58, 1.0} // dim grey
 	ed.syntax_preprocessor_fg = sdl3.FColor{0.88, 0.55, 0.78, 1.0} // magenta
+	ed.syntax_symbol_fg       = sdl3.FColor{0.95, 0.90, 0.55, 1.0} // pale yellow
 
 	syntax.init()
 }
@@ -188,6 +208,7 @@ editor_destroy :: proc(ed: ^Editor) {
 	}
 	browse_state_destroy(ed)
 	diff_state_destroy(&ed.diff_state)
+	symbols_dialog_destroy(&ed.symbols_dialog)
 	syntax.destroy()
 }
 
@@ -201,6 +222,9 @@ pane_destroy :: proc(p: ^Pane) {
 			delete(c.file_path)
 			c.file_path = ""
 		}
+		for s in c.symbols { delete(s.name) }
+		delete(c.symbols)
+		delete(c.symbol_names)
 	}
 }
 
@@ -287,9 +311,17 @@ editor_open_string_in_pane :: proc(ed: ^Editor, pane_idx: int, content: string, 
 		ep.language  = syntax.get_definition_for_path(file_path)
 	}
 	ed.panes[pane_idx].content = ep
+
+	// Build the per-pane symbol index now that the doc + language are wired
+	// up. `pane_rebuild_symbols` is defined in symbols.odin.
+	if ep.language != nil {
+		if v := pane_as_editor(&ed.panes[pane_idx]); v != nil {
+			pane_rebuild_symbols(v)
+		}
+	}
 }
 
 // True when a modal dialog (help, browse, future popups) currently owns input.
 editor_is_modal_open :: proc(ed: ^Editor) -> bool {
-	return ed.show_help || ed.show_browse
+	return ed.show_help || ed.show_browse || ed.show_symbols
 }

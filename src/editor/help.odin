@@ -59,6 +59,7 @@ other_items := [?]HelpItem{
 	{"F1",            "Toggle this help"},
 	{"F2",            "Open file browser"},
 	{"F3",            "In file browser: toggle flat (recursive) view"},
+	{"F6",            "Open symbol picker (jump to function / type / etc.)"},
 	{"Ctrl+R",        "In file browser: rename the highlighted entry"},
 	{"Ctrl+N",        "In file browser: create a new empty file"},
 	{"Ctrl+Z",        "In file browser: undo the last rename / create"},

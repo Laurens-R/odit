@@ -1,25 +1,107 @@
 {
   "name": "JavaScript",
-  "extensions": ["js", "mjs", "cjs", "jsx"],
+  "extensions": [
+    "js",
+    "mjs",
+    "cjs",
+    "jsx"
+  ],
   "line_comment": "//",
   "block_comment_start": "/*",
   "block_comment_end": "*/",
   "preprocessor_prefix": "",
   "keywords": [
-    "var", "let", "const", "function", "return",
-    "if", "else", "for", "while", "do", "switch", "case", "default", "break", "continue",
-    "in", "of", "typeof", "instanceof", "delete", "void",
-    "new", "this", "super", "class", "extends",
-    "throw", "try", "catch", "finally",
-    "async", "await", "yield",
-    "import", "export", "from", "as",
-    "static", "get", "set",
-    "debugger", "with"
+    "var",
+    "let",
+    "const",
+    "function",
+    "return",
+    "if",
+    "else",
+    "for",
+    "while",
+    "do",
+    "switch",
+    "case",
+    "default",
+    "break",
+    "continue",
+    "in",
+    "of",
+    "typeof",
+    "instanceof",
+    "delete",
+    "void",
+    "new",
+    "this",
+    "super",
+    "class",
+    "extends",
+    "throw",
+    "try",
+    "catch",
+    "finally",
+    "async",
+    "await",
+    "yield",
+    "import",
+    "export",
+    "from",
+    "as",
+    "static",
+    "get",
+    "set",
+    "debugger",
+    "with"
   ],
   "types": [
-    "true", "false", "null", "undefined",
-    "NaN", "Infinity",
-    "Array", "Object", "String", "Number", "Boolean", "Date", "RegExp", "Map", "Set", "Promise",
-    "Symbol", "BigInt", "Error", "Function", "Math", "JSON"
+    "true",
+    "false",
+    "null",
+    "undefined",
+    "NaN",
+    "Infinity",
+    "Array",
+    "Object",
+    "String",
+    "Number",
+    "Boolean",
+    "Date",
+    "RegExp",
+    "Map",
+    "Set",
+    "Promise",
+    "Symbol",
+    "BigInt",
+    "Error",
+    "Function",
+    "Math",
+    "JSON"
+  ],
+  "symbol_patterns": [
+    {
+      "pattern": "function NAME",
+      "kind": "Function"
+    },
+    {
+      "pattern": "async function NAME",
+      "kind": "Function"
+    },
+    {
+      "pattern": "class NAME",
+      "kind": "Type"
+    },
+    {
+      "pattern": "const NAME =",
+      "kind": "Variable"
+    },
+    {
+      "pattern": "let NAME =",
+      "kind": "Variable"
+    },
+    {
+      "pattern": "var NAME =",
+      "kind": "Variable"
+    }
   ]
 }

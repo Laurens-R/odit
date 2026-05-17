@@ -1,0 +1,235 @@
+{
+  "name": "C#",
+  "extensions": [
+    "cs",
+    "csx"
+  ],
+  "line_comment": "//",
+  "block_comment_start": "/*",
+  "block_comment_end": "*/",
+  "preprocessor_prefix": "#",
+  "keywords": [
+    "abstract",
+    "as",
+    "base",
+    "break",
+    "case",
+    "catch",
+    "checked",
+    "continue",
+    "default",
+    "delegate",
+    "do",
+    "else",
+    "event",
+    "explicit",
+    "extern",
+    "false",
+    "finally",
+    "fixed",
+    "for",
+    "foreach",
+    "goto",
+    "if",
+    "implicit",
+    "in",
+    "internal",
+    "is",
+    "lock",
+    "namespace",
+    "new",
+    "null",
+    "operator",
+    "out",
+    "override",
+    "params",
+    "partial",
+    "private",
+    "protected",
+    "public",
+    "readonly",
+    "ref",
+    "return",
+    "sealed",
+    "sizeof",
+    "stackalloc",
+    "static",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "unchecked",
+    "unsafe",
+    "using",
+    "virtual",
+    "volatile",
+    "while",
+    "async",
+    "await",
+    "yield",
+    "where",
+    "get",
+    "set",
+    "add",
+    "remove",
+    "value",
+    "init",
+    "with",
+    "scoped",
+    "required",
+    "file",
+    "global",
+    "class",
+    "struct",
+    "interface",
+    "enum",
+    "record",
+    "const",
+    "throw",
+    "checked",
+    "unchecked"
+  ],
+  "types": [
+    "bool",
+    "byte",
+    "sbyte",
+    "char",
+    "decimal",
+    "double",
+    "float",
+    "int",
+    "uint",
+    "long",
+    "ulong",
+    "short",
+    "ushort",
+    "object",
+    "string",
+    "void",
+    "dynamic",
+    "var",
+    "nint",
+    "nuint",
+    "Task",
+    "ValueTask",
+    "Action",
+    "Func",
+    "Predicate",
+    "Lazy",
+    "Nullable",
+    "List",
+    "Dictionary",
+    "HashSet",
+    "Queue",
+    "Stack",
+    "IEnumerable",
+    "IList",
+    "IDictionary",
+    "ICollection",
+    "IReadOnlyList",
+    "IReadOnlyDictionary",
+    "IReadOnlyCollection",
+    "Tuple",
+    "ValueTuple",
+    "Span",
+    "ReadOnlySpan",
+    "Memory",
+    "ReadOnlyMemory"
+  ],
+  "symbol_patterns": [
+    {
+      "pattern": "{NOTHING} # define {NAME}",
+      "kind": "Variable"
+    },
+    {
+      "pattern": "{NOTHING} # region ...",
+      "kind": "Module"
+    },
+    {
+      "pattern": "{NOTHING} namespace {NAME} {",
+      "kind": "Module"
+    },
+    {
+      "pattern": "{NOTHING} namespace {NAME} ;",
+      "kind": "Module"
+    },
+    {
+      "pattern": "{NOTHING} ... class {NAME}",
+      "kind": "Type"
+    },
+    {
+      "pattern": "{NOTHING} ... struct {NAME}",
+      "kind": "Type"
+    },
+    {
+      "pattern": "{NOTHING} ... interface {NAME}",
+      "kind": "Type"
+    },
+    {
+      "pattern": "{NOTHING} ... enum {NAME}",
+      "kind": "Type"
+    },
+    {
+      "pattern": "{NOTHING} ... record class {NAME}",
+      "kind": "Type"
+    },
+    {
+      "pattern": "{NOTHING} ... record struct {NAME}",
+      "kind": "Type"
+    },
+    {
+      "pattern": "{NOTHING} ... record {NAME}",
+      "kind": "Type"
+    },
+    {
+      "pattern": "{NOTHING} using {NAME} =",
+      "kind": "Type"
+    },
+    {
+      "pattern": "{NOTHING} ... delegate {TYPE} {NAME} ( ... )",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} ... delegate {NAME} ( ... )",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} {OPTIONAL:{OPTION:public|private|protected|internal}} ... {NAME} ( ... ) ... {",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} {OPTIONAL:{OPTION:public|private|protected|internal}} ... {TYPE} ... {NAME} {OPTION:(|<} ... ) ... {",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} ... {ANY} {NAME} {",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} ... {ANY} {NAME} =>",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} {NOT:using} {NOT:namespace} ... {ANY} {NAME} =",
+      "kind": "Variable"
+    },
+    {
+      "pattern": "{NOTHING} {NOT:using} {NOT:namespace} ... {ANY} {NAME} ;",
+      "kind": "Variable"
+    },
+    {
+      "pattern": "{NOTHING} ... const {TYPE} {NAME} =",
+      "kind": "Variable"
+    },
+    {
+      "pattern": "{NOTHING} ... readonly {TYPE} {NAME} =",
+      "kind": "Variable"
+    },
+    {
+      "pattern": "{NOTHING} ... readonly {TYPE} {NAME} ;",
+      "kind": "Variable"
+    }
+  ]
+}

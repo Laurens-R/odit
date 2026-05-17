@@ -1,0 +1,33 @@
+{
+  "name": "YAML",
+  "extensions": [
+    "yaml",
+    "yml"
+  ],
+  "line_comment": "#",
+  "block_comment_start": "",
+  "block_comment_end": "",
+  "preprocessor_prefix": "",
+  "keywords": [
+    "true",
+    "false",
+    "null",
+    "True",
+    "False",
+    "Null",
+    "NULL",
+    "yes",
+    "no",
+    "Yes",
+    "No",
+    "YES",
+    "NO",
+    "on",
+    "off",
+    "On",
+    "Off",
+    "ON",
+    "OFF"
+  ],
+  "types": []
+}

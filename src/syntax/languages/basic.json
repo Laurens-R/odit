@@ -1,0 +1,170 @@
+{
+  "name": "BASIC",
+  "extensions": [
+    "qb",
+    "qbs",
+    "qbasic",
+    "bi",
+    "bb"
+  ],
+  "line_comment": "'",
+  "block_comment_start": "",
+  "block_comment_end": "",
+  "preprocessor_prefix": "#",
+  "keywords": [
+    "AND",
+    "AS",
+    "BEEP",
+    "CALL",
+    "CASE",
+    "CHAIN",
+    "CHDIR",
+    "CLEAR",
+    "CLOSE",
+    "CLS",
+    "COLOR",
+    "COMMON",
+    "CONST",
+    "DATA",
+    "DECLARE",
+    "DEF",
+    "DEFDBL",
+    "DEFINT",
+    "DEFLNG",
+    "DEFSNG",
+    "DEFSTR",
+    "DIM",
+    "DO",
+    "DOUBLE",
+    "ELSE",
+    "ELSEIF",
+    "END",
+    "ENDIF",
+    "ENVIRON",
+    "EQV",
+    "ERASE",
+    "ERROR",
+    "EXIT",
+    "FIELD",
+    "FOR",
+    "FUNCTION",
+    "GET",
+    "GOSUB",
+    "GOTO",
+    "IF",
+    "IMP",
+    "INPUT",
+    "INPUT$",
+    "KILL",
+    "LET",
+    "LINE",
+    "LOCATE",
+    "LOOP",
+    "LPRINT",
+    "LSET",
+    "MID$",
+    "MOD",
+    "NEXT",
+    "NOT",
+    "OFF",
+    "ON",
+    "OPEN",
+    "OPTION",
+    "OR",
+    "OUT",
+    "OUTPUT",
+    "PRINT",
+    "PUT",
+    "RANDOMIZE",
+    "READ",
+    "REDIM",
+    "REM",
+    "RESTORE",
+    "RESUME",
+    "RETURN",
+    "RSET",
+    "RUN",
+    "SELECT",
+    "SHARED",
+    "SLEEP",
+    "STATIC",
+    "STEP",
+    "STOP",
+    "STR$",
+    "SUB",
+    "SWAP",
+    "SYSTEM",
+    "THEN",
+    "TIMER",
+    "TO",
+    "TYPE",
+    "UNTIL",
+    "USING",
+    "VAL",
+    "WAIT",
+    "WEND",
+    "WHILE",
+    "WIDTH",
+    "WRITE",
+    "XOR"
+  ],
+  "types": [
+    "INTEGER",
+    "LONG",
+    "SINGLE",
+    "DOUBLE",
+    "STRING",
+    "BYTE",
+    "BOOLEAN"
+  ],
+  "scope_start": [
+    "SUB",
+    "FUNCTION",
+    "TYPE"
+  ],
+  "scope_end": [
+    "END"
+  ],
+  "symbol_patterns": [
+    {
+      "pattern": "{NOTHING} SUB {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} FUNCTION {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} DECLARE SUB {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} DECLARE FUNCTION {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} DEF {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} TYPE {NAME}",
+      "kind": "Type"
+    },
+    {
+      "pattern": "{NOTHING} CONST {NAME}",
+      "kind": "Variable"
+    },
+    {
+      "pattern": "{NOTHING} {OPTIONAL:STATIC} DIM {NAME}",
+      "kind": "Variable"
+    },
+    {
+      "pattern": "{NOTHING} SHARED {NAME}",
+      "kind": "Variable"
+    },
+    {
+      "pattern": "{NOTHING} COMMON {NAME}",
+      "kind": "Variable"
+    }
+  ]
+}

@@ -1,0 +1,71 @@
+{
+  "name": "Bash",
+  "extensions": [
+    "sh",
+    "bash",
+    "zsh",
+    "ksh"
+  ],
+  "line_comment": "#",
+  "block_comment_start": "",
+  "block_comment_end": "",
+  "preprocessor_prefix": "",
+  "keywords": [
+    "if",
+    "then",
+    "else",
+    "elif",
+    "fi",
+    "case",
+    "esac",
+    "in",
+    "for",
+    "do",
+    "done",
+    "while",
+    "until",
+    "select",
+    "function",
+    "return",
+    "exit",
+    "break",
+    "continue",
+    "local",
+    "declare",
+    "readonly",
+    "export",
+    "unset",
+    "typeset",
+    "source",
+    "alias",
+    "unalias",
+    "eval",
+    "exec",
+    "set",
+    "shift",
+    "trap",
+    "test",
+    "echo",
+    "printf",
+    "read",
+    "pushd",
+    "popd",
+    "cd",
+    "pwd",
+    "let"
+  ],
+  "types": [
+    "true",
+    "false"
+  ],
+  "symbol_patterns": [
+    {
+      "pattern": "function NAME",
+      "kind": "Function"
+    },
+    {
+      "pattern": "NAME ( ) {",
+      "kind": "Function"
+    }
+  ]
+}

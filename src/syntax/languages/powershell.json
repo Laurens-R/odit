@@ -1,0 +1,71 @@
+{
+  "name": "PowerShell",
+  "extensions": [
+    "ps1",
+    "psm1",
+    "psd1"
+  ],
+  "line_comment": "#",
+  "block_comment_start": "<#",
+  "block_comment_end": "#>",
+  "preprocessor_prefix": "",
+  "keywords": [
+    "function",
+    "filter",
+    "workflow",
+    "configuration",
+    "param",
+    "return",
+    "if",
+    "elseif",
+    "else",
+    "switch",
+    "for",
+    "foreach",
+    "while",
+    "do",
+    "until",
+    "break",
+    "continue",
+    "try",
+    "catch",
+    "finally",
+    "throw",
+    "trap",
+    "begin",
+    "process",
+    "end",
+    "dynamicparam",
+    "class",
+    "enum",
+    "using",
+    "namespace",
+    "hidden",
+    "static",
+    "in",
+    "not"
+  ],
+  "types": [
+    "true",
+    "false",
+    "null"
+  ],
+  "symbol_patterns": [
+    {
+      "pattern": "function NAME",
+      "kind": "Function"
+    },
+    {
+      "pattern": "filter NAME",
+      "kind": "Function"
+    },
+    {
+      "pattern": "class NAME",
+      "kind": "Type"
+    },
+    {
+      "pattern": "enum NAME",
+      "kind": "Type"
+    }
+  ]
+}
