@@ -8,7 +8,6 @@
 			"args": [
 				"build",
 				"src",
-				"-subsystem:windows",
 				"-debug",
 				"-out:odit.exe"
 			],

@@ -54,6 +54,12 @@ document_buffer_init :: proc(buffer: ^DocumentBuffer, kind: DocumentBufferKind, 
 
 document_buffer_destroy :: proc(buffer: ^DocumentBuffer) {
 	bytes.buffer_destroy(&buffer.buffer)
+	// bytes.buffer_destroy frees the underlying memory but leaves the dynamic
+	// array header pointing at the now-freed region (delete takes [dynamic]
+	// by value, so it can't null out our copy of `.data`/`.cap`). If we then
+	// reused this buffer, the next `resize` would realloc a dangling pointer
+	// and corrupt the heap. Reset to a clean, empty Buffer.
+	buffer.buffer = bytes.Buffer{}
 }
 
 document_buffer_append :: proc(buffer: ^DocumentBuffer, str: string) {

@@ -1,0 +1,32 @@
+{
+  "name": "C(++)",
+  "extensions": ["cpp", "cxx", "cc", "hpp", "hxx", "hh", "ipp", "tpp", "h", "c"],
+  "line_comment": "//",
+  "block_comment_start": "/*",
+  "block_comment_end": "*/",
+  "preprocessor_prefix": "#",
+  "keywords": [
+    "if", "else", "for", "while", "do", "switch", "case", "default", "break", "continue", "return", "goto",
+    "sizeof", "typeof", "alignof", "alignas", "decltype", "noexcept",
+    "typedef", "static", "extern", "const", "volatile", "register", "auto", "inline", "restrict",
+    "struct", "enum", "union",
+    "class", "namespace", "template", "typename", "using",
+    "public", "private", "protected", "virtual", "friend",
+    "new", "delete", "this", "operator",
+    "throw", "try", "catch",
+    "constexpr", "consteval", "constinit", "explicit", "mutable", "override", "final",
+    "static_cast", "dynamic_cast", "reinterpret_cast", "const_cast",
+    "co_await", "co_return", "co_yield",
+    "concept", "requires",
+    "import", "module", "export"
+  ],
+  "types": [
+    "void", "char", "short", "int", "long", "float", "double",
+    "signed", "unsigned", "bool",
+    "wchar_t", "char8_t", "char16_t", "char32_t",
+    "size_t", "ssize_t", "ptrdiff_t", "nullptr_t",
+    "int8_t", "int16_t", "int32_t", "int64_t",
+    "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+    "true", "false", "nullptr"
+  ]
+}

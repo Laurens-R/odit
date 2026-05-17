@@ -13,8 +13,8 @@ text_engine: ^ttf.TextEngine
 font: ^ttf.Font
 ed: editor.Editor
 
-WINDOW_W :: 960
-WINDOW_H :: 640
+WINDOW_W :: 1920
+WINDOW_H :: 1080
 FONT_SIZE :: 16.0
 
 init_sdl :: proc() -> bool {

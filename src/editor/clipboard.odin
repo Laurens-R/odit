@@ -7,9 +7,10 @@ import "../document"
 
 @(private)
 clipboard_copy :: proc(ed: ^Editor) {
+	v := editor_active_editor_pane(ed); if v == nil { return }
 	lo, hi, has := selection_range(ed)
 	if !has { return }
-	text := document.document_get_slice(&ed.doc, lo, hi - lo, context.temp_allocator)
+	text := document.document_get_slice(&v.doc, lo, hi - lo, context.temp_allocator)
 	cstr := strings.clone_to_cstring(text, context.temp_allocator)
 	_ = sdl3.SetClipboardText(cstr)
 }

@@ -1,0 +1,10 @@
+{
+  "name": "JSON",
+  "extensions": ["json", "jsonc"],
+  "line_comment": "",
+  "block_comment_start": "",
+  "block_comment_end": "",
+  "preprocessor_prefix": "",
+  "keywords": ["true", "false", "null"],
+  "types": []
+}

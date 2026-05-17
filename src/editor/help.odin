@@ -58,6 +58,14 @@ view_items := [?]HelpItem{
 other_items := [?]HelpItem{
 	{"F1",            "Toggle this help"},
 	{"F2",            "Open file browser"},
+	{"F3",            "In file browser: toggle flat (recursive) view"},
+	{"Ctrl+R",        "In file browser: rename the highlighted entry"},
+	{"Ctrl+N",        "In file browser: create a new empty file"},
+	{"Ctrl+Z",        "In file browser: undo the last rename / create"},
+	{"F8",            "Toggle side-by-side diff mode (requires split)"},
+	{"Shift+Enter",   "In file browser: open file in second pane (split)"},
+	{"Ctrl+Tab",      "Swap focus between split panes"},
+	{"Mouse click",   "Click in a pane to focus it"},
 	{"Esc",           "Close dialog / quit when no dialog open"},
 }
 
@@ -72,6 +80,9 @@ help_sections := [?]HelpSection{
 
 @(private)
 help_toggle :: proc(ed: ^Editor) {
+	if !ed.show_help {
+		ed.help_scroll = 0
+	}
 	ed.show_help = !ed.show_help
 }
 
@@ -107,21 +118,31 @@ help_render :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, width, height: i32) {
 
 	content := ui.draw_window(&ctx, dialog_rect, "Help — odit", theme)
 
-	// Layout helpers
 	line_step := ed.line_height
-	x := i32(content.x)
-	y := i32(content.y)
 
-	// Intro
+	// Carve out a footer strip at the bottom of the dialog; everything above
+	// it is the scrollable viewport.
+	footer_reserve: f32 = f32(line_step) + 18
+	viewport := sdl3.FRect{
+		x = content.x,
+		y = content.y,
+		w = content.w - 12, // leave room for the scrollbar on the right
+		h = (dialog_rect.y + dialog_rect.h - footer_reserve) - content.y,
+	}
+	if viewport.h < f32(line_step) { viewport.h = f32(line_step) }
+
+	content_height := help_content_height(line_step)
+
+	x, y, sv := ui.scroll_view_begin(&ctx, viewport, &ed.help_scroll, content_height)
+
 	ui.draw_text(&ctx, "Welcome to odit — a terminal-inspired text editor.", x, y, theme.text_fg)
 	y += line_step
 	ui.draw_text(&ctx, "Every shortcut currently wired up is listed below.", x, y, theme.dim_fg)
 	y += line_step + 6
 
-	ui.draw_hrule(&ctx, x, y, i32(content.w), theme.border)
+	ui.draw_hrule(&ctx, x, y, i32(viewport.w), theme.border)
 	y += 8
 
-	// Keys column starts a fixed distance in; descriptions follow further out.
 	key_col_x  := x + 2 * ed.char_width
 	desc_col_x := x + 18 * ed.char_width
 
@@ -137,10 +158,48 @@ help_render :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, width, height: i32) {
 		}
 	}
 
-	// Footer hint, anchored to the bottom of the dialog.
+	ui.scroll_view_end(sv, theme)
+
+	// Footer hint, anchored to the bottom of the dialog (outside the viewport).
 	footer := "Press F1 or Esc to close"
 	fw, _ := ui.text_size(&ctx, footer)
 	foot_x := i32(dialog_rect.x + (dialog_rect.w - f32(fw)) / 2)
 	foot_y := i32(dialog_rect.y + dialog_rect.h) - line_step - 10
 	ui.draw_text(&ctx, footer, foot_x, foot_y, theme.dim_fg)
+}
+
+// Compute the total pixel height of the help content laid out at `line_step`.
+// Mirrors the layout in `help_render` exactly so scroll clamping and the
+// scrollbar thumb stay in sync with what's actually drawn.
+@(private="file")
+help_content_height :: proc(line_step: i32) -> i32 {
+	h: i32 = 0
+	h += line_step           // intro line 1
+	h += line_step + 6       // intro line 2 + gap
+	h += 8                   // hrule + gap
+
+	for section, i in help_sections {
+		if i > 0 { h += line_step / 2 }
+		h += line_step + 2  // section header
+		h += i32(len(section.items)) * line_step
+	}
+	return h
+}
+
+@(private)
+help_scroll_by :: proc(ed: ^Editor, delta: i32) {
+	ed.help_scroll += delta
+	// Render clamps to the valid range each frame; no need to compute max here.
+	if ed.help_scroll < 0 { ed.help_scroll = 0 }
+}
+
+@(private)
+help_scroll_to_top :: proc(ed: ^Editor) {
+	ed.help_scroll = 0
+}
+
+@(private)
+help_scroll_to_bottom :: proc(ed: ^Editor) {
+	// Use a sentinel large value; render clamps to the actual max.
+	ed.help_scroll = 1 << 30
 }

@@ -1,0 +1,29 @@
+{
+  "name": "Odin",
+  "extensions": ["odin"],
+  "line_comment": "//",
+  "block_comment_start": "/*",
+  "block_comment_end": "*/",
+  "preprocessor_prefix": "",
+  "keywords": [
+    "package", "import", "foreign",
+    "proc", "return", "where", "when",
+    "if", "else", "for", "in", "not_in", "do", "switch", "case", "break", "continue", "fallthrough", "defer",
+    "or_return", "or_else", "or_break", "or_continue",
+    "struct", "enum", "union", "bit_set", "bit_field", "map", "matrix", "dynamic",
+    "using", "context", "auto_cast", "transmute", "cast", "distinct", "size_of", "align_of", "offset_of", "type_of", "typeid_of",
+    "asm",
+    "true", "false", "nil"
+  ],
+  "types": [
+    "int", "uint", "uintptr",
+    "i8", "i16", "i32", "i64", "i128",
+    "u8", "u16", "u32", "u64", "u128",
+    "f16", "f32", "f64",
+    "complex32", "complex64", "complex128",
+    "quaternion64", "quaternion128", "quaternion256",
+    "bool", "b8", "b16", "b32", "b64",
+    "string", "cstring", "rune", "byte",
+    "rawptr", "typeid", "any"
+  ]
+}

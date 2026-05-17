@@ -3,13 +3,11 @@
 	"configurations": [
 		{
 			"name": "Debug odit (Windows)",
-			"type": "cppvsdbg",
+			"type": "lldb",
 			"request": "launch",
 			"program": "${workspaceFolder}\\odit.exe",
 			"args": [],
-			"stopAtEntry": false,
 			"cwd": "${workspaceFolder}",
-			"environment": [],
 			"console": "integratedTerminal",
 			"preLaunchTask": "odin: build (debug)"
 		}
