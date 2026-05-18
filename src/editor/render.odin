@@ -13,292 +13,292 @@ import "../ui"
 TAB_WIDTH :: 4
 
 @(private="file")
-build_line_display :: proc(line: string, allocator := context.temp_allocator) -> (display: string, byte_to_col: []int) {
-	sb: strings.Builder
-	strings.builder_init(&sb, 0, len(line) + 4, allocator)
+build_line_display :: proc(line_text: string, allocator := context.temp_allocator) -> (display_text: string, byte_to_visual_column: []int) {
+	display_builder: strings.Builder
+	strings.builder_init(&display_builder, 0, len(line_text) + 4, allocator)
 
-	cols := make([]int, len(line) + 1, allocator)
-	col := 0
-	current_character_index := 0
-	for current_character_index < len(line) {
-		current_character := line[current_character_index]
+	column_indices := make([]int, len(line_text) + 1, allocator)
+	current_visual_column := 0
+	character_index := 0
+	for character_index < len(line_text) {
+		current_character := line_text[character_index]
 
-		rune_len := 1
+		rune_byte_length := 1
 		if current_character >= 0xC0 {
 			switch {
-			case current_character < 0xE0: rune_len = 2
-			case current_character < 0xF0: rune_len = 3
-			case:          rune_len = 4
+			case current_character < 0xE0: rune_byte_length = 2
+			case current_character < 0xF0: rune_byte_length = 3
+			case:                          rune_byte_length = 4
 			}
-			if current_character_index + rune_len > len(line) { rune_len = len(line) - current_character_index }
+			if character_index + rune_byte_length > len(line_text) { rune_byte_length = len(line_text) - character_index }
 		}
 
-		for k in 0..<rune_len {
-			cols[current_character_index + k] = col
+		for byte_offset in 0..<rune_byte_length {
+			column_indices[character_index + byte_offset] = current_visual_column
 		}
 
-		if rune_len == 1 {
+		if rune_byte_length == 1 {
 			switch {
 			case current_character == '\t':
-				spaces := TAB_WIDTH - (col % TAB_WIDTH)
-				for _ in 0..<spaces { strings.write_byte(&sb, ' ') }
-				col += spaces
+				space_count := TAB_WIDTH - (current_visual_column % TAB_WIDTH)
+				for _ in 0..<space_count { strings.write_byte(&display_builder, ' ') }
+				current_visual_column += space_count
 			case current_character == '\r':
 			case current_character < 0x20 || current_character == 0x7F:
-				strings.write_byte(&sb, '?')
-				col += 1
+				strings.write_byte(&display_builder, '?')
+				current_visual_column += 1
 			case:
-				strings.write_byte(&sb, current_character)
-				col += 1
+				strings.write_byte(&display_builder, current_character)
+				current_visual_column += 1
 			}
 		} else {
-			for k in 0..<rune_len {
-				strings.write_byte(&sb, line[current_character_index + k])
+			for byte_offset in 0..<rune_byte_length {
+				strings.write_byte(&display_builder, line_text[character_index + byte_offset])
 			}
-			col += 1
+			current_visual_column += 1
 		}
 
-		current_character_index += rune_len
+		character_index += rune_byte_length
 	}
-	cols[len(line)] = col
-	return strings.to_string(sb), cols
+	column_indices[len(line_text)] = current_visual_column
+	return strings.to_string(display_builder), column_indices
 }
 
-editor_update :: proc(ed: ^Editor, dt: f64) {
-	ed.clock += dt
+editor_update :: proc(editor: ^Editor, delta_time: f64) {
+	editor.clock += delta_time
 
-	if ed.diff_state.active {
+	if editor.diff_state.active {
 		// Animate the shared diff scroll.
-		if ed.diff_state.scroll_y != ed.diff_state.scroll_y_target {
-			factor := f32(dt * SCROLL_SMOOTHNESS)
-			if factor > 1.0 { factor = 1.0 }
-			ed.diff_state.scroll_y += (ed.diff_state.scroll_y_target - ed.diff_state.scroll_y) * factor
-			if abs(ed.diff_state.scroll_y_target - ed.diff_state.scroll_y) < 0.5 {
-				ed.diff_state.scroll_y = ed.diff_state.scroll_y_target
+		if editor.diff_state.scroll_y != editor.diff_state.scroll_y_target {
+			interpolation_factor := f32(delta_time * SCROLL_SMOOTHNESS)
+			if interpolation_factor > 1.0 { interpolation_factor = 1.0 }
+			editor.diff_state.scroll_y += (editor.diff_state.scroll_y_target - editor.diff_state.scroll_y) * interpolation_factor
+			if abs(editor.diff_state.scroll_y_target - editor.diff_state.scroll_y) < 0.5 {
+				editor.diff_state.scroll_y = editor.diff_state.scroll_y_target
 			}
-			editor_mark_dirty(ed)
+			editor_mark_dirty(editor)
 		}
 	} else {
 		// Per-pane content updates (smooth-scroll for editor panes, byte
 		// drain + cursor blink for terminal panes).
-		for i in 0..<len(ed.panes) {
-			#partial switch &c in ed.panes[i].content {
+		for pane_index in 0..<len(editor.panes) {
+			#partial switch &content_value in editor.panes[pane_index].content {
 			case EditorPane:
-				editor_pane_update(ed, &c, dt)
+				editor_pane_update(editor, &content_value, delta_time)
 			case TerminalPane:
-				if c.term != nil {
-					title_h := editor_title_bar_height(ed)
-					body := sdl3.Rect{
-						ed.panes[i].rect.x,
-						ed.panes[i].rect.y + title_h,
-						ed.panes[i].rect.w,
-						ed.panes[i].rect.h - title_h,
+				if content_value.terminal != nil {
+					title_bar_height := editor_title_bar_height(editor)
+					terminal_body_rectangle := sdl3.Rect{
+						editor.panes[pane_index].rectangle.x,
+						editor.panes[pane_index].rectangle.y + title_bar_height,
+						editor.panes[pane_index].rectangle.w,
+						editor.panes[pane_index].rectangle.h - title_bar_height,
 					}
-					terminal.terminal_set_geometry(c.term, body, ed.char_width, ed.line_height)
-					if terminal.terminal_update(c.term, dt) {
-						editor_mark_dirty(ed)
+					terminal.terminal_set_geometry(content_value.terminal, terminal_body_rectangle, editor.character_width, editor.line_height)
+					if terminal.terminal_update(content_value.terminal, delta_time) {
+						editor_mark_dirty(editor)
 					}
 				}
 			}
 		}
 	}
 
-	ed.cursor_timer += dt
-	if ed.cursor_timer >= CURSOR_BLINK_RATE {
-		ed.cursor_timer -= CURSOR_BLINK_RATE
-		ed.cursor_visible = !ed.cursor_visible
-		editor_mark_dirty(ed)
+	editor.cursor_timer += delta_time
+	if editor.cursor_timer >= CURSOR_BLINK_RATE {
+		editor.cursor_timer -= CURSOR_BLINK_RATE
+		editor.cursor_visible = !editor.cursor_visible
+		editor_mark_dirty(editor)
 	}
 
 	// Auto-reanalyze symbols once the user has paused. All three gates must
 	// hold: the pane's doc has been mutated, at least 2 s have passed since
 	// its last rebuild, and at least 1 s has passed since the most recent
 	// keystroke anywhere in the editor. F6 is skipped — opening it already
-	// forces a fresh rebuild, and rebuilding while its filtered_idx slice
-	// is live would invalidate the dialog's indices.
-	if !ed.show_symbols {
-		for i in 0..<len(ed.panes) {
-			#partial switch &c in ed.panes[i].content {
+	// forces a fresh rebuild, and rebuilding while its filtered_indices
+	// slice is live would invalidate the dialog's indices.
+	if !editor.show_symbols {
+		for pane_index in 0..<len(editor.panes) {
+			#partial switch &content_value in editor.panes[pane_index].content {
 			case EditorPane:
-				if !c.symbols_dirty                                { continue }
-				if ed.clock - c.last_analysis_time   < 2.0         { continue }
-				if ed.clock - ed.last_keystroke_time < 1.0         { continue }
-				pane_rebuild_symbols(&c)
-				c.symbols_dirty      = false
-				c.last_analysis_time = ed.clock
+				if !content_value.symbols_dirty                                { continue }
+				if editor.clock - content_value.last_analysis_time   < 2.0     { continue }
+				if editor.clock - editor.last_keystroke_time         < 1.0     { continue }
+				pane_rebuild_symbols(&content_value)
+				content_value.symbols_dirty      = false
+				content_value.last_analysis_time = editor.clock
 			}
 		}
 	}
 }
 
 @(private="file")
-editor_pane_update :: proc(ed: ^Editor, v: ^EditorPane, dt: f64) {
-	animating := false
-	factor := f32(dt * SCROLL_SMOOTHNESS)
-	if factor > 1.0 { factor = 1.0 }
+editor_pane_update :: proc(editor: ^Editor, editor_pane: ^EditorPane, delta_time: f64) {
+	is_animating := false
+	interpolation_factor := f32(delta_time * SCROLL_SMOOTHNESS)
+	if interpolation_factor > 1.0 { interpolation_factor = 1.0 }
 
-	if v.scroll_y != v.scroll_y_target {
-		v.scroll_y += (v.scroll_y_target - v.scroll_y) * factor
-		if abs(v.scroll_y_target - v.scroll_y) < 0.5 {
-			v.scroll_y = v.scroll_y_target
+	if editor_pane.scroll_y != editor_pane.scroll_y_target {
+		editor_pane.scroll_y += (editor_pane.scroll_y_target - editor_pane.scroll_y) * interpolation_factor
+		if abs(editor_pane.scroll_y_target - editor_pane.scroll_y) < 0.5 {
+			editor_pane.scroll_y = editor_pane.scroll_y_target
 		}
-		if ed.line_height > 0 {
-			v.scroll_line = u32(v.scroll_y / f32(ed.line_height))
+		if editor.line_height > 0 {
+			editor_pane.scroll_line = u32(editor_pane.scroll_y / f32(editor.line_height))
 		}
-		animating = true
+		is_animating = true
 	}
 
-	if v.scroll_x != v.scroll_x_target {
-		v.scroll_x += (v.scroll_x_target - v.scroll_x) * factor
-		if abs(v.scroll_x_target - v.scroll_x) < 0.5 {
-			v.scroll_x = v.scroll_x_target
+	if editor_pane.scroll_x != editor_pane.scroll_x_target {
+		editor_pane.scroll_x += (editor_pane.scroll_x_target - editor_pane.scroll_x) * interpolation_factor
+		if abs(editor_pane.scroll_x_target - editor_pane.scroll_x) < 0.5 {
+			editor_pane.scroll_x = editor_pane.scroll_x_target
 		}
-		animating = true
+		is_animating = true
 	}
 
-	if animating { editor_mark_dirty(ed) }
+	if is_animating { editor_mark_dirty(editor) }
 }
 
-editor_render :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, width: i32, height: i32) {
-	status_height: i32 = ed.line_height + 4
-	text_area_height := height - status_height
+editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i32, window_height: i32) {
+	status_bar_height: i32 = editor.line_height + 4
+	text_area_height := window_height - status_bar_height
 
 	// Full-window background
-	sdl3.SetRenderDrawColorFloat(renderer, ed.bg_color.r, ed.bg_color.g, ed.bg_color.b, ed.bg_color.a)
-	sdl3.RenderFillRect(renderer, &sdl3.FRect{0, 0, f32(width), f32(height)})
+	sdl3.SetRenderDrawColorFloat(renderer, editor.background_color.r, editor.background_color.g, editor.background_color.b, editor.background_color.a)
+	sdl3.RenderFillRect(renderer, &sdl3.FRect{0, 0, f32(window_width), f32(window_height)})
 
 	// Compute per-pane rectangles. The divider sits at `split_ratio` of the
 	// total width and is clamped so neither pane can drop below a usable
 	// minimum (~10 character cells, falling back to 80 px if the font hasn't
 	// been measured yet).
-	visible := editor_visible_pane_count(ed)
-	if visible == 1 {
-		ed.panes[0].rect = sdl3.Rect{0, 0, width, text_area_height}
+	visible_pane_count := editor_visible_pane_count(editor)
+	if visible_pane_count == 1 {
+		editor.panes[0].rectangle = sdl3.Rect{0, 0, window_width, text_area_height}
 	} else {
-		divider_w: i32 = 2
-		usable := width - divider_w
+		divider_width: i32 = 2
+		usable_width := window_width - divider_width
 
-		min_pane: i32 = 80
-		if ed.char_width > 0 { min_pane = ed.char_width * 10 }
-		if min_pane > usable/2 { min_pane = usable / 2 }
+		minimum_pane_width: i32 = 80
+		if editor.character_width > 0 { minimum_pane_width = editor.character_width * 10 }
+		if minimum_pane_width > usable_width/2 { minimum_pane_width = usable_width / 2 }
 
-		ratio := ed.split_ratio
-		if ratio < 0.05 { ratio = 0.05 }
-		if ratio > 0.95 { ratio = 0.95 }
-		left := i32(f32(usable) * ratio)
-		if left < min_pane              { left = min_pane }
-		if left > usable - min_pane     { left = usable - min_pane }
+		split_ratio := editor.split_ratio
+		if split_ratio < 0.05 { split_ratio = 0.05 }
+		if split_ratio > 0.95 { split_ratio = 0.95 }
+		left_pane_width := i32(f32(usable_width) * split_ratio)
+		if left_pane_width < minimum_pane_width              { left_pane_width = minimum_pane_width }
+		if left_pane_width > usable_width - minimum_pane_width { left_pane_width = usable_width - minimum_pane_width }
 
-		ed.panes[0].rect = sdl3.Rect{0,                0, left,                 text_area_height}
-		ed.panes[1].rect = sdl3.Rect{left + divider_w, 0, usable - left,        text_area_height}
+		editor.panes[0].rectangle = sdl3.Rect{0,                            0, left_pane_width,                 text_area_height}
+		editor.panes[1].rectangle = sdl3.Rect{left_pane_width + divider_width, 0, usable_width - left_pane_width,  text_area_height}
 	}
 
 	// Render each visible pane by dispatching on its content type.
-	for i in 0..<visible {
-		pane := &ed.panes[i]
-		is_active := i == ed.active
-		#partial switch &c in pane.content {
+	for pane_index in 0..<visible_pane_count {
+		pane := &editor.panes[pane_index]
+		pane_is_active := pane_index == editor.active_pane_index
+		#partial switch &content_value in pane.content {
 		case EditorPane:
-			render_editor_pane(ed, renderer, pane, &c, is_active, i)
+			render_editor_pane(editor, renderer, pane, &content_value, pane_is_active, pane_index)
 		case TerminalPane:
-			if c.term != nil {
-				title_h := editor_title_bar_height(ed)
-				render_pane_title_strip(ed, renderer, pane.rect.x, pane.rect.y, pane.rect.w, title_h, "Terminal", is_active)
-				body := sdl3.Rect{
-					pane.rect.x,
-					pane.rect.y + title_h,
-					pane.rect.w,
-					pane.rect.h - title_h,
+			if content_value.terminal != nil {
+				title_bar_height := editor_title_bar_height(editor)
+				render_pane_title_strip(editor, renderer, pane.rectangle.x, pane.rectangle.y, pane.rectangle.w, title_bar_height, "Terminal", pane_is_active)
+				terminal_body_rectangle := sdl3.Rect{
+					pane.rectangle.x,
+					pane.rectangle.y + title_bar_height,
+					pane.rectangle.w,
+					pane.rectangle.h - title_bar_height,
 				}
-				terminal.terminal_set_geometry(c.term, body, ed.char_width, ed.line_height)
-				terminal.terminal_render(c.term, renderer, ed.font, ed.engine, &ed.text_cache)
+				terminal.terminal_set_geometry(content_value.terminal, terminal_body_rectangle, editor.character_width, editor.line_height)
+				terminal.terminal_render(content_value.terminal, renderer, editor.font, editor.text_engine, &editor.text_cache)
 			}
 		}
 	}
 
 	// Divider between panes.
-	if visible == 2 {
-		div_x := ed.panes[1].rect.x - 2
-		div_rect := sdl3.FRect{f32(div_x), 0, 2, f32(text_area_height)}
-		sdl3.SetRenderDrawColorFloat(renderer, ed.divider_color.r, ed.divider_color.g, ed.divider_color.b, ed.divider_color.a)
-		sdl3.RenderFillRect(renderer, &div_rect)
+	if visible_pane_count == 2 {
+		divider_x := editor.panes[1].rectangle.x - 2
+		divider_rectangle := sdl3.FRect{f32(divider_x), 0, 2, f32(text_area_height)}
+		sdl3.SetRenderDrawColorFloat(renderer, editor.divider_color.r, editor.divider_color.g, editor.divider_color.b, editor.divider_color.a)
+		sdl3.RenderFillRect(renderer, &divider_rectangle)
 	}
 
 	// Status bar — content depends on the active pane's type.
-	status_y := height - status_height
-	sdl3.SetRenderDrawColorFloat(renderer, ed.status_bg.r, ed.status_bg.g, ed.status_bg.b, ed.status_bg.a)
-	sdl3.RenderFillRect(renderer, &sdl3.FRect{0, f32(status_y), f32(width), f32(status_height)})
+	status_bar_y := window_height - status_bar_height
+	sdl3.SetRenderDrawColorFloat(renderer, editor.status_bar_background.r, editor.status_bar_background.g, editor.status_bar_background.b, editor.status_bar_background.a)
+	sdl3.RenderFillRect(renderer, &sdl3.FRect{0, f32(status_bar_y), f32(window_width), f32(status_bar_height)})
 
 	status_text: string
-	#partial switch &c in editor_active_pane(ed).content {
+	#partial switch &content_value in editor_active_pane(editor).content {
 	case EditorPane:
-		dirty_indicator := document.document_is_dirty(&c.doc) ? "[+] " : ""
-		view_tag := ed.split_active ? fmt.tprintf("[Pane %d] ", ed.active + 1) : ""
-		diff_tag := ed.diff_state.active ? "[DIFF] " : ""
-		hint := ed.diff_state.active ? "(F8 exit diff, F1 help)" : "(F1 help, F2 browse, Ctrl+Tab swap panes, F8 diff)"
+		dirty_indicator := document.document_is_dirty(&content_value.document) ? "[+] " : ""
+		pane_tag := editor.split_active ? fmt.tprintf("[Pane %d] ", editor.active_pane_index + 1) : ""
+		diff_tag := editor.diff_state.active ? "[DIFF] " : ""
+		hint_text := editor.diff_state.active ? "(F8 exit diff, F1 help)" : "(F1 help, F2 browse, Ctrl+Tab swap panes, F8 diff)"
 		status_text = fmt.tprintf("%s%s%sLn %d, Col %d | %d lines | %d bytes  %s",
 			diff_tag,
-			view_tag,
+			pane_tag,
 			dirty_indicator,
-			c.cursor_line + 1,
-			c.cursor_col + 1,
-			document.document_line_count(&c.doc),
-			document.document_length(&c.doc),
-			hint,
+			content_value.cursor_line + 1,
+			content_value.cursor_column + 1,
+			document.document_line_count(&content_value.document),
+			document.document_length(&content_value.document),
+			hint_text,
 		)
 	}
 	if len(status_text) > 0 {
-		render_string(ed, renderer, status_text, ed.padding_x, status_y + 2, ed.status_fg)
+		render_string(editor, renderer, status_text, editor.padding_x, status_bar_y + 2, editor.status_bar_foreground)
 	}
 
 	// Modal overlays render on top of everything else.
-	if ed.show_browse {
-		browse_render(ed, renderer, width, height)
+	if editor.show_browse {
+		browse_render(editor, renderer, window_width, window_height)
 	}
-	if ed.show_symbols {
-		symbols_dialog_render(ed, renderer, width, height)
+	if editor.show_symbols {
+		symbols_dialog_render(editor, renderer, window_width, window_height)
 	}
-	if ed.show_help {
-		help_render(ed, renderer, width, height)
+	if editor.show_help {
+		help_render(editor, renderer, window_width, window_height)
 	}
-	if ed.show_terminal_close_confirm {
-		terminal_close_confirm_render(ed, renderer, width, height)
+	if editor.show_terminal_close_confirm {
+		terminal_close_confirm_render(editor, renderer, window_width, window_height)
 	}
 }
 
 // --- Per-content renderers ------------------------------------------------
 
 @(private="file")
-render_editor_pane :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pane, v: ^EditorPane, is_active: bool, pane_idx: int) {
-	view_w := pane.rect.w
-	view_h := pane.rect.h
-	view_x := pane.rect.x
-	view_y := pane.rect.y
+render_editor_pane :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pane, editor_pane: ^EditorPane, is_active: bool, pane_index: int) {
+	view_width  := pane.rectangle.w
+	view_height := pane.rectangle.h
+	view_x      := pane.rectangle.x
+	view_y      := pane.rectangle.y
 
 	// Title bar (tinted strip with filename + dirty marker) at the top of the
-	// pane. Text-area math below is in terms of `text_y` / `text_h` so the
-	// title bar stays anchored above the visible content.
-	title_h := editor_title_bar_height(ed)
-	render_pane_title_bar(ed, renderer, v, view_x, view_y, view_w, title_h, is_active)
+	// pane. Text-area math below is in terms of `text_y` / `text_height` so
+	// the title bar stays anchored above the visible content.
+	title_bar_height := editor_title_bar_height(editor)
+	render_pane_title_bar(editor, renderer, editor_pane, view_x, view_y, view_width, title_bar_height, is_active)
 
-	text_y := view_y + title_h
-	text_h := view_h - title_h
+	text_y      := view_y + title_bar_height
+	text_height := view_height - title_bar_height
 
-	v.visible_lines = u32(text_h / ed.line_height)
-	if v.visible_lines == 0 { v.visible_lines = 1 }
+	editor_pane.visible_lines = u32(text_height / editor.line_height)
+	if editor_pane.visible_lines == 0 { editor_pane.visible_lines = 1 }
 
-	line_count := document.document_line_count(&v.doc)
-	gutter_chars := max(digit_count(line_count), 3)
-	gutter_width := i32(gutter_chars + 1) * ed.char_width
-	v.gutter_width = gutter_width
+	total_line_count := document.document_line_count(&editor_pane.document)
+	gutter_character_count := max(digit_count(total_line_count), 3)
+	gutter_width_pixels := i32(gutter_character_count + 1) * editor.character_width
+	editor_pane.gutter_width = gutter_width_pixels
 
-	view_clip := sdl3.Rect{view_x, text_y, view_w, text_h}
-	sdl3.SetRenderClipRect(renderer, &view_clip)
+	view_clip_rectangle := sdl3.Rect{view_x, text_y, view_width, text_height}
+	sdl3.SetRenderClipRect(renderer, &view_clip_rectangle)
 
-	if ed.diff_state.active {
-		render_editor_pane_diff(ed, renderer, v, view_x, text_y, view_w, is_active, pane_idx, gutter_chars, gutter_width)
+	if editor.diff_state.active {
+		render_editor_pane_diff(editor, renderer, editor_pane, view_x, text_y, view_width, is_active, pane_index, gutter_character_count, gutter_width_pixels)
 	} else {
-		render_editor_pane_normal(ed, renderer, v, view_x, text_y, is_active, gutter_chars, gutter_width)
+		render_editor_pane_normal(editor, renderer, editor_pane, view_x, text_y, is_active, gutter_character_count, gutter_width_pixels)
 	}
 
 	sdl3.SetRenderClipRect(renderer, nil)
@@ -307,31 +307,31 @@ render_editor_pane :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pane, v
 	// Width widens on hover / drag so it's actually grabbable; track + thumb
 	// rects come back from the painter so input handlers can hit-test them.
 	{
-		ui_ctx := ui.Context{
-			renderer    = renderer,
-			font        = ed.font,
-			engine      = ed.engine,
-			char_width  = ed.char_width,
-			line_height = ed.line_height,
+		ui_context := ui.Context{
+			renderer        = renderer,
+			font            = editor.font,
+			engine          = editor.text_engine,
+			character_width = editor.character_width,
+			line_height     = editor.line_height,
 		}
 		theme := ui.default_theme()
 
-		content_h, scroll_v: f32
-		if ed.diff_state.active {
-			content_h = f32(len(ed.diff_state.rows)) * f32(ed.line_height)
-			scroll_v  = ed.diff_state.scroll_y
+		content_height_pixels, current_scroll_value: f32
+		if editor.diff_state.active {
+			content_height_pixels = f32(len(editor.diff_state.rows)) * f32(editor.line_height)
+			current_scroll_value  = editor.diff_state.scroll_y
 		} else {
-			content_h = f32(line_count) * f32(ed.line_height)
-			scroll_v  = v.scroll_y
+			content_height_pixels = f32(total_line_count) * f32(editor.line_height)
+			current_scroll_value  = editor_pane.scroll_y
 		}
 
-		sb_width: i32 = 6
-		if v.scrollbar.hovered || v.scrollbar.dragging { sb_width = 14 }
-		sb_x := view_x + view_w - sb_width - 2
+		scrollbar_width: i32 = 6
+		if editor_pane.scrollbar.is_hovered || editor_pane.scrollbar.is_dragging { scrollbar_width = 14 }
+		scrollbar_x := view_x + view_width - scrollbar_width - 2
 
-		track, thumb := ui.draw_scrollbar(&ui_ctx, sb_x, text_y, text_h, content_h, f32(text_h), scroll_v, sb_width, theme)
-		v.scrollbar.track_rect = track
-		v.scrollbar.thumb_rect = thumb
+		track_rectangle, thumb_rectangle := ui.draw_scrollbar(&ui_context, scrollbar_x, text_y, text_height, content_height_pixels, f32(text_height), current_scroll_value, scrollbar_width, theme)
+		editor_pane.scrollbar.track_rectangle = track_rectangle
+		editor_pane.scrollbar.thumb_rectangle = thumb_rectangle
 	}
 }
 
@@ -340,11 +340,11 @@ render_editor_pane :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pane, v
 // dirty. The active pane gets a brighter text color; the inactive pane is
 // muted so focus is unambiguous at a glance.
 @(private="file")
-render_pane_title_bar :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, v: ^EditorPane, x, y, w, h: i32, is_active: bool) {
-	name := v.file_path != "" ? filepath_base(v.file_path) : "untitled"
-	dirty := document.document_is_dirty(&v.doc) ? " *" : ""
-	label := fmt.tprintf("%s%s", name, dirty)
-	render_pane_title_strip(ed, renderer, x, y, w, h, label, is_active)
+render_pane_title_bar :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, editor_pane: ^EditorPane, x_position, y_position, width, height: i32, is_active: bool) {
+	display_name := editor_pane.file_path != "" ? filepath_base(editor_pane.file_path) : "untitled"
+	dirty_marker := document.document_is_dirty(&editor_pane.document) ? " *" : ""
+	full_label := fmt.tprintf("%s%s", display_name, dirty_marker)
+	render_pane_title_strip(editor, renderer, x_position, y_position, width, height, full_label, is_active)
 }
 
 // Generic pane title strip: tinted bar, active-pane accent stripe along the
@@ -352,51 +352,51 @@ render_pane_title_bar :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, v: ^EditorP
 // and terminal panes (static "Terminal" label) so the visual treatment stays
 // consistent.
 @(private)
-render_pane_title_strip :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, x, y, w, h: i32, label: string, is_active: bool) {
-	bar := sdl3.FRect{f32(x), f32(y), f32(w), f32(h)}
-	sdl3.SetRenderDrawColorFloat(renderer, ed.status_bg.r, ed.status_bg.g, ed.status_bg.b, ed.status_bg.a)
-	sdl3.RenderFillRect(renderer, &bar)
+render_pane_title_strip :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, x_position, y_position, width, height: i32, label: string, is_active: bool) {
+	bar_rectangle := sdl3.FRect{f32(x_position), f32(y_position), f32(width), f32(height)}
+	sdl3.SetRenderDrawColorFloat(renderer, editor.status_bar_background.r, editor.status_bar_background.g, editor.status_bar_background.b, editor.status_bar_background.a)
+	sdl3.RenderFillRect(renderer, &bar_rectangle)
 
 	if is_active {
-		stripe := sdl3.FRect{f32(x), f32(y + h - 1), f32(w), 1}
-		sdl3.SetRenderDrawColorFloat(renderer, ed.cursor_color.r, ed.cursor_color.g, ed.cursor_color.b, 1.0)
-		sdl3.RenderFillRect(renderer, &stripe)
+		stripe_rectangle := sdl3.FRect{f32(x_position), f32(y_position + height - 1), f32(width), 1}
+		sdl3.SetRenderDrawColorFloat(renderer, editor.cursor_color.r, editor.cursor_color.g, editor.cursor_color.b, 1.0)
+		sdl3.RenderFillRect(renderer, &stripe_rectangle)
 	}
 
-	text_color := is_active ? ed.status_fg : ed.line_num_color
-	render_string(ed, renderer, label, x + ed.padding_x, y + 3, text_color)
+	text_color := is_active ? editor.status_bar_foreground : editor.line_number_color
+	render_string(editor, renderer, label, x_position + editor.padding_x, y_position + 3, text_color)
 }
 
 // Local wrapper so the renderer doesn't need to import core:path/filepath.
 @(private="file")
-filepath_base :: proc(path: string) -> string {
-	if len(path) == 0 { return path }
+filepath_base :: proc(file_path: string) -> string {
+	if len(file_path) == 0 { return file_path }
 	// Walk back to the last separator (works for both / and \ to keep things
 	// platform-agnostic without dragging filepath in).
-	i := len(path) - 1
-	for i >= 0 {
-		c := path[i]
-		if c == '/' || c == '\\' {
-			return path[i+1:]
+	character_index := len(file_path) - 1
+	for character_index >= 0 {
+		current_character := file_path[character_index]
+		if current_character == '/' || current_character == '\\' {
+			return file_path[character_index+1:]
 		}
-		i -= 1
+		character_index -= 1
 	}
-	return path
+	return file_path
 }
 
 @(private="file")
-render_editor_pane_normal :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, v: ^EditorPane, view_x, view_y: i32, is_active: bool, gutter_chars: u32, gutter_width: i32) {
-	line_count := document.document_line_count(&v.doc)
+render_editor_pane_normal :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, editor_pane: ^EditorPane, view_x, view_y: i32, is_active: bool, gutter_character_count: u32, gutter_width: i32) {
+	total_line_count := document.document_line_count(&editor_pane.document)
 
-	sel_lo, sel_hi, has_sel := editor_pane_selection_range(v)
-	scroll_y_px := i32(v.scroll_y)
+	selection_low_offset, selection_high_offset, has_selection := editor_pane_selection_range(editor_pane)
+	scroll_y_pixels := i32(editor_pane.scroll_y)
 
-	if !v.wrap_mode {
-		end_line := min(v.scroll_line + v.visible_lines + 2, line_count)
-		for line_idx := v.scroll_line; line_idx < end_line; line_idx += 1 {
-			screen_y := view_y + ed.padding_y + i32(line_idx) * ed.line_height - scroll_y_px
-			render_doc_line_into(ed, renderer, v, view_x, screen_y, gutter_chars, gutter_width,
-				i32(line_idx), has_sel, sel_lo, sel_hi, is_active, i32(line_idx) == i32(v.cursor_line))
+	if !editor_pane.wrap_mode {
+		end_line_index := min(editor_pane.scroll_line + editor_pane.visible_lines + 2, total_line_count)
+		for line_index := editor_pane.scroll_line; line_index < end_line_index; line_index += 1 {
+			screen_y_position := view_y + editor.padding_y + i32(line_index) * editor.line_height - scroll_y_pixels
+			render_doc_line_into(editor, renderer, editor_pane, view_x, screen_y_position, gutter_character_count, gutter_width,
+				i32(line_index), has_selection, selection_low_offset, selection_high_offset, is_active, i32(line_index) == i32(editor_pane.cursor_line))
 		}
 		return
 	}
@@ -404,161 +404,161 @@ render_editor_pane_normal :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, v: ^Edi
 	// --- wrap mode ---------------------------------------------------
 	// Walk source lines in document order; each one occupies one or more
 	// visual rows. We stop once we've passed the bottom of the pane.
-	pane := &ed.panes[get_pane_idx(ed, v)]
-	view_h     := pane.rect.h
-	bottom_y   := view_y + view_h
-	text_w     := pane.rect.w - ed.padding_x - gutter_width - ed.padding_x
-	cols_per_row := text_w / ed.char_width
-	if cols_per_row < 1 { cols_per_row = 1 }
+	pane := &editor.panes[get_pane_index(editor, editor_pane)]
+	view_height := pane.rectangle.h
+	bottom_y    := view_y + view_height
+	text_area_width := pane.rectangle.w - editor.padding_x - gutter_width - editor.padding_x
+	columns_per_row := text_area_width / editor.character_width
+	if columns_per_row < 1 { columns_per_row = 1 }
 
-	y := view_y + ed.padding_y - scroll_y_px % ed.line_height
-	for line_idx := v.scroll_line; line_idx < line_count && y < bottom_y; line_idx += 1 {
-		consumed := render_wrapped_doc_line(ed, renderer, v, view_x, y,
-			gutter_chars, gutter_width, cols_per_row,
-			i32(line_idx), has_sel, sel_lo, sel_hi, is_active,
-			i32(line_idx) == i32(v.cursor_line))
-		y += consumed * ed.line_height
+	current_y_position := view_y + editor.padding_y - scroll_y_pixels % editor.line_height
+	for line_index := editor_pane.scroll_line; line_index < total_line_count && current_y_position < bottom_y; line_index += 1 {
+		visual_rows_consumed := render_wrapped_doc_line(editor, renderer, editor_pane, view_x, current_y_position,
+			gutter_character_count, gutter_width, columns_per_row,
+			i32(line_index), has_selection, selection_low_offset, selection_high_offset, is_active,
+			i32(line_index) == i32(editor_pane.cursor_line))
+		current_y_position += visual_rows_consumed * editor.line_height
 	}
 }
 
 @(private="file")
-render_editor_pane_diff :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, v: ^EditorPane, view_x, view_y, view_w: i32, is_active: bool, pane_idx: int, gutter_chars: u32, gutter_width: i32) {
-	scroll_y_px := i32(ed.diff_state.scroll_y)
-	visible_rows := v.visible_lines + 2
+render_editor_pane_diff :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, editor_pane: ^EditorPane, view_x, view_y, view_width: i32, is_active: bool, pane_index: int, gutter_character_count: u32, gutter_width: i32) {
+	scroll_y_pixels := i32(editor.diff_state.scroll_y)
+	visible_row_count := editor_pane.visible_lines + 2
 
-	start_row: u32 = 0
-	if ed.line_height > 0 {
-		start_row = u32(ed.diff_state.scroll_y / f32(ed.line_height))
+	start_row_index: u32 = 0
+	if editor.line_height > 0 {
+		start_row_index = u32(editor.diff_state.scroll_y / f32(editor.line_height))
 	}
-	total_rows := u32(len(ed.diff_state.rows))
-	end_row := min(start_row + visible_rows, total_rows)
+	total_row_count := u32(len(editor.diff_state.rows))
+	end_row_index := min(start_row_index + visible_row_count, total_row_count)
 
-	for row_idx := start_row; row_idx < end_row; row_idx += 1 {
-		row := ed.diff_state.rows[row_idx]
-		screen_y := view_y + ed.padding_y + i32(row_idx) * ed.line_height - scroll_y_px
+	for row_index := start_row_index; row_index < end_row_index; row_index += 1 {
+		diff_row := editor.diff_state.rows[row_index]
+		screen_y_position := view_y + editor.padding_y + i32(row_index) * editor.line_height - scroll_y_pixels
 
 		// Determine which doc line this row shows on this side, and the
 		// background color for the row.
-		doc_line: i32 = -1
-		bg: ^sdl3.FColor
+		doc_line_index: i32 = -1
+		row_background: ^sdl3.FColor
 
-		if pane_idx == 0 {
-			doc_line = row.left_line
-			switch row.kind {
+		if pane_index == 0 {
+			doc_line_index = diff_row.left_line
+			switch diff_row.kind {
 			case .Equal:
 				// no bg tint
 			case .Delete:
-				bg = &ed.diff_delete_bg
+				row_background = &editor.diff_delete_background
 			case .Insert:
-				bg = &ed.diff_gap_bg
+				row_background = &editor.diff_gap_background
 			}
 		} else {
-			doc_line = row.right_line
-			switch row.kind {
+			doc_line_index = diff_row.right_line
+			switch diff_row.kind {
 			case .Equal:
 			case .Insert:
-				bg = &ed.diff_insert_bg
+				row_background = &editor.diff_insert_background
 			case .Delete:
-				bg = &ed.diff_gap_bg
+				row_background = &editor.diff_gap_background
 			}
 		}
 
 		// Fill row background tint for non-equal rows.
-		if bg != nil {
-			rect := sdl3.FRect{f32(view_x), f32(screen_y), f32(view_w), f32(ed.line_height)}
-			sdl3.SetRenderDrawColorFloat(renderer, bg.r, bg.g, bg.b, bg.a)
-			sdl3.RenderFillRect(renderer, &rect)
+		if row_background != nil {
+			row_rectangle := sdl3.FRect{f32(view_x), f32(screen_y_position), f32(view_width), f32(editor.line_height)}
+			sdl3.SetRenderDrawColorFloat(renderer, row_background.r, row_background.g, row_background.b, row_background.a)
+			sdl3.RenderFillRect(renderer, &row_rectangle)
 		}
 
-		if doc_line < 0 { continue } // gap — nothing to draw beyond background
+		if doc_line_index < 0 { continue } // gap — nothing to draw beyond background
 
-		is_cursor_row := is_active && doc_line == i32(v.cursor_line)
-		render_doc_line_into(ed, renderer, v, view_x, screen_y, gutter_chars, gutter_width,
-			doc_line, false, 0, 0, is_active, is_cursor_row)
+		is_cursor_row := is_active && doc_line_index == i32(editor_pane.cursor_line)
+		render_doc_line_into(editor, renderer, editor_pane, view_x, screen_y_position, gutter_character_count, gutter_width,
+			doc_line_index, false, 0, 0, is_active, is_cursor_row)
 	}
 }
 
 // Common path for laying out a single document line into a pane at the given
 // screen_y. Used by both the normal and diff renderers.
 //
-// In non-wrap mode we apply `v.scroll_x` to the text so long lines pan
-// horizontally; the gutter background is then painted last (over the text)
-// to mask any glyph that bled left into the gutter area.
+// In non-wrap mode we apply `editor_pane.scroll_x` to the text so long lines
+// pan horizontally; the gutter background is then painted last (over the
+// text) to mask any glyph that bled left into the gutter area.
 @(private="file")
 render_doc_line_into :: proc(
-	ed: ^Editor, renderer: ^sdl3.Renderer, v: ^EditorPane,
+	editor: ^Editor, renderer: ^sdl3.Renderer, editor_pane: ^EditorPane,
 	view_x: i32, screen_y: i32,
-	gutter_chars: u32, gutter_width: i32,
+	gutter_character_count: u32, gutter_width: i32,
 	doc_line: i32,
-	has_sel: bool, sel_lo, sel_hi: u32,
+	has_selection: bool, selection_low, selection_high: u32,
 	is_active: bool, cursor_on_this_line: bool,
 ) {
-	line_idx := u32(doc_line)
-	line_text := document.document_get_line(&v.doc, line_idx, context.temp_allocator)
-	display, byte_to_col := build_line_display(line_text)
+	line_index := u32(doc_line)
+	line_text := document.document_get_line(&editor_pane.document, line_index, context.temp_allocator)
+	display_text, byte_to_visual_column := build_line_display(line_text)
 
-	scroll_x_px := i32(v.scroll_x)
-	if v.wrap_mode { scroll_x_px = 0 }
+	scroll_x_pixels := i32(editor_pane.scroll_x)
+	if editor_pane.wrap_mode { scroll_x_pixels = 0 }
 
-	text_x := view_x + ed.padding_x + gutter_width - scroll_x_px
+	text_x_position := view_x + editor.padding_x + gutter_width - scroll_x_pixels
 
-	if has_sel {
-		line_byte_start := document.document_line_start(&v.doc, line_idx)
+	if has_selection {
+		line_byte_start := document.document_line_start(&editor_pane.document, line_index)
 		line_byte_end := line_byte_start + u32(len(line_text))
-		if sel_hi > line_byte_start && sel_lo <= line_byte_end {
-			lo_byte := sel_lo > line_byte_start ? int(sel_lo - line_byte_start) : 0
-			lo_col := i32(byte_to_col[lo_byte])
+		if selection_high > line_byte_start && selection_low <= line_byte_end {
+			low_byte_index := selection_low > line_byte_start ? int(selection_low - line_byte_start) : 0
+			low_visual_column := i32(byte_to_visual_column[low_byte_index])
 
-			hi_col: i32
-			if sel_hi > line_byte_end {
-				hi_col = i32(byte_to_col[len(line_text)]) + 1
+			high_visual_column: i32
+			if selection_high > line_byte_end {
+				high_visual_column = i32(byte_to_visual_column[len(line_text)]) + 1
 			} else {
-				hi_byte := int(sel_hi - line_byte_start)
-				hi_col = i32(byte_to_col[hi_byte])
+				high_byte_index := int(selection_high - line_byte_start)
+				high_visual_column = i32(byte_to_visual_column[high_byte_index])
 			}
 
-			if hi_col > lo_col {
-				rect := sdl3.FRect{
-					f32(text_x + lo_col * ed.char_width),
+			if high_visual_column > low_visual_column {
+				selection_rectangle := sdl3.FRect{
+					f32(text_x_position + low_visual_column * editor.character_width),
 					f32(screen_y),
-					f32((hi_col - lo_col) * ed.char_width),
-					f32(ed.line_height),
+					f32((high_visual_column - low_visual_column) * editor.character_width),
+					f32(editor.line_height),
 				}
-				sdl3.SetRenderDrawColorFloat(renderer, ed.sel_color.r, ed.sel_color.g, ed.sel_color.b, ed.sel_color.a)
-				sdl3.RenderFillRect(renderer, &rect)
+				sdl3.SetRenderDrawColorFloat(renderer, editor.selection_color.r, editor.selection_color.g, editor.selection_color.b, editor.selection_color.a)
+				sdl3.RenderFillRect(renderer, &selection_rectangle)
 			}
 		}
 	}
 
-	if len(display) > 0 {
-		render_line_with_syntax(ed, renderer, v, display, text_x, screen_y)
+	if len(display_text) > 0 {
+		render_line_with_syntax(editor, renderer, editor_pane, display_text, text_x_position, screen_y)
 	}
 
-	if is_active && cursor_on_this_line && ed.cursor_visible {
-		cursor_col_byte := int(v.cursor_col)
-		cursor_visual_col := byte_to_col[clamp(cursor_col_byte, 0, len(line_text))]
-		cursor_x := text_x + i32(cursor_visual_col) * ed.char_width
+	if is_active && cursor_on_this_line && editor.cursor_visible {
+		cursor_byte_column := int(editor_pane.cursor_column)
+		cursor_visual_column := byte_to_visual_column[clamp(cursor_byte_column, 0, len(line_text))]
+		cursor_x_position := text_x_position + i32(cursor_visual_column) * editor.character_width
 
-		cursor_rect := sdl3.FRect{
-			f32(cursor_x), f32(screen_y),
-			f32(ed.char_width), f32(ed.line_height),
+		cursor_rectangle := sdl3.FRect{
+			f32(cursor_x_position), f32(screen_y),
+			f32(editor.character_width), f32(editor.line_height),
 		}
-		sdl3.SetRenderDrawColorFloat(renderer, ed.cursor_color.r, ed.cursor_color.g, ed.cursor_color.b, 1.0)
-		sdl3.RenderFillRect(renderer, &cursor_rect)
+		sdl3.SetRenderDrawColorFloat(renderer, editor.cursor_color.r, editor.cursor_color.g, editor.cursor_color.b, 1.0)
+		sdl3.RenderFillRect(renderer, &cursor_rectangle)
 
-		if cursor_col_byte < len(line_text) {
-			c := line_text[cursor_col_byte]
-			if c >= 0x20 && c != 0x7F {
-				char_end := cursor_col_byte + 1
-				if c >= 0xC0 {
+		if cursor_byte_column < len(line_text) {
+			character_at_cursor := line_text[cursor_byte_column]
+			if character_at_cursor >= 0x20 && character_at_cursor != 0x7F {
+				character_end_index := cursor_byte_column + 1
+				if character_at_cursor >= 0xC0 {
 					switch {
-					case c < 0xE0: char_end = cursor_col_byte + 2
-					case c < 0xF0: char_end = cursor_col_byte + 3
-					case:          char_end = cursor_col_byte + 4
+					case character_at_cursor < 0xE0: character_end_index = cursor_byte_column + 2
+					case character_at_cursor < 0xF0: character_end_index = cursor_byte_column + 3
+					case:                            character_end_index = cursor_byte_column + 4
 					}
 				}
-				char_end = min(char_end, len(line_text))
-				render_string(ed, renderer, line_text[cursor_col_byte:char_end], cursor_x, screen_y, ed.bg_color)
+				character_end_index = min(character_end_index, len(line_text))
+				render_string(editor, renderer, line_text[cursor_byte_column:character_end_index], cursor_x_position, screen_y, editor.background_color)
 			}
 		}
 	}
@@ -566,179 +566,179 @@ render_doc_line_into :: proc(
 	// Gutter painted last so glyphs panned by horizontal scroll don't bleed
 	// into the line-number column. Only needed when actually scrolled — the
 	// extra fill is otherwise a wasted draw.
-	if scroll_x_px > 0 {
-		gut := sdl3.FRect{ f32(view_x), f32(screen_y), f32(ed.padding_x + gutter_width), f32(ed.line_height) }
-		sdl3.SetRenderDrawColorFloat(renderer, ed.bg_color.r, ed.bg_color.g, ed.bg_color.b, ed.bg_color.a)
-		sdl3.RenderFillRect(renderer, &gut)
+	if scroll_x_pixels > 0 {
+		gutter_rectangle := sdl3.FRect{ f32(view_x), f32(screen_y), f32(editor.padding_x + gutter_width), f32(editor.line_height) }
+		sdl3.SetRenderDrawColorFloat(renderer, editor.background_color.r, editor.background_color.g, editor.background_color.b, editor.background_color.a)
+		sdl3.RenderFillRect(renderer, &gutter_rectangle)
 	}
-	line_num_str := fmt.tprintf("%*d", gutter_chars, line_idx + 1)
-	render_string(ed, renderer, line_num_str, view_x + ed.padding_x, screen_y, ed.line_num_color)
+	line_number_string := fmt.tprintf("%*d", gutter_character_count, line_index + 1)
+	render_string(editor, renderer, line_number_string, view_x + editor.padding_x, screen_y, editor.line_number_color)
 }
 
-// Index of the Pane that contains `v` (so we can read its rect during the
-// wrap-mode layout pass). Returns 0 as a sensible default when the pane
-// can't be found — should never happen in practice.
+// Index of the Pane that contains `editor_pane` (so we can read its rect
+// during the wrap-mode layout pass). Returns 0 as a sensible default when
+// the pane can't be found — should never happen in practice.
 @(private="file")
-get_pane_idx :: proc(ed: ^Editor, v: ^EditorPane) -> int {
-	for i in 0..<len(ed.panes) {
-		if pane_as_editor(&ed.panes[i]) == v { return i }
+get_pane_index :: proc(editor: ^Editor, editor_pane: ^EditorPane) -> int {
+	for pane_index in 0..<len(editor.panes) {
+		if pane_as_editor(&editor.panes[pane_index]) == editor_pane { return pane_index }
 	}
 	return 0
 }
 
 // Render a single source line in wrap mode at `screen_y`, breaking it into
-// visual rows that each hold at most `cols_per_row` characters. Returns the
-// number of visual rows the line consumed so the caller can advance y.
+// visual rows that each hold at most `columns_per_row` characters. Returns
+// the number of visual rows the line consumed so the caller can advance y.
 //
 // MVP: wrap at column count, no per-row selection rectangle (selection only
 // paints under the first visual row), cursor placed on the visual row that
 // contains it.
 @(private="file")
 render_wrapped_doc_line :: proc(
-	ed: ^Editor, renderer: ^sdl3.Renderer, v: ^EditorPane,
+	editor: ^Editor, renderer: ^sdl3.Renderer, editor_pane: ^EditorPane,
 	view_x, screen_y: i32,
-	gutter_chars: u32, gutter_width: i32,
-	cols_per_row: i32,
+	gutter_character_count: u32, gutter_width: i32,
+	columns_per_row: i32,
 	doc_line: i32,
-	has_sel: bool, sel_lo, sel_hi: u32,
+	has_selection: bool, selection_low, selection_high: u32,
 	is_active: bool, cursor_on_this_line: bool,
 ) -> i32 {
-	line_idx := u32(doc_line)
-	line_text := document.document_get_line(&v.doc, line_idx, context.temp_allocator)
-	display, byte_to_col := build_line_display(line_text)
-	display_cols := i32(len(display))
-	if display_cols == 0 { display_cols = 1 } // empty line still occupies one visual row
+	line_index := u32(doc_line)
+	line_text := document.document_get_line(&editor_pane.document, line_index, context.temp_allocator)
+	display_text, byte_to_visual_column := build_line_display(line_text)
+	total_display_columns := i32(len(display_text))
+	if total_display_columns == 0 { total_display_columns = 1 } // empty line still occupies one visual row
 
-	rows := (display_cols + cols_per_row - 1) / cols_per_row
-	if rows < 1 { rows = 1 }
+	visual_row_count := (total_display_columns + columns_per_row - 1) / columns_per_row
+	if visual_row_count < 1 { visual_row_count = 1 }
 
-	text_x := view_x + ed.padding_x + gutter_width
+	text_x_position := view_x + editor.padding_x + gutter_width
 
 	// Selection rectangle on the FIRST visual row only (MVP).
-	if has_sel {
-		line_byte_start := document.document_line_start(&v.doc, line_idx)
+	if has_selection {
+		line_byte_start := document.document_line_start(&editor_pane.document, line_index)
 		line_byte_end := line_byte_start + u32(len(line_text))
-		if sel_hi > line_byte_start && sel_lo <= line_byte_end {
-			lo_byte := sel_lo > line_byte_start ? int(sel_lo - line_byte_start) : 0
-			lo_col := i32(byte_to_col[lo_byte])
-			hi_col: i32
-			if sel_hi > line_byte_end {
-				hi_col = i32(byte_to_col[len(line_text)]) + 1
+		if selection_high > line_byte_start && selection_low <= line_byte_end {
+			low_byte_index := selection_low > line_byte_start ? int(selection_low - line_byte_start) : 0
+			low_visual_column := i32(byte_to_visual_column[low_byte_index])
+			high_visual_column: i32
+			if selection_high > line_byte_end {
+				high_visual_column = i32(byte_to_visual_column[len(line_text)]) + 1
 			} else {
-				hi_byte := int(sel_hi - line_byte_start)
-				hi_col = i32(byte_to_col[hi_byte])
+				high_byte_index := int(selection_high - line_byte_start)
+				high_visual_column = i32(byte_to_visual_column[high_byte_index])
 			}
-			lo_row := lo_col / cols_per_row
-			hi_row := hi_col / cols_per_row
-			for r in lo_row..=hi_row {
-				row_start_col := r * cols_per_row
-				row_end_col   := row_start_col + cols_per_row
-				seg_lo := max(lo_col, row_start_col)
-				seg_hi := min(hi_col, row_end_col)
-				if seg_hi > seg_lo {
-					rect := sdl3.FRect{
-						f32(text_x + (seg_lo - row_start_col) * ed.char_width),
-						f32(screen_y + r * ed.line_height),
-						f32((seg_hi - seg_lo) * ed.char_width),
-						f32(ed.line_height),
+			low_visual_row  := low_visual_column / columns_per_row
+			high_visual_row := high_visual_column / columns_per_row
+			for visual_row in low_visual_row..=high_visual_row {
+				row_start_column := visual_row * columns_per_row
+				row_end_column   := row_start_column + columns_per_row
+				segment_low  := max(low_visual_column,  row_start_column)
+				segment_high := min(high_visual_column, row_end_column)
+				if segment_high > segment_low {
+					selection_rectangle := sdl3.FRect{
+						f32(text_x_position + (segment_low - row_start_column) * editor.character_width),
+						f32(screen_y + visual_row * editor.line_height),
+						f32((segment_high - segment_low) * editor.character_width),
+						f32(editor.line_height),
 					}
-					sdl3.SetRenderDrawColorFloat(renderer, ed.sel_color.r, ed.sel_color.g, ed.sel_color.b, ed.sel_color.a)
-					sdl3.RenderFillRect(renderer, &rect)
+					sdl3.SetRenderDrawColorFloat(renderer, editor.selection_color.r, editor.selection_color.g, editor.selection_color.b, editor.selection_color.a)
+					sdl3.RenderFillRect(renderer, &selection_rectangle)
 				}
 			}
 		}
 	}
 
-	// Render each visual row's slice of `display`.
-	for r in 0..<rows {
-		row_y := screen_y + r * ed.line_height
-		slice_start := int(r * cols_per_row)
-		slice_end   := min(int((r+1)*cols_per_row), len(display))
-		if slice_end > slice_start {
-			render_line_with_syntax(ed, renderer, v, display[slice_start:slice_end], text_x, row_y)
+	// Render each visual row's slice of `display_text`.
+	for visual_row in 0..<visual_row_count {
+		row_y_position := screen_y + visual_row * editor.line_height
+		slice_start_index := int(visual_row * columns_per_row)
+		slice_end_index   := min(int((visual_row+1)*columns_per_row), len(display_text))
+		if slice_end_index > slice_start_index {
+			render_line_with_syntax(editor, renderer, editor_pane, display_text[slice_start_index:slice_end_index], text_x_position, row_y_position)
 		}
 	}
 
 	// Cursor on the visual row it actually falls on.
-	if is_active && cursor_on_this_line && ed.cursor_visible {
-		cursor_col_byte := int(v.cursor_col)
-		cursor_visual_col := i32(byte_to_col[clamp(cursor_col_byte, 0, len(line_text))])
-		cur_row := cursor_visual_col / cols_per_row
-		cur_col := cursor_visual_col - cur_row * cols_per_row
-		cursor_x := text_x + cur_col * ed.char_width
-		cursor_y := screen_y + cur_row * ed.line_height
-		cursor_rect := sdl3.FRect{
-			f32(cursor_x), f32(cursor_y),
-			f32(ed.char_width), f32(ed.line_height),
+	if is_active && cursor_on_this_line && editor.cursor_visible {
+		cursor_byte_column := int(editor_pane.cursor_column)
+		cursor_visual_column := i32(byte_to_visual_column[clamp(cursor_byte_column, 0, len(line_text))])
+		current_visual_row := cursor_visual_column / columns_per_row
+		column_within_row  := cursor_visual_column - current_visual_row * columns_per_row
+		cursor_x_position := text_x_position + column_within_row * editor.character_width
+		cursor_y_position := screen_y + current_visual_row * editor.line_height
+		cursor_rectangle := sdl3.FRect{
+			f32(cursor_x_position), f32(cursor_y_position),
+			f32(editor.character_width), f32(editor.line_height),
 		}
-		sdl3.SetRenderDrawColorFloat(renderer, ed.cursor_color.r, ed.cursor_color.g, ed.cursor_color.b, 1.0)
-		sdl3.RenderFillRect(renderer, &cursor_rect)
+		sdl3.SetRenderDrawColorFloat(renderer, editor.cursor_color.r, editor.cursor_color.g, editor.cursor_color.b, 1.0)
+		sdl3.RenderFillRect(renderer, &cursor_rectangle)
 	}
 
 	// Line number on the first visual row only.
-	line_num_str := fmt.tprintf("%*d", gutter_chars, line_idx + 1)
-	render_string(ed, renderer, line_num_str, view_x + ed.padding_x, screen_y, ed.line_num_color)
+	line_number_string := fmt.tprintf("%*d", gutter_character_count, line_index + 1)
+	render_string(editor, renderer, line_number_string, view_x + editor.padding_x, screen_y, editor.line_number_color)
 
-	return rows
+	return visual_row_count
 }
 
 // Render one display-line, optionally colored by `language`'s tokenizer.
-// `display` is the already-expanded line (tabs → spaces, CR hidden, control
-// chars → '?'). When language is nil, we render in a single pass with the
-// default foreground.
+// `display_text` is the already-expanded line (tabs → spaces, CR hidden,
+// control chars → '?'). When language is nil, we render in a single pass
+// with the default foreground.
 @(private="file")
-render_line_with_syntax :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, v: ^EditorPane, display: string, text_x, screen_y: i32) {
-	if v.language == nil {
-		render_string(ed, renderer, display, text_x, screen_y, ed.fg_color)
+render_line_with_syntax :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, editor_pane: ^EditorPane, display_text: string, text_x, screen_y: i32) {
+	if editor_pane.language == nil {
+		render_string(editor, renderer, display_text, text_x, screen_y, editor.foreground_color)
 		return
 	}
 
 	// Per-frame token buffer in the temp arena.
 	tokens := make([dynamic]syntax.Token, 0, 16, context.temp_allocator)
-	syntax.tokenize_line(v.language, display, &tokens, v.symbol_names)
+	syntax.tokenize_line(editor_pane.language, display_text, &tokens, editor_pane.symbol_names)
 
-	for tok in tokens {
-		if tok.end <= tok.start { continue }
-		substr := display[tok.start:tok.end]
-		color := syntax_color_for(ed, tok.kind)
-		x := text_x + i32(tok.start) * ed.char_width
-		render_string(ed, renderer, substr, x, screen_y, color)
+	for token in tokens {
+		if token.end <= token.start { continue }
+		token_text := display_text[token.start:token.end]
+		token_color := syntax_color_for(editor, token.kind)
+		token_x_position := text_x + i32(token.start) * editor.character_width
+		render_string(editor, renderer, token_text, token_x_position, screen_y, token_color)
 	}
 }
 
 @(private="file")
-syntax_color_for :: proc(ed: ^Editor, kind: syntax.TokenKind) -> sdl3.FColor {
-	switch kind {
-	case .Keyword:      return ed.syntax_keyword_fg
-	case .Type:         return ed.syntax_type_fg
-	case .String:       return ed.syntax_string_fg
-	case .Number:       return ed.syntax_number_fg
-	case .Comment:      return ed.syntax_comment_fg
-	case .Preprocessor: return ed.syntax_preprocessor_fg
-	case .Symbol:       return ed.syntax_symbol_fg
-	case .Punctuation:  return ed.fg_color
-	case .Default:      return ed.fg_color
+syntax_color_for :: proc(editor: ^Editor, token_kind: syntax.TokenKind) -> sdl3.FColor {
+	switch token_kind {
+	case .Keyword:      return editor.syntax_keyword_foreground
+	case .Type:         return editor.syntax_type_foreground
+	case .String:       return editor.syntax_string_foreground
+	case .Number:       return editor.syntax_number_foreground
+	case .Comment:      return editor.syntax_comment_foreground
+	case .Preprocessor: return editor.syntax_preprocessor_foreground
+	case .Symbol:       return editor.syntax_symbol_foreground
+	case .Punctuation:  return editor.foreground_color
+	case .Default:      return editor.foreground_color
 	}
-	return ed.fg_color
+	return editor.foreground_color
 }
 
 @(private="file")
-render_string :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, str: string, x: i32, y: i32, color: sdl3.FColor) {
-	if len(str) == 0 { return }
-	text_obj := ui.text_cache_get(&ed.text_cache, str)
-	if text_obj == nil { return }
-	_ = ttf.SetTextColorFloat(text_obj, color.r, color.g, color.b, color.a)
-	_ = ttf.DrawRendererText(text_obj, f32(x), f32(y))
+render_string :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, text_to_render: string, x_position: i32, y_position: i32, color: sdl3.FColor) {
+	if len(text_to_render) == 0 { return }
+	text_object := ui.text_cache_get(&editor.text_cache, text_to_render)
+	if text_object == nil { return }
+	_ = ttf.SetTextColorFloat(text_object, color.r, color.g, color.b, color.a)
+	_ = ttf.DrawRendererText(text_object, f32(x_position), f32(y_position))
 }
 
 @(private="file")
-digit_count :: proc(n: u32) -> u32 {
-	if n == 0 { return 1 }
-	count: u32 = 0
-	val := n
-	for val > 0 {
-		count += 1
-		val /= 10
+digit_count :: proc(number: u32) -> u32 {
+	if number == 0 { return 1 }
+	digit_total: u32 = 0
+	remaining_value := number
+	for remaining_value > 0 {
+		digit_total += 1
+		remaining_value /= 10
 	}
-	return count
+	return digit_total
 }

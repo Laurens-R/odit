@@ -3,57 +3,57 @@ package editor
 import "../document"
 
 @(private)
-selection_range :: proc(ed: ^Editor) -> (lo: u32, hi: u32, has: bool) {
-	v := editor_active_editor_pane(ed); if v == nil { return }
-	if !v.sel_active { return 0, 0, false }
-	lo = min(v.sel_anchor, v.cursor_offset)
-	hi = max(v.sel_anchor, v.cursor_offset)
-	has = lo != hi
+selection_range :: proc(editor: ^Editor) -> (low_offset: u32, high_offset: u32, has_selection: bool) {
+	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return }
+	if !editor_pane.selection_active { return 0, 0, false }
+	low_offset  = min(editor_pane.selection_anchor, editor_pane.cursor_offset)
+	high_offset = max(editor_pane.selection_anchor, editor_pane.cursor_offset)
+	has_selection = low_offset != high_offset
 	return
 }
 
 @(private)
-editor_pane_selection_range :: proc(ep: ^EditorPane) -> (lo: u32, hi: u32, has: bool) {
-	if !ep.sel_active { return 0, 0, false }
-	lo = min(ep.sel_anchor, ep.cursor_offset)
-	hi = max(ep.sel_anchor, ep.cursor_offset)
-	has = lo != hi
+editor_pane_selection_range :: proc(editor_pane: ^EditorPane) -> (low_offset: u32, high_offset: u32, has_selection: bool) {
+	if !editor_pane.selection_active { return 0, 0, false }
+	low_offset  = min(editor_pane.selection_anchor, editor_pane.cursor_offset)
+	high_offset = max(editor_pane.selection_anchor, editor_pane.cursor_offset)
+	has_selection = low_offset != high_offset
 	return
 }
 
 @(private)
-delete_selection :: proc(ed: ^Editor) -> bool {
-	v := editor_active_editor_pane(ed); if v == nil { return false }
-	lo, hi, has := selection_range(ed)
-	v.sel_active = false
-	if !has { return false }
-	document.document_delete(&v.doc, lo, hi - lo)
-	v.symbols_dirty = true
-	v.cursor_offset = lo
-	sync_cursor_from_offset(ed)
+delete_selection :: proc(editor: ^Editor) -> bool {
+	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return false }
+	low_offset, high_offset, has_selection := selection_range(editor)
+	editor_pane.selection_active = false
+	if !has_selection { return false }
+	document.document_delete(&editor_pane.document, low_offset, high_offset - low_offset)
+	editor_pane.symbols_dirty = true
+	editor_pane.cursor_offset = low_offset
+	sync_cursor_from_offset(editor)
 	return true
 }
 
 @(private)
-collapse_selection :: proc(ed: ^Editor, to_end: bool) -> bool {
-	v := editor_active_editor_pane(ed); if v == nil { return false }
-	lo, hi, has := selection_range(ed)
-	v.sel_active = false
-	if !has { return false }
-	v.cursor_offset = to_end ? hi : lo
-	sync_cursor_from_offset(ed)
+collapse_selection :: proc(editor: ^Editor, collapse_to_end: bool) -> bool {
+	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return false }
+	low_offset, high_offset, has_selection := selection_range(editor)
+	editor_pane.selection_active = false
+	if !has_selection { return false }
+	editor_pane.cursor_offset = collapse_to_end ? high_offset : low_offset
+	sync_cursor_from_offset(editor)
 	return true
 }
 
 @(private)
-update_selection_for_nav :: proc(ed: ^Editor, shift: bool) {
-	v := editor_active_editor_pane(ed); if v == nil { return }
-	if shift {
-		if !v.sel_active {
-			v.sel_anchor = v.cursor_offset
-			v.sel_active = true
+update_selection_for_nav :: proc(editor: ^Editor, shift_held: bool) {
+	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return }
+	if shift_held {
+		if !editor_pane.selection_active {
+			editor_pane.selection_anchor = editor_pane.cursor_offset
+			editor_pane.selection_active = true
 		}
 	} else {
-		v.sel_active = false
+		editor_pane.selection_active = false
 	}
 }

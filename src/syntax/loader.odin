@@ -57,25 +57,25 @@ LANGUAGE_BLOBS := [?]string{
 
 @(private)
 load_builtin_definitions :: proc() {
-	for blob in LANGUAGE_BLOBS {
-		raw: DefinitionJSON
-		if err := json.unmarshal_string(blob, &raw, allocator = context.temp_allocator); err != nil {
+	for language_blob in LANGUAGE_BLOBS {
+		raw_definition: DefinitionJSON
+		if unmarshal_error := json.unmarshal_string(language_blob, &raw_definition, allocator = context.temp_allocator); unmarshal_error != nil {
 			continue // skip malformed — silent fallback to plain rendering
 		}
 
-		def := new(Definition)
-		def.name                = strings.clone(raw.name)
-		def.extensions          = clone_string_slice(raw.extensions)
-		def.line_comment        = strings.clone(raw.line_comment)
-		def.block_comment_start = strings.clone(raw.block_comment_start)
-		def.block_comment_end   = strings.clone(raw.block_comment_end)
-		def.preprocessor_prefix = strings.clone(raw.preprocessor_prefix)
-		def.keywords            = clone_string_slice(raw.keywords)
-		def.types               = clone_string_slice(raw.types)
-		def.scope_start         = clone_scope_slice(raw.scope_start, "{")
-		def.scope_end           = clone_scope_slice(raw.scope_end,   "}")
-		def.symbol_patterns     = build_symbol_patterns(raw.symbol_patterns)
-		register(def)
+		language_definition := new(Definition)
+		language_definition.name                = strings.clone(raw_definition.name)
+		language_definition.extensions          = clone_string_slice(raw_definition.extensions)
+		language_definition.line_comment        = strings.clone(raw_definition.line_comment)
+		language_definition.block_comment_start = strings.clone(raw_definition.block_comment_start)
+		language_definition.block_comment_end   = strings.clone(raw_definition.block_comment_end)
+		language_definition.preprocessor_prefix = strings.clone(raw_definition.preprocessor_prefix)
+		language_definition.keywords            = clone_string_slice(raw_definition.keywords)
+		language_definition.types               = clone_string_slice(raw_definition.types)
+		language_definition.scope_start         = clone_scope_slice(raw_definition.scope_start, "{")
+		language_definition.scope_end           = clone_scope_slice(raw_definition.scope_end,   "}")
+		language_definition.symbol_patterns     = build_symbol_patterns(raw_definition.symbol_patterns)
+		register(language_definition)
 	}
 }
 
@@ -84,73 +84,73 @@ load_builtin_definitions :: proc() {
 // scope_end so every existing C-family JSON keeps the historical `{` / `}`
 // behavior without needing a code change.
 @(private="file")
-clone_scope_slice :: proc(src: []string, default_token: string) -> []string {
-	if len(src) == 0 {
-		out := make([]string, 1)
-		out[0] = strings.clone(default_token)
-		return out
+clone_scope_slice :: proc(source_slice: []string, default_token: string) -> []string {
+	if len(source_slice) == 0 {
+		output_slice := make([]string, 1)
+		output_slice[0] = strings.clone(default_token)
+		return output_slice
 	}
-	return clone_string_slice(src)
+	return clone_string_slice(source_slice)
 }
 
 @(private="file")
-build_symbol_patterns :: proc(raw: []SymbolPatternJSON) -> []SymbolPattern {
-	out := make([]SymbolPattern, len(raw))
-	for r, i in raw {
-		tokens := strings.fields(r.pattern, context.temp_allocator)
-		owned := make([]PatternToken, len(tokens))
-		for t, k in tokens { owned[k] = parse_pattern_token(t) }
-		out[i] = SymbolPattern{
-			tokens = owned,
-			kind   = parse_symbol_kind(r.kind),
+build_symbol_patterns :: proc(raw_patterns: []SymbolPatternJSON) -> []SymbolPattern {
+	output_patterns := make([]SymbolPattern, len(raw_patterns))
+	for raw_pattern, pattern_index in raw_patterns {
+		token_strings := strings.fields(raw_pattern.pattern, context.temp_allocator)
+		owned_tokens := make([]PatternToken, len(token_strings))
+		for token_string, token_index in token_strings { owned_tokens[token_index] = parse_pattern_token(token_string) }
+		output_patterns[pattern_index] = SymbolPattern{
+			tokens = owned_tokens,
+			kind   = parse_symbol_kind(raw_pattern.kind),
 		}
 	}
-	return out
+	return output_patterns
 }
 
 @(private="file")
-parse_pattern_token :: proc(t: string) -> PatternToken {
+parse_pattern_token :: proc(token_string: string) -> PatternToken {
 	// Bare `...` is the non-greedy run wildcard. `{...}` is accepted as a
 	// synonym for consistency with the other braced placeholders.
-	if t == "..." { return PatternToken{kind = .Ellipsis} }
+	if token_string == "..." { return PatternToken{kind = .Ellipsis} }
 
 	// {PLACEHOLDER} forms
-	if len(t) >= 2 && t[0] == '{' && t[len(t)-1] == '}' {
-		inner := t[1:len(t)-1]
+	if len(token_string) >= 2 && token_string[0] == '{' && token_string[len(token_string)-1] == '}' {
+		inner_content := token_string[1:len(token_string)-1]
 
 		// {OPTIONAL:X} — try to match X, skip if it doesn't. X can be a
 		// placeholder, a literal, or another braced operator (notably
 		// `{OPTION:A|B|C}` so optional-alternation works).
-		if len(inner) >= len("OPTIONAL:") && inner[:len("OPTIONAL:")] == "OPTIONAL:" {
-			sub := inner[len("OPTIONAL:"):]
-			ip := new(PatternToken)
-			ip^ = parse_inner_token(sub)
-			return PatternToken{kind = .Optional, inner = ip}
+		if len(inner_content) >= len("OPTIONAL:") && inner_content[:len("OPTIONAL:")] == "OPTIONAL:" {
+			sub_token_string := inner_content[len("OPTIONAL:"):]
+			inner_token_pointer := new(PatternToken)
+			inner_token_pointer^ = parse_inner_token(sub_token_string)
+			return PatternToken{kind = .Optional, inner_token = inner_token_pointer}
 		}
 
 		// {NOT:X} — zero-width negative lookahead. Same inner grammar as
 		// OPTIONAL but the pattern fails when X matches instead of succeeding.
-		if len(inner) >= len("NOT:") && inner[:len("NOT:")] == "NOT:" {
-			sub := inner[len("NOT:"):]
-			ip := new(PatternToken)
-			ip^ = parse_inner_token(sub)
-			return PatternToken{kind = .Not, inner = ip}
+		if len(inner_content) >= len("NOT:") && inner_content[:len("NOT:")] == "NOT:" {
+			sub_token_string := inner_content[len("NOT:"):]
+			inner_token_pointer := new(PatternToken)
+			inner_token_pointer^ = parse_inner_token(sub_token_string)
+			return PatternToken{kind = .Not, inner_token = inner_token_pointer}
 		}
 
 		// {OPTION:A|B|C} — mandatory alternation. Each pipe-separated piece
 		// is a sub-token (placeholder OR literal). Empty pieces are kept as-
 		// is; they'll simply never match (use them sparingly).
-		if len(inner) >= len("OPTION:") && inner[:len("OPTION:")] == "OPTION:" {
-			sub := inner[len("OPTION:"):]
-			parts := strings.split(sub, "|", context.temp_allocator)
-			opts := make([]PatternToken, len(parts))
-			for part, k in parts {
-				opts[k] = parse_inner_token(part)
+		if len(inner_content) >= len("OPTION:") && inner_content[:len("OPTION:")] == "OPTION:" {
+			sub_token_string := inner_content[len("OPTION:"):]
+			alternative_strings := strings.split(sub_token_string, "|", context.temp_allocator)
+			alternative_tokens := make([]PatternToken, len(alternative_strings))
+			for alternative_string, alternative_index in alternative_strings {
+				alternative_tokens[alternative_index] = parse_inner_token(alternative_string)
 			}
-			return PatternToken{kind = .Option, options = opts}
+			return PatternToken{kind = .Option, alternatives = alternative_tokens}
 		}
 
-		switch inner {
+		switch inner_content {
 		case "NAME":    return PatternToken{kind = .Name}
 		case "TYPE":    return PatternToken{kind = .Type}
 		case "NOTHING": return PatternToken{kind = .Nothing}
@@ -161,8 +161,8 @@ parse_pattern_token :: proc(t: string) -> PatternToken {
 		// surfaces visibly (matches nothing) rather than silently dropping.
 	}
 	// Backward compatibility: bare `NAME` is the original capture syntax.
-	if t == "NAME" { return PatternToken{kind = .Name} }
-	return PatternToken{kind = .Literal, text = strings.clone(t)}
+	if token_string == "NAME" { return PatternToken{kind = .Name} }
+	return PatternToken{kind = .Literal, text = strings.clone(token_string)}
 }
 
 // Parse the body of an `{OPTIONAL:X}` / `{NOT:X}` / `{OPTION:…|X|…}` slot.
@@ -171,23 +171,23 @@ parse_pattern_token :: proc(t: string) -> PatternToken {
 // OPTIONAL wrapper) are honored. Otherwise we accept bare placeholder names
 // or fall back to a Literal.
 @(private="file")
-parse_inner_token :: proc(s: string) -> PatternToken {
-	if len(s) >= 2 && s[0] == '{' && s[len(s)-1] == '}' {
-		return parse_pattern_token(s)
+parse_inner_token :: proc(inner_string: string) -> PatternToken {
+	if len(inner_string) >= 2 && inner_string[0] == '{' && inner_string[len(inner_string)-1] == '}' {
+		return parse_pattern_token(inner_string)
 	}
-	switch s {
+	switch inner_string {
 	case "NAME":    return PatternToken{kind = .Name}
 	case "TYPE":    return PatternToken{kind = .Type}
 	case "NOTHING": return PatternToken{kind = .Nothing}
 	case "ANY":     return PatternToken{kind = .Any}
 	case "...":     return PatternToken{kind = .Ellipsis}
 	}
-	return PatternToken{kind = .Literal, text = strings.clone(s)}
+	return PatternToken{kind = .Literal, text = strings.clone(inner_string)}
 }
 
 @(private="file")
-parse_symbol_kind :: proc(s: string) -> SymbolKind {
-	switch s {
+parse_symbol_kind :: proc(kind_string: string) -> SymbolKind {
+	switch kind_string {
 	case "Function": return .Function
 	case "Type":     return .Type
 	case "Variable": return .Variable
@@ -197,8 +197,8 @@ parse_symbol_kind :: proc(s: string) -> SymbolKind {
 }
 
 @(private="file")
-clone_string_slice :: proc(src: []string) -> []string {
-	out := make([]string, len(src))
-	for s, i in src { out[i] = strings.clone(s) }
-	return out
+clone_string_slice :: proc(source_slice: []string) -> []string {
+	output_slice := make([]string, len(source_slice))
+	for source_string, slice_index in source_slice { output_slice[slice_index] = strings.clone(source_string) }
+	return output_slice
 }

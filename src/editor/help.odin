@@ -6,8 +6,8 @@ import "../ui"
 
 @(private="file")
 HelpItem :: struct {
-	key:  string,
-	desc: string,
+	keybinding:  string,
+	description: string,
 }
 
 @(private="file")
@@ -80,93 +80,93 @@ help_sections := [?]HelpSection{
 }
 
 @(private)
-help_toggle :: proc(ed: ^Editor) {
-	if !ed.show_help {
-		ed.help_scroll = 0
+help_toggle :: proc(editor: ^Editor) {
+	if !editor.show_help {
+		editor.help_scroll = 0
 	}
-	ed.show_help = !ed.show_help
+	editor.show_help = !editor.show_help
 }
 
 @(private)
-help_close :: proc(ed: ^Editor) {
-	ed.show_help = false
+help_close :: proc(editor: ^Editor) {
+	editor.show_help = false
 }
 
 @(private)
-help_render :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, width, height: i32) {
-	ctx := ui.Context{
-		renderer    = renderer,
-		font        = ed.font,
-		engine      = ed.engine,
-		char_width  = ed.char_width,
-		line_height = ed.line_height,
+help_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewport_width, viewport_height: i32) {
+	ui_context := ui.Context{
+		renderer        = renderer,
+		font            = editor.font,
+		engine          = editor.text_engine,
+		character_width = editor.character_width,
+		line_height     = editor.line_height,
 	}
 	theme := ui.default_theme()
 
 	// Dim everything behind the dialog.
-	ui.draw_dim_overlay(&ctx, width, height, theme.overlay)
+	ui.draw_dim_overlay(&ui_context, viewport_width, viewport_height, theme.overlay)
 
 	// Size the dialog from font metrics, then clamp to viewport.
-	want_cols: i32 = 56
-	want_rows: i32 = 34
-	dialog_w := min(want_cols * ed.char_width + 32, width  - 40)
-	dialog_h := min(want_rows * ed.line_height + 40, height - 40)
-	if dialog_w < 200 { dialog_w = min(width  - 16, 200) }
-	if dialog_h < 200 { dialog_h = min(height - 16, 200) }
-	dialog_x := (width  - dialog_w) / 2
-	dialog_y := (height - dialog_h) / 2
-	dialog_rect := sdl3.FRect{f32(dialog_x), f32(dialog_y), f32(dialog_w), f32(dialog_h)}
+	desired_columns: i32 = 56
+	desired_rows: i32 = 34
+	dialog_width  := min(desired_columns * editor.character_width + 32, viewport_width  - 40)
+	dialog_height := min(desired_rows * editor.line_height + 40, viewport_height - 40)
+	if dialog_width  < 200 { dialog_width  = min(viewport_width  - 16, 200) }
+	if dialog_height < 200 { dialog_height = min(viewport_height - 16, 200) }
+	dialog_x := (viewport_width  - dialog_width)  / 2
+	dialog_y := (viewport_height - dialog_height) / 2
+	dialog_rectangle := sdl3.FRect{f32(dialog_x), f32(dialog_y), f32(dialog_width), f32(dialog_height)}
 
-	content := ui.draw_window(&ctx, dialog_rect, "Help — odit", theme)
+	content_rectangle := ui.draw_window(&ui_context, dialog_rectangle, "Help — odit", theme)
 
-	line_step := ed.line_height
+	line_step := editor.line_height
 
 	// Carve out a footer strip at the bottom of the dialog; everything above
 	// it is the scrollable viewport.
-	footer_reserve: f32 = f32(line_step) + 18
-	viewport := sdl3.FRect{
-		x = content.x,
-		y = content.y,
-		w = content.w - 12, // leave room for the scrollbar on the right
-		h = (dialog_rect.y + dialog_rect.h - footer_reserve) - content.y,
+	footer_reservation_height: f32 = f32(line_step) + 18
+	viewport_rectangle := sdl3.FRect{
+		x = content_rectangle.x,
+		y = content_rectangle.y,
+		w = content_rectangle.w - 12, // leave room for the scrollbar on the right
+		h = (dialog_rectangle.y + dialog_rectangle.h - footer_reservation_height) - content_rectangle.y,
 	}
-	if viewport.h < f32(line_step) { viewport.h = f32(line_step) }
+	if viewport_rectangle.h < f32(line_step) { viewport_rectangle.h = f32(line_step) }
 
-	content_height := help_content_height(line_step)
+	total_content_height := help_content_height(line_step)
 
-	x, y, sv := ui.scroll_view_begin(&ctx, viewport, &ed.help_scroll, content_height)
+	origin_x, origin_y, scroll_view := ui.scroll_view_begin(&ui_context, viewport_rectangle, &editor.help_scroll, total_content_height)
 
-	ui.draw_text(&ctx, "Welcome to odit — a terminal-inspired text editor.", x, y, theme.text_fg)
-	y += line_step
-	ui.draw_text(&ctx, "Every shortcut currently wired up is listed below.", x, y, theme.dim_fg)
-	y += line_step + 6
+	ui.draw_text(&ui_context, "Welcome to odit — a terminal-inspired text editor.", origin_x, origin_y, theme.text_foreground)
+	origin_y += line_step
+	ui.draw_text(&ui_context, "Every shortcut currently wired up is listed below.", origin_x, origin_y, theme.dim_foreground)
+	origin_y += line_step + 6
 
-	ui.draw_hrule(&ctx, x, y, i32(viewport.w), theme.border)
-	y += 8
+	ui.draw_hrule(&ui_context, origin_x, origin_y, i32(viewport_rectangle.w), theme.border)
+	origin_y += 8
 
-	key_col_x  := x + 2 * ed.char_width
-	desc_col_x := x + 18 * ed.char_width
+	keybinding_column_x  := origin_x + 2 * editor.character_width
+	description_column_x := origin_x + 18 * editor.character_width
 
-	for section, i in help_sections {
-		if i > 0 { y += line_step / 2 }
-		ui.draw_text(&ctx, section.title, x, y, theme.accent_fg)
-		y += line_step + 2
+	for section, section_index in help_sections {
+		if section_index > 0 { origin_y += line_step / 2 }
+		ui.draw_text(&ui_context, section.title, origin_x, origin_y, theme.accent_foreground)
+		origin_y += line_step + 2
 
-		for item in section.items {
-			ui.draw_text(&ctx, item.key,  key_col_x,  y, theme.title_fg)
-			ui.draw_text(&ctx, item.desc, desc_col_x, y, theme.text_fg)
-			y += line_step
+		for help_item in section.items {
+			ui.draw_text(&ui_context, help_item.keybinding,  keybinding_column_x,  origin_y, theme.title_foreground)
+			ui.draw_text(&ui_context, help_item.description, description_column_x, origin_y, theme.text_foreground)
+			origin_y += line_step
 		}
 	}
 
-	ui.scroll_view_end(sv, theme)
+	ui.scroll_view_end(scroll_view, theme)
 
 	// Footer hint, anchored to the bottom of the dialog (outside the viewport).
-	footer := "Press F1 or Esc to close"
-	fw, _ := ui.text_size(&ctx, footer)
-	foot_x := i32(dialog_rect.x + (dialog_rect.w - f32(fw)) / 2)
-	foot_y := i32(dialog_rect.y + dialog_rect.h) - line_step - 10
-	ui.draw_text(&ctx, footer, foot_x, foot_y, theme.dim_fg)
+	footer_text := "Press F1 or Esc to close"
+	footer_width, _ := ui.text_size(&ui_context, footer_text)
+	footer_x := i32(dialog_rectangle.x + (dialog_rectangle.w - f32(footer_width)) / 2)
+	footer_y := i32(dialog_rectangle.y + dialog_rectangle.h) - line_step - 10
+	ui.draw_text(&ui_context, footer_text, footer_x, footer_y, theme.dim_foreground)
 }
 
 // Compute the total pixel height of the help content laid out at `line_step`.
@@ -174,33 +174,33 @@ help_render :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, width, height: i32) {
 // scrollbar thumb stay in sync with what's actually drawn.
 @(private="file")
 help_content_height :: proc(line_step: i32) -> i32 {
-	h: i32 = 0
-	h += line_step           // intro line 1
-	h += line_step + 6       // intro line 2 + gap
-	h += 8                   // hrule + gap
+	accumulated_height: i32 = 0
+	accumulated_height += line_step           // intro line 1
+	accumulated_height += line_step + 6       // intro line 2 + gap
+	accumulated_height += 8                   // hrule + gap
 
-	for section, i in help_sections {
-		if i > 0 { h += line_step / 2 }
-		h += line_step + 2  // section header
-		h += i32(len(section.items)) * line_step
+	for section, section_index in help_sections {
+		if section_index > 0 { accumulated_height += line_step / 2 }
+		accumulated_height += line_step + 2  // section header
+		accumulated_height += i32(len(section.items)) * line_step
 	}
-	return h
+	return accumulated_height
 }
 
 @(private)
-help_scroll_by :: proc(ed: ^Editor, delta: i32) {
-	ed.help_scroll += delta
+help_scroll_by :: proc(editor: ^Editor, scroll_delta: i32) {
+	editor.help_scroll += scroll_delta
 	// Render clamps to the valid range each frame; no need to compute max here.
-	if ed.help_scroll < 0 { ed.help_scroll = 0 }
+	if editor.help_scroll < 0 { editor.help_scroll = 0 }
 }
 
 @(private)
-help_scroll_to_top :: proc(ed: ^Editor) {
-	ed.help_scroll = 0
+help_scroll_to_top :: proc(editor: ^Editor) {
+	editor.help_scroll = 0
 }
 
 @(private)
-help_scroll_to_bottom :: proc(ed: ^Editor) {
+help_scroll_to_bottom :: proc(editor: ^Editor) {
 	// Use a sentinel large value; render clamps to the actual max.
-	ed.help_scroll = 1 << 30
+	editor.help_scroll = 1 << 30
 }

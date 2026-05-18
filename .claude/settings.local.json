@@ -9,7 +9,9 @@
       "Bash(odin run:*)",
       "Bash(find /d/odit -name *.dll)",
       "Bash(timeout 4 ./odit.exe)",
-      "Bash(odin root *)"
+      "Bash(odin root *)",
+      "PowerShell(odin build *)",
+      "PowerShell(Test-Path D:\\\\odit\\\\odit_new.exe; \\(Get-Item D:\\\\odit\\\\odit_new.exe -ErrorAction SilentlyContinue\\).Length)"
     ]
   }
 }

@@ -8,13 +8,13 @@ import win32 "core:sys/windows"
 // CreatePseudoConsole). The pty handles get closed right after the console
 // is created — they're owned by the kernel from that point on.
 PtyState :: struct {
-	hpcon:        HPCON,
-	process:      win32.HANDLE,
-	thread_h:     win32.HANDLE,
-	pipe_in:      win32.HANDLE, // host writes to shell stdin
-	pipe_out:     win32.HANDLE, // host reads from shell stdout/stderr
-	attr_list:    rawptr,
-	attr_list_size: win32.SIZE_T,
+	pseudo_console_handle:    HPCON,
+	process_handle:           win32.HANDLE,
+	thread_handle:            win32.HANDLE,
+	pipe_to_shell_stdin:      win32.HANDLE, // host writes to shell stdin
+	pipe_from_shell_stdout:   win32.HANDLE, // host reads from shell stdout/stderr
+	attribute_list:           rawptr,
+	attribute_list_size:      win32.SIZE_T,
 }
 
 HPCON :: distinct rawptr
@@ -63,145 +63,145 @@ foreign kernel32 {
 	DeleteProcThreadAttributeList :: proc(lp_attribute_list: rawptr) ---
 }
 
-// Spawn powershell.exe attached to a fresh pseudo-console sized cols x rows.
-// On success, `t.pty` is fully populated and ready for read/write. On
-// failure, everything is closed and the proc returns false; the caller
+// Spawn powershell.exe attached to a fresh pseudo-console sized columns x rows.
+// On success, `terminal.pty_state` is fully populated and ready for read/write.
+// On failure, everything is closed and the proc returns false; the caller
 // typically falls back to "no terminal".
 @(private)
-pty_spawn :: proc(t: ^Terminal, cols, rows: i32) -> bool {
-	pty := &t.pty
-	pty^ = PtyState{}
+pty_spawn :: proc(terminal: ^Terminal, columns, rows: i32) -> bool {
+	pty_state := &terminal.pty_state
+	pty_state^ = PtyState{}
 
 	// Two pairs of anonymous pipes — one in each direction.
-	pty_in_read,  pty_in_write : win32.HANDLE
-	pty_out_read, pty_out_write: win32.HANDLE
+	pty_input_read_handle,    pty_input_write_handle:  win32.HANDLE
+	pty_output_read_handle,   pty_output_write_handle: win32.HANDLE
 
-	sa := win32.SECURITY_ATTRIBUTES{}
-	sa.nLength = size_of(win32.SECURITY_ATTRIBUTES)
-	sa.bInheritHandle = true
+	security_attributes := win32.SECURITY_ATTRIBUTES{}
+	security_attributes.nLength = size_of(win32.SECURITY_ATTRIBUTES)
+	security_attributes.bInheritHandle = true
 
-	if !win32.CreatePipe(&pty_in_read,  &pty_in_write,  &sa, 0) { return false }
-	if !win32.CreatePipe(&pty_out_read, &pty_out_write, &sa, 0) {
-		win32.CloseHandle(pty_in_read);  win32.CloseHandle(pty_in_write)
+	if !win32.CreatePipe(&pty_input_read_handle,  &pty_input_write_handle,  &security_attributes, 0) { return false }
+	if !win32.CreatePipe(&pty_output_read_handle, &pty_output_write_handle, &security_attributes, 0) {
+		win32.CloseHandle(pty_input_read_handle);  win32.CloseHandle(pty_input_write_handle)
 		return false
 	}
 
-	size := win32.COORD{ X = i16(cols), Y = i16(rows) }
-	hr := CreatePseudoConsole(size, pty_in_read, pty_out_write, 0, &pty.hpcon)
+	console_size := win32.COORD{ X = i16(columns), Y = i16(rows) }
+	creation_result := CreatePseudoConsole(console_size, pty_input_read_handle, pty_output_write_handle, 0, &pty_state.pseudo_console_handle)
 	// CreatePseudoConsole duplicates the handles it cares about; we can
 	// close the child-side pipes once the call returns.
-	win32.CloseHandle(pty_in_read)
-	win32.CloseHandle(pty_out_write)
-	if hr != 0 {
-		win32.CloseHandle(pty_in_write); win32.CloseHandle(pty_out_read)
+	win32.CloseHandle(pty_input_read_handle)
+	win32.CloseHandle(pty_output_write_handle)
+	if creation_result != 0 {
+		win32.CloseHandle(pty_input_write_handle); win32.CloseHandle(pty_output_read_handle)
 		return false
 	}
 
-	pty.pipe_in  = pty_in_write
-	pty.pipe_out = pty_out_read
+	pty_state.pipe_to_shell_stdin    = pty_input_write_handle
+	pty_state.pipe_from_shell_stdout = pty_output_read_handle
 
-	// Build the STARTUPINFOEX with one extended attribute carrying the HPCON.
-	size_needed: win32.SIZE_T
-	InitializeProcThreadAttributeList(nil, 1, 0, &size_needed)
-	pty.attr_list      = raw_alloc(int(size_needed))
-	pty.attr_list_size = size_needed
-	if pty.attr_list == nil {
-		pty_close(t); pty_finalize(t)
+	// Build the STARTUPINFOEX with one extended attribute carrying the pseudo-console handle.
+	attribute_list_size_needed: win32.SIZE_T
+	InitializeProcThreadAttributeList(nil, 1, 0, &attribute_list_size_needed)
+	pty_state.attribute_list      = raw_alloc(int(attribute_list_size_needed))
+	pty_state.attribute_list_size = attribute_list_size_needed
+	if pty_state.attribute_list == nil {
+		pty_close(terminal); pty_finalize(terminal)
 		return false
 	}
-	if !InitializeProcThreadAttributeList(pty.attr_list, 1, 0, &size_needed) {
-		pty_close(t); pty_finalize(t)
+	if !InitializeProcThreadAttributeList(pty_state.attribute_list, 1, 0, &attribute_list_size_needed) {
+		pty_close(terminal); pty_finalize(terminal)
 		return false
 	}
 	if !UpdateProcThreadAttribute(
-		pty.attr_list,
+		pty_state.attribute_list,
 		0,
 		PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-		rawptr(pty.hpcon),
+		rawptr(pty_state.pseudo_console_handle),
 		size_of(HPCON),
 		nil,
 		nil,
 	) {
-		pty_close(t); pty_finalize(t)
+		pty_close(terminal); pty_finalize(terminal)
 		return false
 	}
 
-	si := STARTUPINFOEXW{}
-	si.StartupInfo.cb              = u32(size_of(STARTUPINFOEXW))
-	si.lpAttributeList             = pty.attr_list
+	startup_info := STARTUPINFOEXW{}
+	startup_info.StartupInfo.cb = u32(size_of(STARTUPINFOEXW))
+	startup_info.lpAttributeList = pty_state.attribute_list
 
 	// Build the command line in a writable wide buffer — CreateProcessW
 	// requires lpCommandLine to be mutable.
-	cmdline := win32.utf8_to_wstring(`powershell.exe -NoLogo`)
+	command_line_wstring := win32.utf8_to_wstring(`powershell.exe -NoLogo`)
 
-	pi := win32.PROCESS_INFORMATION{}
-	ok := win32.CreateProcessW(
+	process_information := win32.PROCESS_INFORMATION{}
+	process_created := win32.CreateProcessW(
 		nil,                          // lpApplicationName
-		cmdline,                      // lpCommandLine (writable wstring)
+		command_line_wstring,         // lpCommandLine (writable wstring)
 		nil, nil,
 		false,                        // bInheritHandles — handles flow via the attribute list
 		EXTENDED_STARTUPINFO_PRESENT,
 		nil, nil,
-		&si.StartupInfo,
-		&pi,
+		&startup_info.StartupInfo,
+		&process_information,
 	)
-	if !ok {
-		pty_close(t); pty_finalize(t)
+	if !process_created {
+		pty_close(terminal); pty_finalize(terminal)
 		return false
 	}
 
-	pty.process  = pi.hProcess
-	pty.thread_h = pi.hThread
+	pty_state.process_handle = process_information.hProcess
+	pty_state.thread_handle  = process_information.hThread
 	return true
 }
 
 // Phase 1 of shutdown — terminate the child and close the host-side pipes.
 // Doing the kill first means ClosePseudoConsole (called later in
 // `pty_finalize`) won't sit there waiting for the shell to exit. Closing
-// `pipe_out` is what releases a ReadFile that the reader thread might be
-// blocked in, so this MUST run before joining that thread.
+// `pipe_from_shell_stdout` is what releases a ReadFile that the reader
+// thread might be blocked in, so this MUST run before joining that thread.
 @(private)
-pty_close :: proc(t: ^Terminal) {
-	pty := &t.pty
+pty_close :: proc(terminal: ^Terminal) {
+	pty_state := &terminal.pty_state
 
-	if pty.process != nil {
-		win32.TerminateProcess(pty.process, 0)
+	if pty_state.process_handle != nil {
+		win32.TerminateProcess(pty_state.process_handle, 0)
 	}
-	if pty.pipe_in != nil {
-		win32.CloseHandle(pty.pipe_in);  pty.pipe_in = nil
+	if pty_state.pipe_to_shell_stdin != nil {
+		win32.CloseHandle(pty_state.pipe_to_shell_stdin);  pty_state.pipe_to_shell_stdin = nil
 	}
-	if pty.pipe_out != nil {
-		win32.CloseHandle(pty.pipe_out); pty.pipe_out = nil
+	if pty_state.pipe_from_shell_stdout != nil {
+		win32.CloseHandle(pty_state.pipe_from_shell_stdout); pty_state.pipe_from_shell_stdout = nil
 	}
 }
 
 // Phase 2 of shutdown — only safe once the reader thread is no longer
-// touching anything in `t.pty`. Releases the pseudo-console, the process /
-// thread handles, and the proc-thread attribute list.
+// touching anything in `terminal.pty_state`. Releases the pseudo-console,
+// the process / thread handles, and the proc-thread attribute list.
 @(private)
-pty_finalize :: proc(t: ^Terminal) {
-	pty := &t.pty
+pty_finalize :: proc(terminal: ^Terminal) {
+	pty_state := &terminal.pty_state
 
-	if pty.hpcon != nil {
-		ClosePseudoConsole(pty.hpcon);   pty.hpcon = nil
+	if pty_state.pseudo_console_handle != nil {
+		ClosePseudoConsole(pty_state.pseudo_console_handle);   pty_state.pseudo_console_handle = nil
 	}
-	if pty.process != nil {
-		win32.CloseHandle(pty.process);  pty.process = nil
+	if pty_state.process_handle != nil {
+		win32.CloseHandle(pty_state.process_handle);  pty_state.process_handle = nil
 	}
-	if pty.thread_h != nil {
-		win32.CloseHandle(pty.thread_h); pty.thread_h = nil
+	if pty_state.thread_handle != nil {
+		win32.CloseHandle(pty_state.thread_handle); pty_state.thread_handle = nil
 	}
-	if pty.attr_list != nil {
-		DeleteProcThreadAttributeList(pty.attr_list)
-		raw_free(pty.attr_list)
-		pty.attr_list = nil
+	if pty_state.attribute_list != nil {
+		DeleteProcThreadAttributeList(pty_state.attribute_list)
+		raw_free(pty_state.attribute_list)
+		pty_state.attribute_list = nil
 	}
 }
 
 @(private)
-pty_resize :: proc(t: ^Terminal, cols, rows: i32) {
-	if t.pty.hpcon == nil { return }
-	ResizePseudoConsole(t.pty.hpcon, win32.COORD{ X = i16(cols), Y = i16(rows) })
+pty_resize :: proc(terminal: ^Terminal, columns, rows: i32) {
+	if terminal.pty_state.pseudo_console_handle == nil { return }
+	ResizePseudoConsole(terminal.pty_state.pseudo_console_handle, win32.COORD{ X = i16(columns), Y = i16(rows) })
 }
 
 // Poll the output pipe instead of blocking on `ReadFile` directly.
@@ -211,56 +211,56 @@ pty_resize :: proc(t: ^Terminal, cols, rows: i32) {
 // subsequent `thread.join` hangs forever. So we use `PeekNamedPipe` first:
 // it returns immediately, tells us how many bytes are queued, and surfaces
 // pipe-closed errors. When nothing is available we yield with a short
-// `Sleep` so `t.alive` gets reconsulted on the next loop iteration. That's
-// the actual shutdown signal — the reader notices it and exits on its own.
+// `Sleep` so `terminal.is_alive` gets reconsulted on the next loop
+// iteration. That's the actual shutdown signal — the reader notices it and
+// exits on its own.
 @(private)
-pty_read :: proc(t: ^Terminal, buf: []u8) -> (n: int, ok: bool) {
-	if t.pty.pipe_out == nil { return 0, false }
+pty_read :: proc(terminal: ^Terminal, read_buffer: []u8) -> (bytes_read: int, read_succeeded: bool) {
+	if terminal.pty_state.pipe_from_shell_stdout == nil { return 0, false }
 
-	available: u32
-	if !win32.PeekNamedPipe(t.pty.pipe_out, nil, 0, nil, &available, nil) {
+	bytes_available: u32
+	if !win32.PeekNamedPipe(terminal.pty_state.pipe_from_shell_stdout, nil, 0, nil, &bytes_available, nil) {
 		// Pipe broken / closed → tell the caller to bail out of its loop.
 		return 0, false
 	}
-	if available == 0 {
+	if bytes_available == 0 {
 		// Idle-wait briefly so we're not pegging a core, then surface a
-		// "successful zero-byte read" so the caller can re-check `t.alive`.
+		// "successful zero-byte read" so the caller can re-check is_alive.
 		win32.Sleep(10)
 		return 0, true
 	}
 
-	to_read := u32(len(buf))
-	if to_read > available { to_read = available }
+	bytes_to_read := u32(len(read_buffer))
+	if bytes_to_read > bytes_available { bytes_to_read = bytes_available }
 
-	read: u32
-	if !win32.ReadFile(t.pty.pipe_out, raw_data(buf), to_read, &read, nil) {
+	bytes_actually_read: u32
+	if !win32.ReadFile(terminal.pty_state.pipe_from_shell_stdout, raw_data(read_buffer), bytes_to_read, &bytes_actually_read, nil) {
 		return 0, false
 	}
-	return int(read), true
+	return int(bytes_actually_read), true
 }
 
 @(private)
-pty_write :: proc(t: ^Terminal, data: []u8) -> int {
-	if t.pty.pipe_in == nil || len(data) == 0 { return 0 }
-	written: u32
-	if !win32.WriteFile(t.pty.pipe_in, raw_data(data), u32(len(data)), &written, nil) {
+pty_write :: proc(terminal: ^Terminal, data: []u8) -> int {
+	if terminal.pty_state.pipe_to_shell_stdin == nil || len(data) == 0 { return 0 }
+	bytes_written: u32
+	if !win32.WriteFile(terminal.pty_state.pipe_to_shell_stdin, raw_data(data), u32(len(data)), &bytes_written, nil) {
 		return 0
 	}
-	return int(written)
+	return int(bytes_written)
 }
 
 // --- Helpers ------------------------------------------------------------
 
 @(private="file")
-raw_alloc :: proc(n: int) -> rawptr {
-	heap := win32.GetProcessHeap()
-	return win32.HeapAlloc(heap, 0, win32.SIZE_T(n))
+raw_alloc :: proc(byte_count: int) -> rawptr {
+	process_heap_handle := win32.GetProcessHeap()
+	return win32.HeapAlloc(process_heap_handle, 0, win32.SIZE_T(byte_count))
 }
 
 @(private="file")
-raw_free :: proc(p: rawptr) {
-	if p == nil { return }
-	heap := win32.GetProcessHeap()
-	win32.HeapFree(heap, 0, p)
+raw_free :: proc(pointer_to_free: rawptr) {
+	if pointer_to_free == nil { return }
+	process_heap_handle := win32.GetProcessHeap()
+	win32.HeapFree(process_heap_handle, 0, pointer_to_free)
 }
-

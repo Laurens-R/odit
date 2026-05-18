@@ -7,15 +7,15 @@ import "vendor:sdl3/ttf"
 
 import "editor"
 
-window: ^sdl3.Window
-renderer: ^sdl3.Renderer
-text_engine: ^ttf.TextEngine
-font: ^ttf.Font
-ed: editor.Editor
+window:        ^sdl3.Window
+renderer:      ^sdl3.Renderer
+text_engine:   ^ttf.TextEngine
+font:          ^ttf.Font
+editor_state:  editor.Editor
 
-WINDOW_W :: 1920
-WINDOW_H :: 1080
-FONT_SIZE :: 16.0
+WINDOW_WIDTH  :: 1920
+WINDOW_HEIGHT :: 1080
+FONT_SIZE     :: 16.0
 
 init_sdl :: proc() -> bool {
 	_ = sdl3.SetAppMetadata("odit", "0.1.0", "com.glowingideas.odit")
@@ -30,7 +30,7 @@ init_sdl :: proc() -> bool {
 		return false
 	}
 
-	if !sdl3.CreateWindowAndRenderer("odit", WINDOW_W, WINDOW_H, sdl3.WINDOW_RESIZABLE, &window, &renderer) {
+	if !sdl3.CreateWindowAndRenderer("odit", WINDOW_WIDTH, WINDOW_HEIGHT, sdl3.WINDOW_RESIZABLE, &window, &renderer) {
 		sdl3.Log("Couldn't create window and renderer.")
 		return false
 	}
@@ -53,7 +53,7 @@ init_sdl :: proc() -> bool {
 
 try_load_font :: proc() -> ^ttf.Font {
 	// Try bundled font first, then system fonts
-	paths := []cstring{
+	candidate_font_paths := []cstring{
 		"font.ttf",
 		"fonts/font.ttf",
 		// Windows
@@ -69,17 +69,17 @@ try_load_font :: proc() -> ^ttf.Font {
 		"/System/Library/Fonts/Menlo.ttc",
 	}
 
-	for path in paths {
-		f := ttf.OpenFont(path, FONT_SIZE)
-		if f != nil {
-			return f
+	for font_path in candidate_font_paths {
+		loaded_font := ttf.OpenFont(font_path, FONT_SIZE)
+		if loaded_font != nil {
+			return loaded_font
 		}
 	}
 	return nil
 }
 
 destroy_sdl :: proc() {
-	if font != nil { ttf.CloseFont(font) }
+	if font        != nil { ttf.CloseFont(font) }
 	if text_engine != nil { ttf.DestroyRendererTextEngine(text_engine) }
 	ttf.Quit()
 	sdl3.DestroyWindow(window)
@@ -95,67 +95,68 @@ main :: proc() {
 	defer destroy_sdl()
 
 	// Initialize editor
-	editor.editor_init(&ed, text_engine, font, FONT_SIZE)
-	defer editor.editor_destroy(&ed)
+	editor.editor_init(&editor_state, text_engine, font, FONT_SIZE)
+	defer editor.editor_destroy(&editor_state)
 
 	// Start with SDL text input enabled
 	_ = sdl3.StartTextInput(window)
 	defer { _ = sdl3.StopTextInput(window) }
 
 	// Welcome text
-	editor.editor_open_string(&ed, "Welcome to odit.\nStart typing to edit.\n")
+	editor.editor_open_string(&editor_state, "Welcome to odit.\nStart typing to edit.\n")
 
-	running := true
-	last_time := time.tick_now()
+	is_running := true
+	last_tick_time := time.tick_now()
 
-	for running {
+	for is_running {
 		// Delta time
-		now := time.tick_now()
-		dt := time.duration_seconds(time.tick_diff(last_time, now))
-		last_time = now
+		current_tick_time := time.tick_now()
+		delta_time := time.duration_seconds(time.tick_diff(last_tick_time, current_tick_time))
+		last_tick_time = current_tick_time
 
-		event: sdl3.Event
-		for sdl3.PollEvent(&event) {
-			#partial switch event.type {
+		sdl_event: sdl3.Event
+		for sdl3.PollEvent(&sdl_event) {
+			#partial switch sdl_event.type {
 			case .QUIT:
-				running = false
+				is_running = false
 			case .KEY_DOWN:
-				if event.key.key == sdl3.K_ESCAPE && !editor.editor_is_modal_open(&ed) {
-					running = false
+				if sdl_event.key.key == sdl3.K_ESCAPE && !editor.editor_is_modal_open(&editor_state) {
+					is_running = false
 				} else {
-					editor.editor_handle_event(&ed, &event)
+					editor.editor_handle_event(&editor_state, &sdl_event)
 				}
 			case .TEXT_INPUT:
-				editor.editor_handle_event(&ed, &event)
+				editor.editor_handle_event(&editor_state, &sdl_event)
 			case .MOUSE_WHEEL:
-				editor.editor_handle_event(&ed, &event)
+				editor.editor_handle_event(&editor_state, &sdl_event)
 			case .MOUSE_BUTTON_DOWN:
-				editor.editor_handle_event(&ed, &event)
+				editor.editor_handle_event(&editor_state, &sdl_event)
 			case .MOUSE_BUTTON_UP:
-				editor.editor_handle_event(&ed, &event)
+				editor.editor_handle_event(&editor_state, &sdl_event)
 			case .MOUSE_MOTION:
-				editor.editor_handle_event(&ed, &event)
+				editor.editor_handle_event(&editor_state, &sdl_event)
 			case .WINDOW_RESIZED, .WINDOW_PIXEL_SIZE_CHANGED, .WINDOW_EXPOSED:
-				editor.editor_mark_dirty(&ed)
+				editor.editor_mark_dirty(&editor_state)
 			}
 		}
 
 		// Update — animations / blink / terminal drain all live here. The
-		// editor flips its own `dirty` flag when anything visible changes,
-		// so the render path below is free to skip work on idle frames.
-		editor.editor_update(&ed, dt)
+		// editor flips its own `needs_redraw` flag when anything visible
+		// changes, so the render path below is free to skip work on idle
+		// frames.
+		editor.editor_update(&editor_state, delta_time)
 
-		if editor.editor_needs_render(&ed) {
-			w, h: i32
-			sdl3.GetWindowSize(window, &w, &h)
+		if editor.editor_needs_render(&editor_state) {
+			current_window_width, current_window_height: i32
+			sdl3.GetWindowSize(window, &current_window_width, &current_window_height)
 
 			sdl3.SetRenderDrawColorFloat(renderer, 0.11, 0.11, 0.14, 1.0)
 			sdl3.RenderClear(renderer)
 
-			editor.editor_render(&ed, renderer, w, h)
+			editor.editor_render(&editor_state, renderer, current_window_width, current_window_height)
 
 			sdl3.RenderPresent(renderer)
-			editor.editor_mark_clean(&ed)
+			editor.editor_mark_clean(&editor_state)
 		}
 
 		// Release every per-frame temp_allocator alloc — line displays,

@@ -5,9 +5,9 @@ import "core:strings"
 
 // A piece references a contiguous span in either the source or edit buffer.
 Piece :: struct {
-	buffer_kind: DocumentBufferKind,
-	start:       u32, // byte offset into the buffer
-	length:      u32, // byte length of this piece
+	buffer_kind:   DocumentBufferKind,
+	start:         u32, // byte offset into the buffer
+	length:        u32, // byte length of this piece
 	newline_count: u32, // number of newline characters in this piece
 }
 
@@ -39,583 +39,583 @@ PieceTree :: struct {
 
 // --- Initialization / Destruction ---
 
-piecetree_init :: proc(tree: ^PieceTree, initial: string) {
-	document_buffer_init(&tree.source_buffer, .Source, initial)
-	document_buffer_init(&tree.edit_buffer, .Edit, "")
-	tree.root = nil
-	tree.total_length = 0
-	tree.total_lines = 1
+piecetree_init :: proc(piece_tree: ^PieceTree, initial_text: string) {
+	document_buffer_init(&piece_tree.source_buffer, .Source, initial_text)
+	document_buffer_init(&piece_tree.edit_buffer, .Edit, "")
+	piece_tree.root = nil
+	piece_tree.total_length = 0
+	piece_tree.total_lines = 1
 
-	if len(initial) > 0 {
-		nl_count := count_newlines_in_string(initial)
-		piece := Piece{
+	if len(initial_text) > 0 {
+		newline_count := count_newlines_in_string(initial_text)
+		initial_piece := Piece{
 			buffer_kind   = .Source,
 			start         = 0,
-			length        = u32(len(initial)),
-			newline_count = nl_count,
+			length        = u32(len(initial_text)),
+			newline_count = newline_count,
 		}
-		tree.root = node_create(piece, nil)
-		tree.root.color = .Black
-		tree.total_length = piece.length
-		tree.total_lines = nl_count + 1
+		piece_tree.root = node_create(initial_piece, nil)
+		piece_tree.root.color = .Black
+		piece_tree.total_length = initial_piece.length
+		piece_tree.total_lines = newline_count + 1
 	}
 }
 
-piecetree_destroy :: proc(tree: ^PieceTree) {
-	node_destroy_recursive(tree.root)
-	tree.root = nil
-	document_buffer_destroy(&tree.source_buffer)
-	document_buffer_destroy(&tree.edit_buffer)
-	tree.total_length = 0
-	tree.total_lines = 1
+piecetree_destroy :: proc(piece_tree: ^PieceTree) {
+	node_destroy_recursive(piece_tree.root)
+	piece_tree.root = nil
+	document_buffer_destroy(&piece_tree.source_buffer)
+	document_buffer_destroy(&piece_tree.edit_buffer)
+	piece_tree.total_length = 0
+	piece_tree.total_lines = 1
 }
 
 // --- Public API ---
 
 // Insert text at a byte offset in the document.
-piecetree_insert :: proc(tree: ^PieceTree, offset: u32, text: string) {
-	if len(text) == 0 {
+piecetree_insert :: proc(piece_tree: ^PieceTree, offset: u32, text_to_insert: string) {
+	if len(text_to_insert) == 0 {
 		return
 	}
 
 	// Append to edit buffer
-	edit_start := u32(bytes.buffer_length(&tree.edit_buffer.buffer))
-	document_buffer_append(&tree.edit_buffer, text)
+	edit_buffer_start := u32(bytes.buffer_length(&piece_tree.edit_buffer.buffer))
+	document_buffer_append(&piece_tree.edit_buffer, text_to_insert)
 
-	nl_count := count_newlines_in_string(text)
+	newline_count := count_newlines_in_string(text_to_insert)
 	new_piece := Piece{
 		buffer_kind   = .Edit,
-		start         = edit_start,
-		length        = u32(len(text)),
-		newline_count = nl_count,
+		start         = edit_buffer_start,
+		length        = u32(len(text_to_insert)),
+		newline_count = newline_count,
 	}
 
-	if tree.root == nil {
-		tree.root = node_create(new_piece, nil)
-		tree.root.color = .Black
-		tree.total_length = new_piece.length
-		tree.total_lines += nl_count
+	if piece_tree.root == nil {
+		piece_tree.root = node_create(new_piece, nil)
+		piece_tree.root.color = .Black
+		piece_tree.total_length = new_piece.length
+		piece_tree.total_lines += newline_count
 		return
 	}
 
 	// Clamp offset
-	off := min(offset, tree.total_length)
+	clamped_offset := min(offset, piece_tree.total_length)
 
 	// Find the node and local offset where the insertion point falls
-	target, local_off := node_find_at(tree.root, off)
+	target_node, local_offset := node_find_at_offset(piece_tree.root, clamped_offset)
 
-	if local_off == 0 {
+	if local_offset == 0 {
 		new_node := node_create(new_piece, nil)
-		tree_insert_before(tree, target, new_node)
-	} else if local_off == target.piece.length {
+		tree_insert_before(piece_tree, target_node, new_node)
+	} else if local_offset == target_node.piece.length {
 		new_node := node_create(new_piece, nil)
-		tree_insert_after(tree, target, new_node)
+		tree_insert_after(piece_tree, target_node, new_node)
 	} else {
 		// Split the target piece
-		left_nl := count_newlines_in_piece(tree, target.piece.buffer_kind, target.piece.start, local_off)
-		right_nl := target.piece.newline_count - left_nl
+		left_newline_count := count_newlines_in_piece(piece_tree, target_node.piece.buffer_kind, target_node.piece.start, local_offset)
+		right_newline_count := target_node.piece.newline_count - left_newline_count
 
 		left_piece := Piece{
-			buffer_kind   = target.piece.buffer_kind,
-			start         = target.piece.start,
-			length        = local_off,
-			newline_count = left_nl,
+			buffer_kind   = target_node.piece.buffer_kind,
+			start         = target_node.piece.start,
+			length        = local_offset,
+			newline_count = left_newline_count,
 		}
 		right_piece := Piece{
-			buffer_kind   = target.piece.buffer_kind,
-			start         = target.piece.start + local_off,
-			length        = target.piece.length - local_off,
-			newline_count = right_nl,
+			buffer_kind   = target_node.piece.buffer_kind,
+			start         = target_node.piece.start + local_offset,
+			length        = target_node.piece.length - local_offset,
+			newline_count = right_newline_count,
 		}
 
 		// Modify target to be the left portion
-		target.piece = left_piece
-		target.size_self = left_piece.length
+		target_node.piece = left_piece
+		target_node.size_self = left_piece.length
 
 		// Insert new piece after target
 		new_node := node_create(new_piece, nil)
-		tree_insert_after(tree, target, new_node)
+		tree_insert_after(piece_tree, target_node, new_node)
 
 		// Insert right portion after new piece
 		right_node := node_create(right_piece, nil)
-		tree_insert_after(tree, new_node, right_node)
+		tree_insert_after(piece_tree, new_node, right_node)
 	}
 
-	tree.total_length += new_piece.length
-	tree.total_lines += nl_count
+	piece_tree.total_length += new_piece.length
+	piece_tree.total_lines += newline_count
 }
 
-// Delete `length` bytes starting at `offset`.
-piecetree_delete :: proc(tree: ^PieceTree, offset: u32, length: u32) {
-	if length == 0 || tree.root == nil {
+// Delete `length_to_delete` bytes starting at `offset`.
+piecetree_delete :: proc(piece_tree: ^PieceTree, offset: u32, length_to_delete: u32) {
+	if length_to_delete == 0 || piece_tree.root == nil {
 		return
 	}
 
-	off := min(offset, tree.total_length)
-	len_to_delete := min(length, tree.total_length - off)
-	remaining := len_to_delete
-	deleted_newlines: u32 = 0
+	clamped_offset := min(offset, piece_tree.total_length)
+	actual_delete_length := min(length_to_delete, piece_tree.total_length - clamped_offset)
+	remaining_to_delete := actual_delete_length
+	deleted_newline_count: u32 = 0
 
-	for remaining > 0 && tree.root != nil {
-		target, local_off := node_find_at(tree.root, off)
-		if target == nil {
+	for remaining_to_delete > 0 && piece_tree.root != nil {
+		target_node, local_offset := node_find_at_offset(piece_tree.root, clamped_offset)
+		if target_node == nil {
 			break
 		}
 
-		available := target.piece.length - local_off
-		to_remove := min(remaining, available)
+		available_in_piece := target_node.piece.length - local_offset
+		bytes_to_remove := min(remaining_to_delete, available_in_piece)
 
-		if local_off == 0 && to_remove == target.piece.length {
+		if local_offset == 0 && bytes_to_remove == target_node.piece.length {
 			// Remove entire node
-			deleted_newlines += target.piece.newline_count
-			tree_delete_node(tree, target)
-		} else if local_off == 0 {
+			deleted_newline_count += target_node.piece.newline_count
+			tree_delete_node(piece_tree, target_node)
+		} else if local_offset == 0 {
 			// Trim from the start
-			removed_nl := count_newlines_in_piece(tree, target.piece.buffer_kind, target.piece.start, to_remove)
-			deleted_newlines += removed_nl
-			target.piece.start += to_remove
-			target.piece.length -= to_remove
-			target.piece.newline_count -= removed_nl
-			target.size_self = target.piece.length
-			node_update_metadata_up(target)
-		} else if local_off + to_remove == target.piece.length {
+			removed_newline_count := count_newlines_in_piece(piece_tree, target_node.piece.buffer_kind, target_node.piece.start, bytes_to_remove)
+			deleted_newline_count += removed_newline_count
+			target_node.piece.start += bytes_to_remove
+			target_node.piece.length -= bytes_to_remove
+			target_node.piece.newline_count -= removed_newline_count
+			target_node.size_self = target_node.piece.length
+			node_update_metadata_up(target_node)
+		} else if local_offset + bytes_to_remove == target_node.piece.length {
 			// Trim from the end
-			removed_nl := count_newlines_in_piece(tree, target.piece.buffer_kind, target.piece.start + local_off, to_remove)
-			deleted_newlines += removed_nl
-			target.piece.length = local_off
-			target.piece.newline_count -= removed_nl
-			target.size_self = target.piece.length
-			node_update_metadata_up(target)
+			removed_newline_count := count_newlines_in_piece(piece_tree, target_node.piece.buffer_kind, target_node.piece.start + local_offset, bytes_to_remove)
+			deleted_newline_count += removed_newline_count
+			target_node.piece.length = local_offset
+			target_node.piece.newline_count -= removed_newline_count
+			target_node.size_self = target_node.piece.length
+			node_update_metadata_up(target_node)
 		} else {
 			// Remove from the middle — split into two pieces
-			removed_nl := count_newlines_in_piece(tree, target.piece.buffer_kind, target.piece.start + local_off, to_remove)
-			deleted_newlines += removed_nl
+			removed_newline_count := count_newlines_in_piece(piece_tree, target_node.piece.buffer_kind, target_node.piece.start + local_offset, bytes_to_remove)
+			deleted_newline_count += removed_newline_count
 
-			right_start := target.piece.start + local_off + to_remove
-			right_len := target.piece.length - local_off - to_remove
-			right_nl := count_newlines_in_piece(tree, target.piece.buffer_kind, right_start, right_len)
+			right_piece_start := target_node.piece.start + local_offset + bytes_to_remove
+			right_piece_length := target_node.piece.length - local_offset - bytes_to_remove
+			right_piece_newline_count := count_newlines_in_piece(piece_tree, target_node.piece.buffer_kind, right_piece_start, right_piece_length)
 
 			right_piece := Piece{
-				buffer_kind   = target.piece.buffer_kind,
-				start         = right_start,
-				length        = right_len,
-				newline_count = right_nl,
+				buffer_kind   = target_node.piece.buffer_kind,
+				start         = right_piece_start,
+				length        = right_piece_length,
+				newline_count = right_piece_newline_count,
 			}
 
-			left_nl := count_newlines_in_piece(tree, target.piece.buffer_kind, target.piece.start, local_off)
-			target.piece.length = local_off
-			target.piece.newline_count = left_nl
-			target.size_self = target.piece.length
-			node_update_metadata_up(target)
+			left_newline_count := count_newlines_in_piece(piece_tree, target_node.piece.buffer_kind, target_node.piece.start, local_offset)
+			target_node.piece.length = local_offset
+			target_node.piece.newline_count = left_newline_count
+			target_node.size_self = target_node.piece.length
+			node_update_metadata_up(target_node)
 
 			right_node := node_create(right_piece, nil)
-			tree_insert_after(tree, target, right_node)
+			tree_insert_after(piece_tree, target_node, right_node)
 		}
 
-		remaining -= to_remove
+		remaining_to_delete -= bytes_to_remove
 	}
 
-	tree.total_length -= len_to_delete
-	tree.total_lines -= deleted_newlines
+	piece_tree.total_length -= actual_delete_length
+	piece_tree.total_lines -= deleted_newline_count
 }
 
 // Get the full document text. Caller must delete the returned string's backing memory.
-piecetree_get_text :: proc(tree: ^PieceTree, allocator := context.allocator) -> string {
-	if tree.total_length == 0 {
+piecetree_get_text :: proc(piece_tree: ^PieceTree, allocator := context.allocator) -> string {
+	if piece_tree.total_length == 0 {
 		return ""
 	}
 
-	buf: bytes.Buffer
-	bytes.buffer_init_allocator(&buf, 0, int(tree.total_length), allocator)
-	node_collect_inorder(tree, tree.root, &buf)
-	return bytes.buffer_to_string(&buf)
+	output_buffer: bytes.Buffer
+	bytes.buffer_init_allocator(&output_buffer, 0, int(piece_tree.total_length), allocator)
+	node_collect_inorder(piece_tree, piece_tree.root, &output_buffer)
+	return bytes.buffer_to_string(&output_buffer)
 }
 
-// Get a substring of the document from `offset` with `length` bytes.
-piecetree_get_slice :: proc(tree: ^PieceTree, offset: u32, length: u32, allocator := context.allocator) -> string {
-	if length == 0 || tree.root == nil {
+// Get a substring of the document from `offset` with `length_to_get` bytes.
+piecetree_get_slice :: proc(piece_tree: ^PieceTree, offset: u32, length: u32, allocator := context.allocator) -> string {
+	if length == 0 || piece_tree.root == nil {
 		return ""
 	}
 
-	off := min(offset, tree.total_length)
-	len_to_get := min(length, tree.total_length - off)
+	clamped_offset := min(offset, piece_tree.total_length)
+	actual_length_to_get := min(length, piece_tree.total_length - clamped_offset)
 
-	buf: bytes.Buffer
-	bytes.buffer_init_allocator(&buf, 0, int(len_to_get), allocator)
+	output_buffer: bytes.Buffer
+	bytes.buffer_init_allocator(&output_buffer, 0, int(actual_length_to_get), allocator)
 
-	remaining := len_to_get
-	cur_off := off
+	remaining_bytes := actual_length_to_get
+	current_offset := clamped_offset
 
-	for remaining > 0 {
-		target, local_off := node_find_at(tree.root, cur_off)
-		if target == nil {
+	for remaining_bytes > 0 {
+		target_node, local_offset := node_find_at_offset(piece_tree.root, current_offset)
+		if target_node == nil {
 			break
 		}
 
-		available := target.piece.length - local_off
-		to_read := min(remaining, available)
+		available_in_piece := target_node.piece.length - local_offset
+		bytes_to_read := min(remaining_bytes, available_in_piece)
 
-		piece_text := piece_get_bytes(tree, &target.piece)
-		bytes.buffer_write(&buf, piece_text[local_off:local_off + to_read])
+		piece_text := piece_get_bytes(piece_tree, &target_node.piece)
+		bytes.buffer_write(&output_buffer, piece_text[local_offset:local_offset + bytes_to_read])
 
-		remaining -= to_read
-		cur_off += to_read
+		remaining_bytes -= bytes_to_read
+		current_offset += bytes_to_read
 	}
 
-	return bytes.buffer_to_string(&buf)
+	return bytes.buffer_to_string(&output_buffer)
 }
 
 // Return the total length of the document in bytes.
-piecetree_length :: proc(tree: ^PieceTree) -> u32 {
-	return tree.total_length
+piecetree_length :: proc(piece_tree: ^PieceTree) -> u32 {
+	return piece_tree.total_length
 }
 
 // Return the total number of lines (newline_count + 1).
-piecetree_line_count :: proc(tree: ^PieceTree) -> u32 {
-	return tree.total_lines
+piecetree_line_count :: proc(piece_tree: ^PieceTree) -> u32 {
+	return piece_tree.total_lines
 }
 
 // Get the byte offset of the start of a given line (0-indexed).
-piecetree_line_start :: proc(tree: ^PieceTree, line: u32) -> u32 {
-	if line == 0 {
+piecetree_line_start :: proc(piece_tree: ^PieceTree, line_index: u32) -> u32 {
+	if line_index == 0 {
 		return 0
 	}
 
 	// We need to find the (line)th newline's position + 1
 	// Walk the tree using left_newlines to find it in O(log n)
-	newlines_to_skip := line
-	if newlines_to_skip >= tree.total_lines {
-		return tree.total_length
+	newlines_to_skip := line_index
+	if newlines_to_skip >= piece_tree.total_lines {
+		return piece_tree.total_length
 	}
 
-	node := tree.root
-	offset: u32 = 0
+	current_node := piece_tree.root
+	accumulated_offset: u32 = 0
 
-	for node != nil {
-		if newlines_to_skip <= node.left_newlines {
-			node = node.left
+	for current_node != nil {
+		if newlines_to_skip <= current_node.left_newlines {
+			current_node = current_node.left
 		} else {
 			// Skip past left subtree and potentially this node
-			newlines_to_skip -= node.left_newlines
-			offset += node.left_size
+			newlines_to_skip -= current_node.left_newlines
+			accumulated_offset += current_node.left_size
 
-			if newlines_to_skip <= node.piece.newline_count {
+			if newlines_to_skip <= current_node.piece.newline_count {
 				// The target newline is within this piece
-				piece_data := piece_get_bytes(tree, &node.piece)
-				nl_found: u32 = 0
-				for i: u32 = 0; i < node.piece.length; i += 1 {
-					if piece_data[i] == '\n' {
-						nl_found += 1
-						if nl_found == newlines_to_skip {
-							return offset + i + 1
+				piece_data := piece_get_bytes(piece_tree, &current_node.piece)
+				newlines_found: u32 = 0
+				for byte_index: u32 = 0; byte_index < current_node.piece.length; byte_index += 1 {
+					if piece_data[byte_index] == '\n' {
+						newlines_found += 1
+						if newlines_found == newlines_to_skip {
+							return accumulated_offset + byte_index + 1
 						}
 					}
 				}
-				return offset + node.piece.length
+				return accumulated_offset + current_node.piece.length
 			}
 
-			newlines_to_skip -= node.piece.newline_count
-			offset += node.size_self
-			node = node.right
+			newlines_to_skip -= current_node.piece.newline_count
+			accumulated_offset += current_node.size_self
+			current_node = current_node.right
 		}
 	}
 
-	return offset
+	return accumulated_offset
 }
 
 // Get the line number (0-indexed) for a given byte offset.
-piecetree_offset_to_line :: proc(tree: ^PieceTree, offset: u32) -> u32 {
-	if tree.root == nil || offset == 0 {
+piecetree_offset_to_line :: proc(piece_tree: ^PieceTree, offset: u32) -> u32 {
+	if piece_tree.root == nil || offset == 0 {
 		return 0
 	}
 
-	off := min(offset, tree.total_length)
-	line: u32 = 0
-	node := tree.root
-	remaining := off
+	clamped_offset := min(offset, piece_tree.total_length)
+	current_line: u32 = 0
+	current_node := piece_tree.root
+	remaining_offset := clamped_offset
 
-	for node != nil {
-		if remaining <= node.left_size {
-			node = node.left
+	for current_node != nil {
+		if remaining_offset <= current_node.left_size {
+			current_node = current_node.left
 		} else {
-			line += node.left_newlines
-			remaining -= node.left_size
+			current_line += current_node.left_newlines
+			remaining_offset -= current_node.left_size
 
-			if remaining <= node.size_self {
-				// Count newlines within this piece up to `remaining`
-				piece_data := piece_get_bytes(tree, &node.piece)
-				for i: u32 = 0; i < remaining; i += 1 {
-					if piece_data[i] == '\n' {
-						line += 1
+			if remaining_offset <= current_node.size_self {
+				// Count newlines within this piece up to `remaining_offset`
+				piece_data := piece_get_bytes(piece_tree, &current_node.piece)
+				for byte_index: u32 = 0; byte_index < remaining_offset; byte_index += 1 {
+					if piece_data[byte_index] == '\n' {
+						current_line += 1
 					}
 				}
-				return line
+				return current_line
 			}
 
-			line += node.piece.newline_count
-			remaining -= node.size_self
-			node = node.right
+			current_line += current_node.piece.newline_count
+			remaining_offset -= current_node.size_self
+			current_node = current_node.right
 		}
 	}
 
-	return line
+	return current_line
 }
 
 // Get the text content of a specific line (0-indexed), without the trailing newline.
-piecetree_get_line :: proc(tree: ^PieceTree, line: u32, allocator := context.allocator) -> string {
-	start := piecetree_line_start(tree, line)
-	end: u32
-	if line + 1 >= tree.total_lines {
-		end = tree.total_length
+piecetree_get_line :: proc(piece_tree: ^PieceTree, line_index: u32, allocator := context.allocator) -> string {
+	line_start_offset := piecetree_line_start(piece_tree, line_index)
+	line_end_offset: u32
+	if line_index + 1 >= piece_tree.total_lines {
+		line_end_offset = piece_tree.total_length
 	} else {
-		end = piecetree_line_start(tree, line + 1)
+		line_end_offset = piecetree_line_start(piece_tree, line_index + 1)
 		// Strip trailing newline
-		if end > start {
+		if line_end_offset > line_start_offset {
 			// Check if previous char is \n
-			slice := piecetree_get_slice(tree, end - 1, 1, allocator)
-			if len(slice) > 0 && slice[0] == '\n' {
-				end -= 1
+			last_byte_slice := piecetree_get_slice(piece_tree, line_end_offset - 1, 1, allocator)
+			if len(last_byte_slice) > 0 && last_byte_slice[0] == '\n' {
+				line_end_offset -= 1
 				// Also strip \r if \r\n
-				if end > start {
-					slice2 := piecetree_get_slice(tree, end - 1, 1, allocator)
-					if len(slice2) > 0 && slice2[0] == '\r' {
-						end -= 1
+				if line_end_offset > line_start_offset {
+					second_to_last_byte_slice := piecetree_get_slice(piece_tree, line_end_offset - 1, 1, allocator)
+					if len(second_to_last_byte_slice) > 0 && second_to_last_byte_slice[0] == '\r' {
+						line_end_offset -= 1
 					}
 				}
 			}
 		}
 	}
 
-	if end <= start {
+	if line_end_offset <= line_start_offset {
 		return ""
 	}
-	return piecetree_get_slice(tree, start, end - start, allocator)
+	return piecetree_get_slice(piece_tree, line_start_offset, line_end_offset - line_start_offset, allocator)
 }
 
 // --- Internal: node helpers ---
 
-node_create :: proc(piece: Piece, parent: ^Node) -> ^Node {
-	node := new(Node)
-	node.piece = piece
-	node.color = .Red
-	node.left = nil
-	node.right = nil
-	node.parent = parent
-	node.left_size = 0
-	node.left_newlines = 0
-	node.size_self = piece.length
-	return node
+node_create :: proc(piece: Piece, parent_node: ^Node) -> ^Node {
+	new_node := new(Node)
+	new_node.piece = piece
+	new_node.color = .Red
+	new_node.left = nil
+	new_node.right = nil
+	new_node.parent = parent_node
+	new_node.left_size = 0
+	new_node.left_newlines = 0
+	new_node.size_self = piece.length
+	return new_node
 }
 
-node_destroy_recursive :: proc(node: ^Node) {
-	if node == nil {
+node_destroy_recursive :: proc(node_to_destroy: ^Node) {
+	if node_to_destroy == nil {
 		return
 	}
-	node_destroy_recursive(node.left)
-	node_destroy_recursive(node.right)
-	free(node)
+	node_destroy_recursive(node_to_destroy.left)
+	node_destroy_recursive(node_to_destroy.right)
+	free(node_to_destroy)
 }
 
 // Find the node containing the given document offset, and return the local offset within that node.
-node_find_at :: proc(root: ^Node, offset: u32) -> (^Node, u32) {
-	node := root
-	off := offset
+node_find_at_offset :: proc(root: ^Node, offset: u32) -> (^Node, u32) {
+	current_node := root
+	remaining_offset := offset
 
-	for node != nil {
-		if off < node.left_size {
-			node = node.left
-		} else if off < node.left_size + node.size_self {
-			return node, off - node.left_size
+	for current_node != nil {
+		if remaining_offset < current_node.left_size {
+			current_node = current_node.left
+		} else if remaining_offset < current_node.left_size + current_node.size_self {
+			return current_node, remaining_offset - current_node.left_size
 		} else {
-			off -= node.left_size + node.size_self
-			node = node.right
+			remaining_offset -= current_node.left_size + current_node.size_self
+			current_node = current_node.right
 		}
 	}
 
 	// Offset at the very end — return the rightmost node
-	node = root
-	for node.right != nil {
-		node = node.right
+	current_node = root
+	for current_node.right != nil {
+		current_node = current_node.right
 	}
-	return node, node.size_self
+	return current_node, current_node.size_self
 }
 
 // Collect text from all pieces in order.
-node_collect_inorder :: proc(tree: ^PieceTree, node: ^Node, buf: ^bytes.Buffer) {
+node_collect_inorder :: proc(piece_tree: ^PieceTree, node: ^Node, output_buffer: ^bytes.Buffer) {
 	if node == nil {
 		return
 	}
-	node_collect_inorder(tree, node.left, buf)
-	piece_text := piece_get_bytes(tree, &node.piece)
-	bytes.buffer_write(buf, piece_text)
-	node_collect_inorder(tree, node.right, buf)
+	node_collect_inorder(piece_tree, node.left, output_buffer)
+	piece_text := piece_get_bytes(piece_tree, &node.piece)
+	bytes.buffer_write(output_buffer, piece_text)
+	node_collect_inorder(piece_tree, node.right, output_buffer)
 }
 
 // Get the byte slice for a piece.
-piece_get_bytes :: proc(tree: ^PieceTree, piece: ^Piece) -> []u8 {
-	buffer := piece.buffer_kind == .Source ? &tree.source_buffer : &tree.edit_buffer
-	all := bytes.buffer_to_bytes(&buffer.buffer)
-	return all[piece.start:piece.start + piece.length]
+piece_get_bytes :: proc(piece_tree: ^PieceTree, piece: ^Piece) -> []u8 {
+	source_or_edit_buffer := piece.buffer_kind == .Source ? &piece_tree.source_buffer : &piece_tree.edit_buffer
+	all_buffer_bytes := bytes.buffer_to_bytes(&source_or_edit_buffer.buffer)
+	return all_buffer_bytes[piece.start:piece.start + piece.length]
 }
 
 // Count newlines in a portion of a buffer.
-count_newlines_in_piece :: proc(tree: ^PieceTree, kind: DocumentBufferKind, start: u32, length: u32) -> u32 {
-	buffer := kind == .Source ? &tree.source_buffer : &tree.edit_buffer
-	all := bytes.buffer_to_bytes(&buffer.buffer)
-	slice := all[start:start + length]
-	count: u32 = 0
-	for b in slice {
-		if b == '\n' {
-			count += 1
+count_newlines_in_piece :: proc(piece_tree: ^PieceTree, kind: DocumentBufferKind, start: u32, length: u32) -> u32 {
+	source_or_edit_buffer := kind == .Source ? &piece_tree.source_buffer : &piece_tree.edit_buffer
+	all_buffer_bytes := bytes.buffer_to_bytes(&source_or_edit_buffer.buffer)
+	piece_bytes := all_buffer_bytes[start:start + length]
+	newline_count: u32 = 0
+	for byte_value in piece_bytes {
+		if byte_value == '\n' {
+			newline_count += 1
 		}
 	}
-	return count
+	return newline_count
 }
 
-count_newlines_in_string :: proc(s: string) -> u32 {
-	count: u32 = 0
-	for c in s {
-		if c == '\n' {
-			count += 1
+count_newlines_in_string :: proc(text: string) -> u32 {
+	newline_count: u32 = 0
+	for character_value in text {
+		if character_value == '\n' {
+			newline_count += 1
 		}
 	}
-	return count
+	return newline_count
 }
 
 // --- Internal: tree insertion ---
 
-tree_insert_before :: proc(tree: ^PieceTree, target: ^Node, new_node: ^Node) {
-	if target.left == nil {
-		target.left = new_node
-		new_node.parent = target
+tree_insert_before :: proc(piece_tree: ^PieceTree, target_node: ^Node, new_node: ^Node) {
+	if target_node.left == nil {
+		target_node.left = new_node
+		new_node.parent = target_node
 	} else {
-		pred := target.left
-		for pred.right != nil {
-			pred = pred.right
+		predecessor_node := target_node.left
+		for predecessor_node.right != nil {
+			predecessor_node = predecessor_node.right
 		}
-		pred.right = new_node
-		new_node.parent = pred
+		predecessor_node.right = new_node
+		new_node.parent = predecessor_node
 	}
 	node_update_metadata_up(new_node)
-	tree_fix_insert(tree, new_node)
+	tree_fix_insert(piece_tree, new_node)
 }
 
-tree_insert_after :: proc(tree: ^PieceTree, target: ^Node, new_node: ^Node) {
-	if target.right == nil {
-		target.right = new_node
-		new_node.parent = target
+tree_insert_after :: proc(piece_tree: ^PieceTree, target_node: ^Node, new_node: ^Node) {
+	if target_node.right == nil {
+		target_node.right = new_node
+		new_node.parent = target_node
 	} else {
-		succ := target.right
-		for succ.left != nil {
-			succ = succ.left
+		successor_node := target_node.right
+		for successor_node.left != nil {
+			successor_node = successor_node.left
 		}
-		succ.left = new_node
-		new_node.parent = succ
+		successor_node.left = new_node
+		new_node.parent = successor_node
 	}
 	node_update_metadata_up(new_node)
-	tree_fix_insert(tree, new_node)
+	tree_fix_insert(piece_tree, new_node)
 }
 
 // --- Internal: Red-Black tree balancing ---
 
-tree_fix_insert :: proc(tree: ^PieceTree, node: ^Node) {
-	n := node
-	for n != tree.root && n.parent != nil && n.parent.color == .Red {
-		parent := n.parent
-		grandparent := parent.parent
-		if grandparent == nil {
+tree_fix_insert :: proc(piece_tree: ^PieceTree, node: ^Node) {
+	current_node := node
+	for current_node != piece_tree.root && current_node.parent != nil && current_node.parent.color == .Red {
+		parent_node := current_node.parent
+		grandparent_node := parent_node.parent
+		if grandparent_node == nil {
 			break
 		}
 
-		if parent == grandparent.left {
-			uncle := grandparent.right
-			if uncle != nil && uncle.color == .Red {
-				parent.color = .Black
-				uncle.color = .Black
-				grandparent.color = .Red
-				n = grandparent
+		if parent_node == grandparent_node.left {
+			uncle_node := grandparent_node.right
+			if uncle_node != nil && uncle_node.color == .Red {
+				parent_node.color = .Black
+				uncle_node.color = .Black
+				grandparent_node.color = .Red
+				current_node = grandparent_node
 			} else {
-				if n == parent.right {
-					n = parent
-					rotate_left(tree, n)
-					parent = n.parent
-					grandparent = parent.parent if parent != nil else nil
-					if grandparent == nil { break }
+				if current_node == parent_node.right {
+					current_node = parent_node
+					rotate_left(piece_tree, current_node)
+					parent_node = current_node.parent
+					grandparent_node = parent_node.parent if parent_node != nil else nil
+					if grandparent_node == nil { break }
 				}
-				parent.color = .Black
-				grandparent.color = .Red
-				rotate_right(tree, grandparent)
+				parent_node.color = .Black
+				grandparent_node.color = .Red
+				rotate_right(piece_tree, grandparent_node)
 			}
 		} else {
-			uncle := grandparent.left
-			if uncle != nil && uncle.color == .Red {
-				parent.color = .Black
-				uncle.color = .Black
-				grandparent.color = .Red
-				n = grandparent
+			uncle_node := grandparent_node.left
+			if uncle_node != nil && uncle_node.color == .Red {
+				parent_node.color = .Black
+				uncle_node.color = .Black
+				grandparent_node.color = .Red
+				current_node = grandparent_node
 			} else {
-				if n == parent.left {
-					n = parent
-					rotate_right(tree, n)
-					parent = n.parent
-					grandparent = parent.parent if parent != nil else nil
-					if grandparent == nil { break }
+				if current_node == parent_node.left {
+					current_node = parent_node
+					rotate_right(piece_tree, current_node)
+					parent_node = current_node.parent
+					grandparent_node = parent_node.parent if parent_node != nil else nil
+					if grandparent_node == nil { break }
 				}
-				parent.color = .Black
-				grandparent.color = .Red
-				rotate_left(tree, grandparent)
+				parent_node.color = .Black
+				grandparent_node.color = .Red
+				rotate_left(piece_tree, grandparent_node)
 			}
 		}
 	}
-	tree.root.color = .Black
+	piece_tree.root.color = .Black
 }
 
 // --- Internal: Red-Black tree deletion ---
 
-tree_delete_node :: proc(tree: ^PieceTree, node: ^Node) {
-	target := node
-	original_color := target.color
+tree_delete_node :: proc(piece_tree: ^PieceTree, node_to_delete: ^Node) {
+	target_node := node_to_delete
+	original_color := target_node.color
 	fix_node: ^Node = nil
 	fix_parent: ^Node = nil
 
-	if node.left == nil {
-		fix_node = node.right
-		fix_parent = node.parent
-		transplant(tree, node, node.right)
-	} else if node.right == nil {
-		fix_node = node.left
-		fix_parent = node.parent
-		transplant(tree, node, node.left)
+	if node_to_delete.left == nil {
+		fix_node = node_to_delete.right
+		fix_parent = node_to_delete.parent
+		transplant(piece_tree, node_to_delete, node_to_delete.right)
+	} else if node_to_delete.right == nil {
+		fix_node = node_to_delete.left
+		fix_parent = node_to_delete.parent
+		transplant(piece_tree, node_to_delete, node_to_delete.left)
 	} else {
-		target = node.right
-		for target.left != nil {
-			target = target.left
+		target_node = node_to_delete.right
+		for target_node.left != nil {
+			target_node = target_node.left
 		}
-		original_color = target.color
-		fix_node = target.right
-		fix_parent = target
+		original_color = target_node.color
+		fix_node = target_node.right
+		fix_parent = target_node
 
-		if target.parent == node {
+		if target_node.parent == node_to_delete {
 			if fix_node != nil {
-				fix_node.parent = target
+				fix_node.parent = target_node
 			}
-			fix_parent = target
+			fix_parent = target_node
 		} else {
-			fix_parent = target.parent
-			transplant(tree, target, target.right)
-			target.right = node.right
-			if target.right != nil {
-				target.right.parent = target
+			fix_parent = target_node.parent
+			transplant(piece_tree, target_node, target_node.right)
+			target_node.right = node_to_delete.right
+			if target_node.right != nil {
+				target_node.right.parent = target_node
 			}
 		}
-		transplant(tree, node, target)
-		target.left = node.left
-		if target.left != nil {
-			target.left.parent = target
+		transplant(piece_tree, node_to_delete, target_node)
+		target_node.left = node_to_delete.left
+		if target_node.left != nil {
+			target_node.left.parent = target_node
 		}
-		target.color = node.color
-		target.left_size = subtree_size(target.left)
-		target.left_newlines = subtree_newlines(target.left)
+		target_node.color = node_to_delete.color
+		target_node.left_size = subtree_size(target_node.left)
+		target_node.left_newlines = subtree_newlines(target_node.left)
 	}
 
 	if fix_parent != nil {
@@ -624,165 +624,165 @@ tree_delete_node :: proc(tree: ^PieceTree, node: ^Node) {
 	}
 
 	if original_color == .Black {
-		tree_fix_delete(tree, fix_node, fix_parent)
+		tree_fix_delete(piece_tree, fix_node, fix_parent)
 	}
 
-	free(node)
+	free(node_to_delete)
 }
 
-transplant :: proc(tree: ^PieceTree, u: ^Node, v: ^Node) {
-	if u.parent == nil {
-		tree.root = v
-	} else if u == u.parent.left {
-		u.parent.left = v
+transplant :: proc(piece_tree: ^PieceTree, node_to_replace: ^Node, replacement_node: ^Node) {
+	if node_to_replace.parent == nil {
+		piece_tree.root = replacement_node
+	} else if node_to_replace == node_to_replace.parent.left {
+		node_to_replace.parent.left = replacement_node
 	} else {
-		u.parent.right = v
+		node_to_replace.parent.right = replacement_node
 	}
-	if v != nil {
-		v.parent = u.parent
+	if replacement_node != nil {
+		replacement_node.parent = node_to_replace.parent
 	}
 }
 
-tree_fix_delete :: proc(tree: ^PieceTree, node: ^Node, parent: ^Node) {
-	n := node
-	p := parent
+tree_fix_delete :: proc(piece_tree: ^PieceTree, node: ^Node, parent_node: ^Node) {
+	current_node := node
+	current_parent := parent_node
 
-	for n != tree.root && (n == nil || n.color == .Black) {
-		if p == nil { break }
+	for current_node != piece_tree.root && (current_node == nil || current_node.color == .Black) {
+		if current_parent == nil { break }
 
-		if n == p.left {
-			sibling := p.right
-			if sibling != nil && sibling.color == .Red {
-				sibling.color = .Black
-				p.color = .Red
-				rotate_left(tree, p)
-				sibling = p.right
+		if current_node == current_parent.left {
+			sibling_node := current_parent.right
+			if sibling_node != nil && sibling_node.color == .Red {
+				sibling_node.color = .Black
+				current_parent.color = .Red
+				rotate_left(piece_tree, current_parent)
+				sibling_node = current_parent.right
 			}
-			if sibling == nil { break }
-			left_black := sibling.left == nil || sibling.left.color == .Black
-			right_black := sibling.right == nil || sibling.right.color == .Black
-			if left_black && right_black {
-				sibling.color = .Red
-				n = p
-				p = n.parent
+			if sibling_node == nil { break }
+			left_is_black := sibling_node.left == nil || sibling_node.left.color == .Black
+			right_is_black := sibling_node.right == nil || sibling_node.right.color == .Black
+			if left_is_black && right_is_black {
+				sibling_node.color = .Red
+				current_node = current_parent
+				current_parent = current_node.parent
 			} else {
-				if right_black {
-					if sibling.left != nil { sibling.left.color = .Black }
-					sibling.color = .Red
-					rotate_right(tree, sibling)
-					sibling = p.right
+				if right_is_black {
+					if sibling_node.left != nil { sibling_node.left.color = .Black }
+					sibling_node.color = .Red
+					rotate_right(piece_tree, sibling_node)
+					sibling_node = current_parent.right
 				}
-				if sibling != nil {
-					sibling.color = p.color
-					if sibling.right != nil { sibling.right.color = .Black }
+				if sibling_node != nil {
+					sibling_node.color = current_parent.color
+					if sibling_node.right != nil { sibling_node.right.color = .Black }
 				}
-				p.color = .Black
-				rotate_left(tree, p)
-				n = tree.root
-				p = nil
+				current_parent.color = .Black
+				rotate_left(piece_tree, current_parent)
+				current_node = piece_tree.root
+				current_parent = nil
 			}
 		} else {
-			sibling := p.left
-			if sibling != nil && sibling.color == .Red {
-				sibling.color = .Black
-				p.color = .Red
-				rotate_right(tree, p)
-				sibling = p.left
+			sibling_node := current_parent.left
+			if sibling_node != nil && sibling_node.color == .Red {
+				sibling_node.color = .Black
+				current_parent.color = .Red
+				rotate_right(piece_tree, current_parent)
+				sibling_node = current_parent.left
 			}
-			if sibling == nil { break }
-			left_black := sibling.left == nil || sibling.left.color == .Black
-			right_black := sibling.right == nil || sibling.right.color == .Black
-			if left_black && right_black {
-				sibling.color = .Red
-				n = p
-				p = n.parent
+			if sibling_node == nil { break }
+			left_is_black := sibling_node.left == nil || sibling_node.left.color == .Black
+			right_is_black := sibling_node.right == nil || sibling_node.right.color == .Black
+			if left_is_black && right_is_black {
+				sibling_node.color = .Red
+				current_node = current_parent
+				current_parent = current_node.parent
 			} else {
-				if left_black {
-					if sibling.right != nil { sibling.right.color = .Black }
-					sibling.color = .Red
-					rotate_left(tree, sibling)
-					sibling = p.left
+				if left_is_black {
+					if sibling_node.right != nil { sibling_node.right.color = .Black }
+					sibling_node.color = .Red
+					rotate_left(piece_tree, sibling_node)
+					sibling_node = current_parent.left
 				}
-				if sibling != nil {
-					sibling.color = p.color
-					if sibling.left != nil { sibling.left.color = .Black }
+				if sibling_node != nil {
+					sibling_node.color = current_parent.color
+					if sibling_node.left != nil { sibling_node.left.color = .Black }
 				}
-				p.color = .Black
-				rotate_right(tree, p)
-				n = tree.root
-				p = nil
+				current_parent.color = .Black
+				rotate_right(piece_tree, current_parent)
+				current_node = piece_tree.root
+				current_parent = nil
 			}
 		}
 	}
-	if n != nil {
-		n.color = .Black
+	if current_node != nil {
+		current_node.color = .Black
 	}
 }
 
 // --- Internal: rotations ---
 
-rotate_left :: proc(tree: ^PieceTree, x: ^Node) {
-	y := x.right
-	if y == nil { return }
+rotate_left :: proc(piece_tree: ^PieceTree, pivot_node: ^Node) {
+	right_child := pivot_node.right
+	if right_child == nil { return }
 
-	x.right = y.left
-	if y.left != nil {
-		y.left.parent = x
+	pivot_node.right = right_child.left
+	if right_child.left != nil {
+		right_child.left.parent = pivot_node
 	}
-	y.parent = x.parent
-	if x.parent == nil {
-		tree.root = y
-	} else if x == x.parent.left {
-		x.parent.left = y
+	right_child.parent = pivot_node.parent
+	if pivot_node.parent == nil {
+		piece_tree.root = right_child
+	} else if pivot_node == pivot_node.parent.left {
+		pivot_node.parent.left = right_child
 	} else {
-		x.parent.right = y
+		pivot_node.parent.right = right_child
 	}
-	y.left = x
-	x.parent = y
+	right_child.left = pivot_node
+	pivot_node.parent = right_child
 
 	// Update metadata
-	y.left_size = x.left_size + x.size_self + subtree_size(x.right)
-	y.left_newlines = x.left_newlines + x.piece.newline_count + subtree_newlines(x.right)
+	right_child.left_size = pivot_node.left_size + pivot_node.size_self + subtree_size(pivot_node.right)
+	right_child.left_newlines = pivot_node.left_newlines + pivot_node.piece.newline_count + subtree_newlines(pivot_node.right)
 }
 
-rotate_right :: proc(tree: ^PieceTree, x: ^Node) {
-	y := x.left
-	if y == nil { return }
+rotate_right :: proc(piece_tree: ^PieceTree, pivot_node: ^Node) {
+	left_child := pivot_node.left
+	if left_child == nil { return }
 
-	x.left = y.right
-	if y.right != nil {
-		y.right.parent = x
+	pivot_node.left = left_child.right
+	if left_child.right != nil {
+		left_child.right.parent = pivot_node
 	}
-	y.parent = x.parent
-	if x.parent == nil {
-		tree.root = y
-	} else if x == x.parent.right {
-		x.parent.right = y
+	left_child.parent = pivot_node.parent
+	if pivot_node.parent == nil {
+		piece_tree.root = left_child
+	} else if pivot_node == pivot_node.parent.right {
+		pivot_node.parent.right = left_child
 	} else {
-		x.parent.left = y
+		pivot_node.parent.left = left_child
 	}
-	y.right = x
-	x.parent = y
+	left_child.right = pivot_node
+	pivot_node.parent = left_child
 
-	// Update x's left metadata
-	x.left_size = subtree_size(x.left)
-	x.left_newlines = subtree_newlines(x.left)
+	// Update pivot_node's left metadata
+	pivot_node.left_size = subtree_size(pivot_node.left)
+	pivot_node.left_newlines = subtree_newlines(pivot_node.left)
 }
 
 // --- Internal: size/newline helpers ---
 
-subtree_size :: proc(node: ^Node) -> u32 {
-	if node == nil {
+subtree_size :: proc(subtree_root: ^Node) -> u32 {
+	if subtree_root == nil {
 		return 0
 	}
-	return node.left_size + node.size_self + subtree_size(node.right)
+	return subtree_root.left_size + subtree_root.size_self + subtree_size(subtree_root.right)
 }
 
-subtree_newlines :: proc(node: ^Node) -> u32 {
-	if node == nil {
+subtree_newlines :: proc(subtree_root: ^Node) -> u32 {
+	if subtree_root == nil {
 		return 0
 	}
-	return node.left_newlines + node.piece.newline_count + subtree_newlines(node.right)
+	return subtree_root.left_newlines + subtree_root.piece.newline_count + subtree_newlines(subtree_root.right)
 }
 
 recompute_metadata :: proc(node: ^Node) {
@@ -791,10 +791,10 @@ recompute_metadata :: proc(node: ^Node) {
 	node.left_newlines = subtree_newlines(node.left)
 }
 
-node_update_metadata_up :: proc(node: ^Node) {
-	n := node
-	for n != nil {
-		recompute_metadata(n)
-		n = n.parent
+node_update_metadata_up :: proc(starting_node: ^Node) {
+	current_node := starting_node
+	for current_node != nil {
+		recompute_metadata(current_node)
+		current_node = current_node.parent
 	}
 }

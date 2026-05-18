@@ -6,14 +6,14 @@ package terminal
 PtyState :: struct {}
 
 @(private)
-pty_spawn    :: proc(t: ^Terminal, cols, rows: i32) -> bool { return false }
+pty_spawn    :: proc(terminal: ^Terminal, columns, rows: i32) -> bool { return false }
 @(private)
-pty_close    :: proc(t: ^Terminal) {}
+pty_close    :: proc(terminal: ^Terminal) {}
 @(private)
-pty_finalize :: proc(t: ^Terminal) {}
+pty_finalize :: proc(terminal: ^Terminal) {}
 @(private)
-pty_resize   :: proc(t: ^Terminal, cols, rows: i32) {}
+pty_resize   :: proc(terminal: ^Terminal, columns, rows: i32) {}
 @(private)
-pty_read     :: proc(t: ^Terminal, buf: []u8) -> (int, bool) { return 0, false }
+pty_read     :: proc(terminal: ^Terminal, buffer: []u8) -> (int, bool) { return 0, false }
 @(private)
-pty_write    :: proc(t: ^Terminal, data: []u8) -> int { return 0 }
+pty_write    :: proc(terminal: ^Terminal, data: []u8) -> int { return 0 }

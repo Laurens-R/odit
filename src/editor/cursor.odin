@@ -3,206 +3,206 @@ package editor
 import "../document"
 
 @(private)
-editor_insert_text :: proc(ed: ^Editor, text: string) {
-	v := editor_active_editor_pane(ed); if v == nil { return }
-	delete_selection(ed)
-	document.document_insert(&v.doc, v.cursor_offset, text)
-	v.cursor_offset += u32(len(text))
-	v.symbols_dirty = true
-	sync_cursor_from_offset(ed)
+editor_insert_text :: proc(editor: ^Editor, text_to_insert: string) {
+	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return }
+	delete_selection(editor)
+	document.document_insert(&editor_pane.document, editor_pane.cursor_offset, text_to_insert)
+	editor_pane.cursor_offset += u32(len(text_to_insert))
+	editor_pane.symbols_dirty = true
+	sync_cursor_from_offset(editor)
 }
 
 // Remove one "tab's worth" of leading whitespace from the current line of the
 // active editor pane.
 @(private)
-editor_outdent_line :: proc(ed: ^Editor) {
-	v := editor_active_editor_pane(ed); if v == nil { return }
+editor_outdent_line :: proc(editor: ^Editor) {
+	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return }
 
-	line_start := document.document_line_start(&v.doc, v.cursor_line)
-	line := document.document_get_line(&v.doc, v.cursor_line, context.temp_allocator)
+	line_start_offset := document.document_line_start(&editor_pane.document, editor_pane.cursor_line)
+	line_text := document.document_get_line(&editor_pane.document, editor_pane.cursor_line, context.temp_allocator)
 
-	if len(line) == 0 { return }
+	if len(line_text) == 0 { return }
 
-	remove_count: u32 = 0
-	switch line[0] {
+	bytes_to_remove: u32 = 0
+	switch line_text[0] {
 	case '\t':
-		remove_count = 1
+		bytes_to_remove = 1
 	case ' ':
-		for int(remove_count) < len(line) && remove_count < u32(TAB_WIDTH) && line[remove_count] == ' ' {
-			remove_count += 1
+		for int(bytes_to_remove) < len(line_text) && bytes_to_remove < u32(TAB_WIDTH) && line_text[bytes_to_remove] == ' ' {
+			bytes_to_remove += 1
 		}
 	}
 
-	if remove_count == 0 { return }
+	if bytes_to_remove == 0 { return }
 
-	document.document_delete(&v.doc, line_start, remove_count)
-	v.symbols_dirty = true
+	document.document_delete(&editor_pane.document, line_start_offset, bytes_to_remove)
+	editor_pane.symbols_dirty = true
 
-	if v.cursor_offset >= line_start + remove_count {
-		v.cursor_offset -= remove_count
-	} else if v.cursor_offset > line_start {
-		v.cursor_offset = line_start
+	if editor_pane.cursor_offset >= line_start_offset + bytes_to_remove {
+		editor_pane.cursor_offset -= bytes_to_remove
+	} else if editor_pane.cursor_offset > line_start_offset {
+		editor_pane.cursor_offset = line_start_offset
 	}
 
-	v.sel_active = false
+	editor_pane.selection_active = false
 
-	sync_cursor_from_offset(ed)
+	sync_cursor_from_offset(editor)
 }
 
 @(private)
-editor_insert_newline_with_indent :: proc(ed: ^Editor) {
-	v := editor_active_editor_pane(ed); if v == nil { return }
+editor_insert_newline_with_indent :: proc(editor: ^Editor) {
+	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return }
 
-	line_for_indent := v.cursor_line
-	if v.sel_active {
-		lo := min(v.sel_anchor, v.cursor_offset)
-		line_for_indent = document.document_offset_to_line(&v.doc, lo)
+	indent_source_line := editor_pane.cursor_line
+	if editor_pane.selection_active {
+		low_offset := min(editor_pane.selection_anchor, editor_pane.cursor_offset)
+		indent_source_line = document.document_offset_to_line(&editor_pane.document, low_offset)
 	}
 
-	line := document.document_get_line(&v.doc, line_for_indent, context.temp_allocator)
+	source_line_text := document.document_get_line(&editor_pane.document, indent_source_line, context.temp_allocator)
 
-	indent_end := 0
-	for indent_end < len(line) {
-		c := line[indent_end]
-		if c != ' ' && c != '\t' { break }
-		indent_end += 1
+	indent_end_index := 0
+	for indent_end_index < len(source_line_text) {
+		character_value := source_line_text[indent_end_index]
+		if character_value != ' ' && character_value != '\t' { break }
+		indent_end_index += 1
 	}
 
-	if indent_end == 0 {
-		editor_insert_text(ed, "\n")
+	if indent_end_index == 0 {
+		editor_insert_text(editor, "\n")
 		return
 	}
 
-	buf := make([]byte, 1 + indent_end, context.temp_allocator)
-	buf[0] = '\n'
-	copy(buf[1:], line[:indent_end])
-	editor_insert_text(ed, string(buf))
+	newline_with_indent_buffer := make([]byte, 1 + indent_end_index, context.temp_allocator)
+	newline_with_indent_buffer[0] = '\n'
+	copy(newline_with_indent_buffer[1:], source_line_text[:indent_end_index])
+	editor_insert_text(editor, string(newline_with_indent_buffer))
 }
 
 @(private)
-sync_cursor_from_offset :: proc(ed: ^Editor) {
-	v := editor_active_editor_pane(ed); if v == nil { return }
-	v.cursor_line = document.document_offset_to_line(&v.doc, v.cursor_offset)
-	line_start := document.document_line_start(&v.doc, v.cursor_line)
-	v.cursor_col = v.cursor_offset - line_start
-	ensure_cursor_visible(ed)
+sync_cursor_from_offset :: proc(editor: ^Editor) {
+	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return }
+	editor_pane.cursor_line = document.document_offset_to_line(&editor_pane.document, editor_pane.cursor_offset)
+	line_start_offset := document.document_line_start(&editor_pane.document, editor_pane.cursor_line)
+	editor_pane.cursor_column = editor_pane.cursor_offset - line_start_offset
+	ensure_cursor_visible(editor)
 }
 
 @(private)
-move_cursor_vertical :: proc(ed: ^Editor, delta: i32) {
-	v := editor_active_editor_pane(ed); if v == nil { return }
-	new_line := i32(v.cursor_line) + delta
-	line_count := i32(document.document_line_count(&v.doc))
-	new_line = clamp(new_line, 0, line_count - 1)
+move_cursor_vertical :: proc(editor: ^Editor, line_delta: i32) {
+	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return }
+	new_line_signed := i32(editor_pane.cursor_line) + line_delta
+	total_line_count := i32(document.document_line_count(&editor_pane.document))
+	new_line_signed = clamp(new_line_signed, 0, total_line_count - 1)
 
-	target_line := u32(new_line)
-	line_start := document.document_line_start(&v.doc, target_line)
-	line_text := document.document_get_line(&v.doc, target_line, context.temp_allocator)
-	line_len := u32(len(line_text))
+	target_line := u32(new_line_signed)
+	line_start_offset := document.document_line_start(&editor_pane.document, target_line)
+	target_line_text := document.document_get_line(&editor_pane.document, target_line, context.temp_allocator)
+	target_line_length := u32(len(target_line_text))
 
-	col := min(v.cursor_col, line_len)
+	clamped_column := min(editor_pane.cursor_column, target_line_length)
 
-	v.cursor_line = target_line
-	v.cursor_col = col
-	v.cursor_offset = line_start + col
-	ensure_cursor_visible(ed)
+	editor_pane.cursor_line = target_line
+	editor_pane.cursor_column = clamped_column
+	editor_pane.cursor_offset = line_start_offset + clamped_column
+	ensure_cursor_visible(editor)
 }
 
 @(private)
-ensure_cursor_visible :: proc(ed: ^Editor) {
-	v := editor_active_editor_pane(ed); if v == nil { return }
-	if v.visible_lines == 0 { return }
+ensure_cursor_visible :: proc(editor: ^Editor) {
+	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return }
+	if editor_pane.visible_lines == 0 { return }
 
 	// In diff mode, the cursor lives at a doc line but is rendered at a
 	// diff-row index. Resolve that mapping and scroll the shared diff view.
-	if ed.diff_state.active {
-		map_arr: []i32
-		if ed.active == 0 {
-			map_arr = ed.diff_state.left_line_to_row[:]
+	if editor.diff_state.active {
+		line_to_row_map: []i32
+		if editor.active_pane_index == 0 {
+			line_to_row_map = editor.diff_state.left_line_to_row[:]
 		} else {
-			map_arr = ed.diff_state.right_line_to_row[:]
+			line_to_row_map = editor.diff_state.right_line_to_row[:]
 		}
 
-		if int(v.cursor_line) >= len(map_arr) { return }
-		row_idx := map_arr[v.cursor_line]
-		if row_idx < 0 { return }
+		if int(editor_pane.cursor_line) >= len(line_to_row_map) { return }
+		row_index := line_to_row_map[editor_pane.cursor_line]
+		if row_index < 0 { return }
 
-		row_top    := f32(row_idx) * f32(ed.line_height)
-		row_bottom := row_top + f32(ed.line_height)
-		viewport_h := f32(v.visible_lines) * f32(ed.line_height)
+		row_top_y    := f32(row_index) * f32(editor.line_height)
+		row_bottom_y := row_top_y + f32(editor.line_height)
+		viewport_height := f32(editor_pane.visible_lines) * f32(editor.line_height)
 
-		if row_top < ed.diff_state.scroll_y {
-			ed.diff_state.scroll_y = row_top
-			ed.diff_state.scroll_y_target = row_top
-		} else if row_bottom > ed.diff_state.scroll_y + viewport_h {
-			new_scroll := row_bottom - viewport_h
-			ed.diff_state.scroll_y = new_scroll
-			ed.diff_state.scroll_y_target = new_scroll
+		if row_top_y < editor.diff_state.scroll_y {
+			editor.diff_state.scroll_y = row_top_y
+			editor.diff_state.scroll_y_target = row_top_y
+		} else if row_bottom_y > editor.diff_state.scroll_y + viewport_height {
+			new_scroll := row_bottom_y - viewport_height
+			editor.diff_state.scroll_y = new_scroll
+			editor.diff_state.scroll_y_target = new_scroll
 		}
 		return
 	}
 
-	new_scroll_line := v.scroll_line
-	if v.cursor_line < v.scroll_line {
-		new_scroll_line = v.cursor_line
-	} else if v.cursor_line >= v.scroll_line + v.visible_lines {
-		new_scroll_line = v.cursor_line - v.visible_lines + 1
+	new_scroll_line := editor_pane.scroll_line
+	if editor_pane.cursor_line < editor_pane.scroll_line {
+		new_scroll_line = editor_pane.cursor_line
+	} else if editor_pane.cursor_line >= editor_pane.scroll_line + editor_pane.visible_lines {
+		new_scroll_line = editor_pane.cursor_line - editor_pane.visible_lines + 1
 	}
-	if new_scroll_line != v.scroll_line {
-		v.scroll_line = new_scroll_line
-		v.scroll_y = f32(new_scroll_line) * f32(ed.line_height)
-		v.scroll_y_target = v.scroll_y
+	if new_scroll_line != editor_pane.scroll_line {
+		editor_pane.scroll_line = new_scroll_line
+		editor_pane.scroll_y = f32(new_scroll_line) * f32(editor.line_height)
+		editor_pane.scroll_y_target = editor_pane.scroll_y
 	}
 
 	// Horizontal scroll only matters when wrap is off — otherwise every
 	// column is by definition on screen.
-	if !v.wrap_mode && ed.char_width > 0 {
-		pane := &ed.panes[ed.active]
-		cursor_x_px := f32(v.cursor_col) * f32(ed.char_width)
-		text_w      := f32(pane.rect.w - ed.padding_x - v.gutter_width)
-		if text_w < f32(ed.char_width) { text_w = f32(ed.char_width) }
+	if !editor_pane.wrap_mode && editor.character_width > 0 {
+		pane := &editor.panes[editor.active_pane_index]
+		cursor_pixel_x := f32(editor_pane.cursor_column) * f32(editor.character_width)
+		text_area_width := f32(pane.rectangle.w - editor.padding_x - editor_pane.gutter_width)
+		if text_area_width < f32(editor.character_width) { text_area_width = f32(editor.character_width) }
 
 		// A small slop column so the cursor isn't pasted against the very
 		// edge of the pane after a horizontal jump.
-		slop := f32(ed.char_width * 2)
+		horizontal_slop := f32(editor.character_width * 2)
 
-		if cursor_x_px < v.scroll_x_target + slop {
-			v.scroll_x_target = max(f32(0), cursor_x_px - slop)
-			v.scroll_x        = v.scroll_x_target
-		} else if cursor_x_px + f32(ed.char_width) > v.scroll_x_target + text_w - slop {
-			v.scroll_x_target = cursor_x_px + f32(ed.char_width) - text_w + slop
-			v.scroll_x        = v.scroll_x_target
+		if cursor_pixel_x < editor_pane.scroll_x_target + horizontal_slop {
+			editor_pane.scroll_x_target = max(f32(0), cursor_pixel_x - horizontal_slop)
+			editor_pane.scroll_x        = editor_pane.scroll_x_target
+		} else if cursor_pixel_x + f32(editor.character_width) > editor_pane.scroll_x_target + text_area_width - horizontal_slop {
+			editor_pane.scroll_x_target = cursor_pixel_x + f32(editor.character_width) - text_area_width + horizontal_slop
+			editor_pane.scroll_x        = editor_pane.scroll_x_target
 		}
 	}
 }
 
 @(private)
-prev_char_len :: proc(ed: ^Editor) -> u32 {
-	v := editor_active_editor_pane(ed); if v == nil { return 0 }
-	if v.cursor_offset == 0 { return 0 }
-	look_back := min(v.cursor_offset, 4)
-	slice := document.document_get_slice(&v.doc, v.cursor_offset - look_back, look_back)
-	if len(slice) == 0 { return 1 }
+prev_char_len :: proc(editor: ^Editor) -> u32 {
+	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return 0 }
+	if editor_pane.cursor_offset == 0 { return 0 }
+	look_back_bytes := min(editor_pane.cursor_offset, 4)
+	look_back_slice := document.document_get_slice(&editor_pane.document, editor_pane.cursor_offset - look_back_bytes, look_back_bytes)
+	if len(look_back_slice) == 0 { return 1 }
 
-	i := len(slice) - 1
-	for i > 0 && (slice[i] & 0xC0) == 0x80 {
-		i -= 1
+	last_byte_index := len(look_back_slice) - 1
+	for last_byte_index > 0 && (look_back_slice[last_byte_index] & 0xC0) == 0x80 {
+		last_byte_index -= 1
 	}
-	return u32(len(slice) - i)
+	return u32(len(look_back_slice) - last_byte_index)
 }
 
 @(private)
-next_char_len :: proc(ed: ^Editor) -> u32 {
-	v := editor_active_editor_pane(ed); if v == nil { return 0 }
-	doc_len := document.document_length(&v.doc)
-	if v.cursor_offset >= doc_len { return 0 }
-	look_ahead := min(doc_len - v.cursor_offset, 4)
-	slice := document.document_get_slice(&v.doc, v.cursor_offset, look_ahead)
-	if len(slice) == 0 { return 1 }
+next_char_len :: proc(editor: ^Editor) -> u32 {
+	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return 0 }
+	document_length := document.document_length(&editor_pane.document)
+	if editor_pane.cursor_offset >= document_length { return 0 }
+	look_ahead_bytes := min(document_length - editor_pane.cursor_offset, 4)
+	look_ahead_slice := document.document_get_slice(&editor_pane.document, editor_pane.cursor_offset, look_ahead_bytes)
+	if len(look_ahead_slice) == 0 { return 1 }
 
-	b := slice[0]
-	if b < 0x80      { return 1 }
-	else if b < 0xE0 { return 2 }
-	else if b < 0xF0 { return 3 }
-	else             { return 4 }
+	first_byte := look_ahead_slice[0]
+	if first_byte < 0x80      { return 1 }
+	else if first_byte < 0xE0 { return 2 }
+	else if first_byte < 0xF0 { return 3 }
+	else                       { return 4 }
 }

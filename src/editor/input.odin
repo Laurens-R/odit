@@ -7,342 +7,342 @@ import "../document"
 import "../terminal"
 import "../ui"
 
-editor_handle_event :: proc(ed: ^Editor, event: ^sdl3.Event) {
+editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 	// Stamp the "last keystroke" clock on any key activity so the
 	// symbol-reanalyze gate in editor_update can debounce around active
 	// typing. We do this before any modal-dialog dispatch so that pressing
 	// keys inside the browse / help / symbols dialogs also resets the timer.
 	#partial switch event.type {
 	case .KEY_DOWN, .KEY_UP, .TEXT_INPUT:
-		ed.last_keystroke_time = ed.clock
+		editor.last_keystroke_time = editor.clock
 	}
 
 	// Any user input is reason enough to repaint next frame. Cheap and
 	// covers all the keyboard / mouse / wheel paths in one place.
-	editor_mark_dirty(ed)
+	editor_mark_dirty(editor)
 
 	// Modal dialogs intercept input.
-	if ed.show_help {
+	if editor.show_help {
 		#partial switch event.type {
 		case .KEY_DOWN:
-			key := event.key.key
-			switch key {
+			pressed_key := event.key.key
+			switch pressed_key {
 			case sdl3.K_F1, sdl3.K_ESCAPE:
-				help_close(ed)
+				help_close(editor)
 			case sdl3.K_UP:
-				help_scroll_by(ed, -ed.line_height)
+				help_scroll_by(editor, -editor.line_height)
 			case sdl3.K_DOWN:
-				help_scroll_by(ed, ed.line_height)
+				help_scroll_by(editor, editor.line_height)
 			case sdl3.K_PAGEUP:
-				step := max(i32(1), ed.line_height * 8)
-				help_scroll_by(ed, -step)
+				page_step := max(i32(1), editor.line_height * 8)
+				help_scroll_by(editor, -page_step)
 			case sdl3.K_PAGEDOWN:
-				step := max(i32(1), ed.line_height * 8)
-				help_scroll_by(ed, step)
+				page_step := max(i32(1), editor.line_height * 8)
+				help_scroll_by(editor, page_step)
 			case sdl3.K_HOME:
-				help_scroll_to_top(ed)
+				help_scroll_to_top(editor)
 			case sdl3.K_END:
-				help_scroll_to_bottom(ed)
+				help_scroll_to_bottom(editor)
 			}
 		case .MOUSE_WHEEL:
-			help_scroll_by(ed, -i32(event.wheel.y * f32(ed.line_height) * 3))
+			help_scroll_by(editor, -i32(event.wheel.y * f32(editor.line_height) * 3))
 		}
 		return
 	}
-	if ed.show_browse {
-		browse_handle_event(ed, event)
+	if editor.show_browse {
+		browse_handle_event(editor, event)
 		return
 	}
-	if ed.show_symbols {
-		symbols_dialog_handle_event(ed, event)
+	if editor.show_symbols {
+		symbols_dialog_handle_event(editor, event)
 		return
 	}
-	if ed.show_terminal_close_confirm {
-		terminal_close_confirm_handle_event(ed, event)
+	if editor.show_terminal_close_confirm {
+		terminal_close_confirm_handle_event(editor, event)
 		return
 	}
 
 	#partial switch event.type {
 	case .TEXT_INPUT:
-		if ed.diff_state.active { return }
+		if editor.diff_state.active { return }
 		// Route TEXT_INPUT to the active pane's content type.
-		#partial switch &c in editor_active_pane(ed).content {
+		#partial switch &content_value in editor_active_pane(editor).content {
 		case EditorPane:
 			input_text := string(event.text.text)
 			if len(input_text) > 0 {
-				editor_insert_text(ed, input_text)
+				editor_insert_text(editor, input_text)
 			}
 		case TerminalPane:
-			if c.term != nil {
-				terminal.terminal_handle_event(c.term, event)
+			if content_value.terminal != nil {
+				terminal.terminal_handle_event(content_value.terminal, event)
 			}
 		}
 
 	case .KEY_DOWN:
 		// Global hotkeys checked before pane dispatch.
-		key := event.key.key
-		mod := event.key.mod
-		ctrl := .LCTRL in mod || .RCTRL in mod
+		pressed_key := event.key.key
+		key_modifiers := event.key.mod
+		ctrl_held := .LCTRL in key_modifiers || .RCTRL in key_modifiers
 
-		if key == sdl3.K_F1 {
-			help_toggle(ed)
+		if pressed_key == sdl3.K_F1 {
+			help_toggle(editor)
 			return
 		}
-		if key == sdl3.K_F2 {
-			browse_open(ed)
+		if pressed_key == sdl3.K_F2 {
+			browse_open(editor)
 			return
 		}
-		if key == sdl3.K_F6 {
-			symbols_dialog_open(ed)
+		if pressed_key == sdl3.K_F6 {
+			symbols_dialog_open(editor)
 			return
 		}
-		if key == sdl3.K_F8 {
-			diff_toggle(ed)
+		if pressed_key == sdl3.K_F8 {
+			diff_toggle(editor)
 			return
 		}
-		if key == sdl3.K_F9 {
-			editor_toggle_terminal(ed)
+		if pressed_key == sdl3.K_F9 {
+			editor_toggle_terminal(editor)
 			return
 		}
-		if ctrl && key == sdl3.K_TAB {
-			editor_focus_other_pane(ed)
+		if ctrl_held && pressed_key == sdl3.K_TAB {
+			editor_focus_other_pane(editor)
 			return
 		}
-		if ctrl && key == sdl3.K_W {
-			editor_toggle_wrap(ed)
+		if ctrl_held && pressed_key == sdl3.K_W {
+			editor_toggle_wrap(editor)
 			return
 		}
 
 		// Route remaining keys to the active pane.
-		#partial switch &c in editor_active_pane(ed).content {
+		#partial switch &content_value in editor_active_pane(editor).content {
 		case EditorPane:
-			editor_handle_key(ed, event)
+			editor_handle_key(editor, event)
 		case TerminalPane:
-			if c.term != nil {
-				terminal.terminal_handle_event(c.term, event)
+			if content_value.terminal != nil {
+				terminal.terminal_handle_event(content_value.terminal, event)
 			}
 		}
 
 	case .MOUSE_WHEEL:
-		mod := sdl3.GetModState()
-		ctrl  := .LCTRL  in mod || .RCTRL  in mod
-		shift := .LSHIFT in mod || .RSHIFT in mod
-		if ctrl {
-			editor_zoom(ed, event.wheel.y)
+		key_modifiers := sdl3.GetModState()
+		ctrl_held  := .LCTRL  in key_modifiers || .RCTRL  in key_modifiers
+		shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
+		if ctrl_held {
+			editor_zoom(editor, event.wheel.y)
 		} else {
-			hit := editor_pane_at(ed, event.wheel.mouse_x, event.wheel.mouse_y)
-			if hit >= 0 { ed.active = hit }
+			pane_hit_index := editor_pane_at(editor, event.wheel.mouse_x, event.wheel.mouse_y)
+			if pane_hit_index >= 0 { editor.active_pane_index = pane_hit_index }
 			// Each pane content type can scroll its own way. For editor panes,
 			// `shift` flips the wheel to horizontal scroll when wrap is off.
-			#partial switch &c in editor_active_pane(ed).content {
+			#partial switch &content_value in editor_active_pane(editor).content {
 			case EditorPane:
-				if shift && !c.wrap_mode {
-					editor_scroll_horizontal(ed, -i32(event.wheel.y * 3))
+				if shift_held && !content_value.wrap_mode {
+					editor_scroll_horizontal(editor, -i32(event.wheel.y * 3))
 				} else {
-					editor_scroll(ed, -i32(event.wheel.y * 3))
+					editor_scroll(editor, -i32(event.wheel.y * 3))
 				}
 			}
 		}
 
 	case .MOUSE_BUTTON_DOWN:
 		if event.button.button == sdl3.BUTTON_LEFT {
-			mod := sdl3.GetModState()
-			shift := .LSHIFT in mod || .RSHIFT in mod
-			editor_mouse_down(ed, event.button.x, event.button.y, shift)
+			key_modifiers := sdl3.GetModState()
+			shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
+			editor_mouse_down(editor, event.button.x, event.button.y, shift_held)
 		}
 
 	case .MOUSE_BUTTON_UP:
 		if event.button.button == sdl3.BUTTON_LEFT {
-			editor_mouse_up(ed, event.button.x, event.button.y)
+			editor_mouse_up(editor, event.button.x, event.button.y)
 		}
 
 	case .MOUSE_MOTION:
-		editor_update_cursor(ed, event.motion.x, event.motion.y)
-		editor_scrollbar_update_hover(ed, event.motion.x, event.motion.y)
-		editor_mouse_drag(ed, event.motion.x, event.motion.y)
+		editor_update_cursor(editor, event.motion.x, event.motion.y)
+		editor_scrollbar_update_hover(editor, event.motion.x, event.motion.y)
+		editor_mouse_drag(editor, event.motion.x, event.motion.y)
 	}
 }
 
 @(private="file")
-editor_handle_key :: proc(ed: ^Editor, event: ^sdl3.Event) {
-	v := editor_active_editor_pane(ed); if v == nil { return }
+editor_handle_key :: proc(editor: ^Editor, event: ^sdl3.Event) {
+	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return }
 
-	key := event.key.key
-	mod := event.key.mod
+	pressed_key := event.key.key
+	key_modifiers := event.key.mod
 
-	ctrl  := .LCTRL  in mod || .RCTRL  in mod
-	shift := .LSHIFT in mod || .RSHIFT in mod
+	ctrl_held  := .LCTRL  in key_modifiers || .RCTRL  in key_modifiers
+	shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
 
 	// Reset cursor blink on any keypress
-	ed.cursor_visible = true
-	ed.cursor_timer = 0
+	editor.cursor_visible = true
+	editor.cursor_timer = 0
 
 	// Diff mode is read-only — block edits/undo/redo/paste.
-	in_diff := ed.diff_state.active
+	is_diff_mode := editor.diff_state.active
 
-	if ctrl {
-		switch key {
+	if ctrl_held {
+		switch pressed_key {
 		case sdl3.K_Z:
-			if in_diff { return }
-			if shift {
-				if new_offset, ok := document.document_redo(&v.doc); ok {
-					v.cursor_offset = new_offset
+			if is_diff_mode { return }
+			if shift_held {
+				if new_offset, redo_succeeded := document.document_redo(&editor_pane.document); redo_succeeded {
+					editor_pane.cursor_offset = new_offset
 				}
 			} else {
-				if new_offset, ok := document.document_undo(&v.doc); ok {
-					v.cursor_offset = new_offset
+				if new_offset, undo_succeeded := document.document_undo(&editor_pane.document); undo_succeeded {
+					editor_pane.cursor_offset = new_offset
 				}
 			}
-			v.sel_active = false
-			sync_cursor_from_offset(ed)
+			editor_pane.selection_active = false
+			sync_cursor_from_offset(editor)
 			return
 		case sdl3.K_Y:
-			if in_diff { return }
-			if new_offset, ok := document.document_redo(&v.doc); ok {
-				v.cursor_offset = new_offset
+			if is_diff_mode { return }
+			if new_offset, redo_succeeded := document.document_redo(&editor_pane.document); redo_succeeded {
+				editor_pane.cursor_offset = new_offset
 			}
-			v.sel_active = false
-			sync_cursor_from_offset(ed)
+			editor_pane.selection_active = false
+			sync_cursor_from_offset(editor)
 			return
 		case sdl3.K_A:
 			// Select all (future)
 			return
 		case sdl3.K_C:
-			clipboard_copy(ed)
+			clipboard_copy(editor)
 			return
 		case sdl3.K_V:
-			if in_diff { return }
-			clipboard_paste(ed)
+			if is_diff_mode { return }
+			clipboard_paste(editor)
 			return
 		}
 	}
 
-	switch key {
+	switch pressed_key {
 	case sdl3.K_RETURN:
-		if in_diff { return }
-		editor_insert_newline_with_indent(ed)
+		if is_diff_mode { return }
+		editor_insert_newline_with_indent(editor)
 
 	case sdl3.K_TAB:
-		if in_diff { return }
-		if shift {
-			editor_outdent_line(ed)
+		if is_diff_mode { return }
+		if shift_held {
+			editor_outdent_line(editor)
 		} else {
-			editor_insert_text(ed, "    ")
+			editor_insert_text(editor, "    ")
 		}
 
 	case sdl3.K_BACKSPACE:
-		if in_diff { return }
-		if delete_selection(ed) { return }
-		if v.cursor_offset > 0 {
-			del_len := prev_char_len(ed)
-			document.document_delete(&v.doc, v.cursor_offset - del_len, del_len)
-			v.cursor_offset -= del_len
-			v.symbols_dirty = true
-			sync_cursor_from_offset(ed)
+		if is_diff_mode { return }
+		if delete_selection(editor) { return }
+		if editor_pane.cursor_offset > 0 {
+			deletion_length := prev_char_len(editor)
+			document.document_delete(&editor_pane.document, editor_pane.cursor_offset - deletion_length, deletion_length)
+			editor_pane.cursor_offset -= deletion_length
+			editor_pane.symbols_dirty = true
+			sync_cursor_from_offset(editor)
 		}
 
 	case sdl3.K_DELETE:
-		if in_diff { return }
-		if delete_selection(ed) { return }
-		doc_len := document.document_length(&v.doc)
-		if v.cursor_offset < doc_len {
-			del_len := next_char_len(ed)
-			document.document_delete(&v.doc, v.cursor_offset, del_len)
-			v.symbols_dirty = true
-			sync_cursor_from_offset(ed)
+		if is_diff_mode { return }
+		if delete_selection(editor) { return }
+		document_length := document.document_length(&editor_pane.document)
+		if editor_pane.cursor_offset < document_length {
+			deletion_length := next_char_len(editor)
+			document.document_delete(&editor_pane.document, editor_pane.cursor_offset, deletion_length)
+			editor_pane.symbols_dirty = true
+			sync_cursor_from_offset(editor)
 		}
 
 	case sdl3.K_LEFT:
-		if !shift && collapse_selection(ed, false) { return }
-		update_selection_for_nav(ed, shift)
-		if v.cursor_offset > 0 {
-			v.cursor_offset -= prev_char_len(ed)
-			sync_cursor_from_offset(ed)
+		if !shift_held && collapse_selection(editor, false) { return }
+		update_selection_for_nav(editor, shift_held)
+		if editor_pane.cursor_offset > 0 {
+			editor_pane.cursor_offset -= prev_char_len(editor)
+			sync_cursor_from_offset(editor)
 		}
 
 	case sdl3.K_RIGHT:
-		if !shift && collapse_selection(ed, true) { return }
-		update_selection_for_nav(ed, shift)
-		doc_len := document.document_length(&v.doc)
-		if v.cursor_offset < doc_len {
-			v.cursor_offset += next_char_len(ed)
-			sync_cursor_from_offset(ed)
+		if !shift_held && collapse_selection(editor, true) { return }
+		update_selection_for_nav(editor, shift_held)
+		document_length := document.document_length(&editor_pane.document)
+		if editor_pane.cursor_offset < document_length {
+			editor_pane.cursor_offset += next_char_len(editor)
+			sync_cursor_from_offset(editor)
 		}
 
 	case sdl3.K_UP:
-		update_selection_for_nav(ed, shift)
-		if v.cursor_line > 0 {
-			move_cursor_vertical(ed, -1)
+		update_selection_for_nav(editor, shift_held)
+		if editor_pane.cursor_line > 0 {
+			move_cursor_vertical(editor, -1)
 		}
 
 	case sdl3.K_DOWN:
-		update_selection_for_nav(ed, shift)
-		line_count := document.document_line_count(&v.doc)
-		if v.cursor_line < line_count - 1 {
-			move_cursor_vertical(ed, 1)
+		update_selection_for_nav(editor, shift_held)
+		total_line_count := document.document_line_count(&editor_pane.document)
+		if editor_pane.cursor_line < total_line_count - 1 {
+			move_cursor_vertical(editor, 1)
 		}
 
 	case sdl3.K_HOME:
-		update_selection_for_nav(ed, shift)
-		if ctrl {
-			v.cursor_offset = 0
+		update_selection_for_nav(editor, shift_held)
+		if ctrl_held {
+			editor_pane.cursor_offset = 0
 		} else {
-			v.cursor_offset = document.document_line_start(&v.doc, v.cursor_line)
+			editor_pane.cursor_offset = document.document_line_start(&editor_pane.document, editor_pane.cursor_line)
 		}
-		sync_cursor_from_offset(ed)
+		sync_cursor_from_offset(editor)
 
 	case sdl3.K_END:
-		update_selection_for_nav(ed, shift)
-		if ctrl {
-			v.cursor_offset = document.document_length(&v.doc)
+		update_selection_for_nav(editor, shift_held)
+		if ctrl_held {
+			editor_pane.cursor_offset = document.document_length(&editor_pane.document)
 		} else {
-			line_start := document.document_line_start(&v.doc, v.cursor_line)
-			line_text := document.document_get_line(&v.doc, v.cursor_line, context.temp_allocator)
-			v.cursor_offset = line_start + u32(len(line_text))
+			line_start_offset := document.document_line_start(&editor_pane.document, editor_pane.cursor_line)
+			line_text := document.document_get_line(&editor_pane.document, editor_pane.cursor_line, context.temp_allocator)
+			editor_pane.cursor_offset = line_start_offset + u32(len(line_text))
 		}
-		sync_cursor_from_offset(ed)
+		sync_cursor_from_offset(editor)
 
 	case sdl3.K_PAGEUP:
-		update_selection_for_nav(ed, shift)
-		lines_to_move := v.visible_lines > 1 ? v.visible_lines - 1 : 1
-		if v.cursor_line >= lines_to_move {
-			move_cursor_vertical(ed, -i32(lines_to_move))
+		update_selection_for_nav(editor, shift_held)
+		lines_to_move := editor_pane.visible_lines > 1 ? editor_pane.visible_lines - 1 : 1
+		if editor_pane.cursor_line >= lines_to_move {
+			move_cursor_vertical(editor, -i32(lines_to_move))
 		} else {
-			move_cursor_vertical(ed, -i32(v.cursor_line))
+			move_cursor_vertical(editor, -i32(editor_pane.cursor_line))
 		}
 
 	case sdl3.K_PAGEDOWN:
-		update_selection_for_nav(ed, shift)
-		line_count := document.document_line_count(&v.doc)
-		lines_to_move := v.visible_lines > 1 ? v.visible_lines - 1 : 1
-		remaining := line_count - 1 - v.cursor_line
-		if remaining >= lines_to_move {
-			move_cursor_vertical(ed, i32(lines_to_move))
+		update_selection_for_nav(editor, shift_held)
+		total_line_count := document.document_line_count(&editor_pane.document)
+		lines_to_move := editor_pane.visible_lines > 1 ? editor_pane.visible_lines - 1 : 1
+		remaining_lines := total_line_count - 1 - editor_pane.cursor_line
+		if remaining_lines >= lines_to_move {
+			move_cursor_vertical(editor, i32(lines_to_move))
 		} else {
-			move_cursor_vertical(ed, i32(remaining))
+			move_cursor_vertical(editor, i32(remaining_lines))
 		}
 	}
 }
 
 @(private="file")
-editor_zoom :: proc(ed: ^Editor, direction: f32) {
+editor_zoom :: proc(editor: ^Editor, wheel_direction: f32) {
 	FONT_SIZE_MIN :: 8.0
 	FONT_SIZE_MAX :: 72.0
-	step: f32 = 2.0
+	zoom_step: f32 = 2.0
 
-	new_size := ed.font_size + (direction > 0 ? step : -step)
-	new_size = clamp(new_size, FONT_SIZE_MIN, FONT_SIZE_MAX)
-	if new_size == ed.font_size { return }
+	new_font_size := editor.font_size + (wheel_direction > 0 ? zoom_step : -zoom_step)
+	new_font_size = clamp(new_font_size, FONT_SIZE_MIN, FONT_SIZE_MAX)
+	if new_font_size == editor.font_size { return }
 
-	ed.font_size = new_size
-	_ = ttf.SetFontSize(ed.font, new_size)
+	editor.font_size = new_font_size
+	_ = ttf.SetFontSize(editor.font, new_font_size)
 
-	ed.line_height = i32(ttf.GetFontLineSkip(ed.font))
-	w: i32
-	ttf.GetStringSize(ed.font, "M", 1, &w, nil)
-	ed.char_width = w
+	editor.line_height = i32(ttf.GetFontLineSkip(editor.font))
+	measured_width: i32
+	ttf.GetStringSize(editor.font, "M", 1, &measured_width, nil)
+	editor.character_width = measured_width
 
 	// Invalidate the text cache so previously-shaped runs don't render at
 	// the old size on the next frame.
-	ui.text_cache_clear(&ed.text_cache)
+	ui.text_cache_clear(&editor.text_cache)
 }

@@ -18,21 +18,21 @@ BrowseEntry :: struct {
 
 @(private)
 BrowseState :: struct {
-	cwd:          string, // owned
-	entries:      [dynamic]BrowseEntry,
-	filtered_idx: [dynamic]int,
-	filter:       [dynamic]u8,
-	selected:     int, // index into filtered_idx
-	scroll:       int, // first visible row in filtered list
-	visible_rows: int, // set during render
-	error_msg:    string, // owned; "" when no error
-	flat_mode:    bool, // when true, the listing is a recursive file walk of cwd
+	current_working_directory: string, // owned
+	entries:                   [dynamic]BrowseEntry,
+	filtered_indices:          [dynamic]int,
+	filter_buffer:             [dynamic]u8,
+	selected_index:            int, // index into filtered_indices
+	scroll_offset:             int, // first visible row in filtered list
+	visible_row_count:         int, // set during render
+	error_message:             string, // owned; "" when no error
+	flat_mode:                 bool, // when true, the listing is a recursive file walk
 
 	// Rename / new-file popup. `.None` when no popup is showing.
-	prompt:       BrowsePrompt,
+	prompt_state:              BrowsePrompt,
 	// File-system change history. Each rename/create pushes one entry that
 	// Ctrl+Z can reverse. Persists across browser open/close.
-	undo_stack:   [dynamic]BrowseUndoEntry,
+	undo_stack:                [dynamic]BrowseUndoEntry,
 }
 
 // Caps for the recursive walk so flat mode stays usable in large trees.
@@ -51,271 +51,273 @@ FLAT_SKIP_DIRS := [?]string{
 // --- Lifecycle ---
 
 @(private)
-browse_state_destroy :: proc(ed: ^Editor) {
-	for entry in ed.browse.entries {
+browse_state_destroy :: proc(editor: ^Editor) {
+	for entry in editor.browse_state.entries {
 		delete(entry.name)
 	}
-	delete(ed.browse.entries)
-	delete(ed.browse.filtered_idx)
-	delete(ed.browse.filter)
-	if len(ed.browse.cwd) > 0 {
-		delete(ed.browse.cwd)
-		ed.browse.cwd = ""
+	delete(editor.browse_state.entries)
+	delete(editor.browse_state.filtered_indices)
+	delete(editor.browse_state.filter_buffer)
+	if len(editor.browse_state.current_working_directory) > 0 {
+		delete(editor.browse_state.current_working_directory)
+		editor.browse_state.current_working_directory = ""
 	}
-	if len(ed.browse.error_msg) > 0 {
-		delete(ed.browse.error_msg)
-		ed.browse.error_msg = ""
+	if len(editor.browse_state.error_message) > 0 {
+		delete(editor.browse_state.error_message)
+		editor.browse_state.error_message = ""
 	}
-	browse_prompt_destroy(&ed.browse.prompt)
-	browse_undo_stack_destroy(&ed.browse.undo_stack)
+	browse_prompt_destroy(&editor.browse_state.prompt_state)
+	browse_undo_stack_destroy(&editor.browse_state.undo_stack)
 }
 
 @(private)
-browse_open :: proc(ed: ^Editor) {
-	if ed.show_browse { return }
+browse_open :: proc(editor: ^Editor) {
+	if editor.show_browse { return }
 
-	start_path: string
-	if len(ed.browse.cwd) > 0 {
-		// Use a temp clone because browse_load_directory frees ed.browse.cwd before
-		// taking ownership of its argument.
-		start_path = strings.clone(ed.browse.cwd, context.temp_allocator)
+	start_directory_path: string
+	if len(editor.browse_state.current_working_directory) > 0 {
+		// Use a temp clone because browse_load_directory frees
+		// editor.browse_state.current_working_directory before taking
+		// ownership of its argument.
+		start_directory_path = strings.clone(editor.browse_state.current_working_directory, context.temp_allocator)
 	} else {
-		wd, err := os.get_working_directory(context.temp_allocator)
-		if err != nil {
-			start_path = "."
+		working_directory, get_directory_error := os.get_working_directory(context.temp_allocator)
+		if get_directory_error != nil {
+			start_directory_path = "."
 		} else {
-			start_path = wd
+			start_directory_path = working_directory
 		}
 	}
 
-	ed.show_browse = true
-	browse_load_directory(ed, start_path)
+	editor.show_browse = true
+	browse_load_directory(editor, start_directory_path)
 }
 
 @(private)
-browse_close :: proc(ed: ^Editor) {
-	ed.show_browse = false
+browse_close :: proc(editor: ^Editor) {
+	editor.show_browse = false
 }
 
 // Toggle between tree (current directory only) and flat (recursive file list)
 // views, then reload so the change is visible immediately.
 @(private="file")
-browse_toggle_flat :: proc(ed: ^Editor) {
-	ed.browse.flat_mode = !ed.browse.flat_mode
-	// Clone cwd to temp because browse_load_directory replaces ed.browse.cwd
+browse_toggle_flat :: proc(editor: ^Editor) {
+	editor.browse_state.flat_mode = !editor.browse_state.flat_mode
+	// Clone cwd to temp because browse_load_directory replaces it
 	// before reading its argument.
-	path := strings.clone(ed.browse.cwd, context.temp_allocator)
-	browse_load_directory(ed, path)
+	directory_path := strings.clone(editor.browse_state.current_working_directory, context.temp_allocator)
+	browse_load_directory(editor, directory_path)
 }
 
 // --- Directory loading ---
 
 @(private)
-browse_set_error :: proc(ed: ^Editor, msg: string) {
-	if len(ed.browse.error_msg) > 0 {
-		delete(ed.browse.error_msg)
+browse_set_error :: proc(editor: ^Editor, error_message: string) {
+	if len(editor.browse_state.error_message) > 0 {
+		delete(editor.browse_state.error_message)
 	}
-	ed.browse.error_msg = strings.clone(msg)
+	editor.browse_state.error_message = strings.clone(error_message)
 }
 
 @(private="file")
-browse_clear_error :: proc(ed: ^Editor) {
-	if len(ed.browse.error_msg) > 0 {
-		delete(ed.browse.error_msg)
-		ed.browse.error_msg = ""
+browse_clear_error :: proc(editor: ^Editor) {
+	if len(editor.browse_state.error_message) > 0 {
+		delete(editor.browse_state.error_message)
+		editor.browse_state.error_message = ""
 	}
 }
 
 @(private="file")
-entry_less :: proc(a, b: BrowseEntry) -> bool {
+entry_less :: proc(first_entry, second_entry: BrowseEntry) -> bool {
 	// Folders first; then alphabetical (case-sensitive — good enough for now).
-	if a.is_dir != b.is_dir { return a.is_dir }
-	return a.name < b.name
+	if first_entry.is_dir != second_entry.is_dir { return first_entry.is_dir }
+	return first_entry.name < second_entry.name
 }
 
 @(private="file")
-flat_skip_dir :: proc(name: string) -> bool {
-	if strings.has_prefix(name, ".") { return true } // dotfile dirs
-	for skip in FLAT_SKIP_DIRS {
-		if name == skip { return true }
+flat_skip_dir :: proc(directory_name: string) -> bool {
+	if strings.has_prefix(directory_name, ".") { return true } // dotfile dirs
+	for skipped_directory in FLAT_SKIP_DIRS {
+		if directory_name == skipped_directory { return true }
 	}
 	return false
 }
 
-// Recursively walk `root + sub_rel`, appending every regular file we find to
-// `out` with its path *relative to root*. Subdirectories aren't appended (the
-// flat view is files-only). Bounded by FLAT_MAX_DEPTH and FLAT_MAX_ENTRIES.
+// Recursively walk `root_directory + sub_relative_path`, appending every
+// regular file we find to `output_entries` with its path *relative to
+// root_directory*. Subdirectories aren't appended (the flat view is
+// files-only). Bounded by FLAT_MAX_DEPTH and FLAT_MAX_ENTRIES.
 @(private="file")
-flat_walk :: proc(root: string, sub_rel: string, depth: int, out: ^[dynamic]BrowseEntry) {
-	if depth > FLAT_MAX_DEPTH { return }
-	if len(out^) >= FLAT_MAX_ENTRIES { return }
+flat_walk :: proc(root_directory: string, sub_relative_path: string, current_depth: int, output_entries: ^[dynamic]BrowseEntry) {
+	if current_depth > FLAT_MAX_DEPTH { return }
+	if len(output_entries^) >= FLAT_MAX_ENTRIES { return }
 
-	full_path: string
-	if len(sub_rel) == 0 {
-		full_path = root
+	full_directory_path: string
+	if len(sub_relative_path) == 0 {
+		full_directory_path = root_directory
 	} else {
-		full_path = strings.concatenate({root, "/", sub_rel}, context.temp_allocator)
+		full_directory_path = strings.concatenate({root_directory, "/", sub_relative_path}, context.temp_allocator)
 	}
 
-	infos, err := os.read_all_directory_by_path(full_path, context.temp_allocator)
-	if err != nil { return }
+	directory_entries, read_directory_error := os.read_all_directory_by_path(full_directory_path, context.temp_allocator)
+	if read_directory_error != nil { return }
 
-	for info in infos {
-		if len(out^) >= FLAT_MAX_ENTRIES { return }
-		if info.name == "." || info.name == ".." { continue }
+	for entry_info in directory_entries {
+		if len(output_entries^) >= FLAT_MAX_ENTRIES { return }
+		if entry_info.name == "." || entry_info.name == ".." { continue }
 
-		is_dir := info.type == .Directory
-		if !is_dir && info.type != .Regular && info.type != .Symlink { continue }
+		entry_is_directory := entry_info.type == .Directory
+		if !entry_is_directory && entry_info.type != .Regular && entry_info.type != .Symlink { continue }
 
-		rel_path: string
-		if len(sub_rel) == 0 {
-			rel_path = info.name
+		entry_relative_path: string
+		if len(sub_relative_path) == 0 {
+			entry_relative_path = entry_info.name
 		} else {
-			rel_path = strings.concatenate({sub_rel, "/", info.name}, context.temp_allocator)
+			entry_relative_path = strings.concatenate({sub_relative_path, "/", entry_info.name}, context.temp_allocator)
 		}
 
-		if is_dir {
-			if flat_skip_dir(info.name) { continue }
-			flat_walk(root, rel_path, depth + 1, out)
+		if entry_is_directory {
+			if flat_skip_dir(entry_info.name) { continue }
+			flat_walk(root_directory, entry_relative_path, current_depth + 1, output_entries)
 		} else {
-			append(out, BrowseEntry{name = strings.clone(rel_path), is_dir = false})
+			append(output_entries, BrowseEntry{name = strings.clone(entry_relative_path), is_dir = false})
 		}
 	}
 }
 
 @(private)
-browse_load_directory :: proc(ed: ^Editor, path: string) {
+browse_load_directory :: proc(editor: ^Editor, directory_path: string) {
 	// Replace owned entries
-	for entry in ed.browse.entries {
+	for entry in editor.browse_state.entries {
 		delete(entry.name)
 	}
-	clear(&ed.browse.entries)
+	clear(&editor.browse_state.entries)
 
-	new_cwd := strings.clone(path)
-	if len(ed.browse.cwd) > 0 {
-		delete(ed.browse.cwd)
+	new_working_directory := strings.clone(directory_path)
+	if len(editor.browse_state.current_working_directory) > 0 {
+		delete(editor.browse_state.current_working_directory)
 	}
-	ed.browse.cwd = new_cwd
+	editor.browse_state.current_working_directory = new_working_directory
 
-	browse_clear_error(ed)
+	browse_clear_error(editor)
 
 	// Always offer ".." (works in both tree and flat views — lets the user
 	// re-anchor the listing one level up).
-	append(&ed.browse.entries, BrowseEntry{name = strings.clone(".."), is_dir = true})
+	append(&editor.browse_state.entries, BrowseEntry{name = strings.clone(".."), is_dir = true})
 
-	if ed.browse.flat_mode {
+	if editor.browse_state.flat_mode {
 		// Files-only recursive walk.
-		flat_walk(path, "", 0, &ed.browse.entries)
+		flat_walk(directory_path, "", 0, &editor.browse_state.entries)
 		// Sort the appended files (preserve the ".." entry at index 0).
-		if len(ed.browse.entries) > 1 {
-			slice.sort_by(ed.browse.entries[1:], entry_less)
+		if len(editor.browse_state.entries) > 1 {
+			slice.sort_by(editor.browse_state.entries[1:], entry_less)
 		}
 	} else {
-		infos, err := os.read_all_directory_by_path(path, context.allocator)
-		if err != nil {
-			browse_set_error(ed, fmt.tprintf("Cannot read directory: %v", err))
+		directory_entries, read_directory_error := os.read_all_directory_by_path(directory_path, context.allocator)
+		if read_directory_error != nil {
+			browse_set_error(editor, fmt.tprintf("Cannot read directory: %v", read_directory_error))
 		} else {
-			defer os.file_info_slice_delete(infos, context.allocator)
+			defer os.file_info_slice_delete(directory_entries, context.allocator)
 
-			fs_entries := make([dynamic]BrowseEntry, 0, len(infos), context.temp_allocator)
-			for info in infos {
-				if info.name == "." || info.name == ".." { continue }
-				is_dir := info.type == .Directory
-				if !is_dir && info.type != .Regular && info.type != .Symlink {
+			sorted_entries := make([dynamic]BrowseEntry, 0, len(directory_entries), context.temp_allocator)
+			for entry_info in directory_entries {
+				if entry_info.name == "." || entry_info.name == ".." { continue }
+				entry_is_directory := entry_info.type == .Directory
+				if !entry_is_directory && entry_info.type != .Regular && entry_info.type != .Symlink {
 					continue
 				}
-				append(&fs_entries, BrowseEntry{name = strings.clone(info.name), is_dir = is_dir})
+				append(&sorted_entries, BrowseEntry{name = strings.clone(entry_info.name), is_dir = entry_is_directory})
 			}
-			slice.sort_by(fs_entries[:], entry_less)
-			for entry in fs_entries {
-				append(&ed.browse.entries, entry)
+			slice.sort_by(sorted_entries[:], entry_less)
+			for sorted_entry in sorted_entries {
+				append(&editor.browse_state.entries, sorted_entry)
 			}
 		}
 	}
 
 	// Annotate entries with their git status. The status map keys are full
-	// paths relative to `path`; for tree-view folders we roll up the highest-
-	// priority status across the subtree, for files / flat-mode entries we
-	// look up by exact name.
+	// paths relative to `directory_path`; for tree-view folders we roll up
+	// the highest-priority status across the subtree, for files / flat-mode
+	// entries we look up by exact name.
 	{
-		status_map := git_query_status(path)
-		for &entry in ed.browse.entries {
-			entry.git_status = git_status_for_entry(status_map, entry.name, entry.is_dir)
+		git_status_map := git_query_status(directory_path)
+		for &entry in editor.browse_state.entries {
+			entry.git_status = git_status_for_entry(git_status_map, entry.name, entry.is_dir)
 		}
 	}
 
-	clear(&ed.browse.filter)
-	ed.browse.selected = 0
-	ed.browse.scroll = 0
-	browse_apply_filter(ed)
+	clear(&editor.browse_state.filter_buffer)
+	editor.browse_state.selected_index = 0
+	editor.browse_state.scroll_offset  = 0
+	browse_apply_filter(editor)
 }
 
 // --- Filtering ---
 
 @(private)
-browse_apply_filter :: proc(ed: ^Editor) {
-	clear(&ed.browse.filtered_idx)
+browse_apply_filter :: proc(editor: ^Editor) {
+	clear(&editor.browse_state.filtered_indices)
 
-	filter_lower := strings.to_lower(string(ed.browse.filter[:]), context.temp_allocator)
+	filter_lowercase := strings.to_lower(string(editor.browse_state.filter_buffer[:]), context.temp_allocator)
 
-	for entry, i in ed.browse.entries {
-		if len(filter_lower) == 0 {
-			append(&ed.browse.filtered_idx, i)
+	for entry, entry_index in editor.browse_state.entries {
+		if len(filter_lowercase) == 0 {
+			append(&editor.browse_state.filtered_indices, entry_index)
 			continue
 		}
 		// ".." is special — always show it regardless of filter so the user can
 		// always escape upward.
 		if entry.name == ".." {
-			append(&ed.browse.filtered_idx, i)
+			append(&editor.browse_state.filtered_indices, entry_index)
 			continue
 		}
-		name_lower := strings.to_lower(entry.name, context.temp_allocator)
-		if strings.contains(name_lower, filter_lower) {
-			append(&ed.browse.filtered_idx, i)
+		entry_name_lowercase := strings.to_lower(entry.name, context.temp_allocator)
+		if strings.contains(entry_name_lowercase, filter_lowercase) {
+			append(&editor.browse_state.filtered_indices, entry_index)
 		}
 	}
 
 	// Clamp selection
-	n := len(ed.browse.filtered_idx)
-	if n == 0 {
-		ed.browse.selected = 0
-	} else if ed.browse.selected >= n {
-		ed.browse.selected = n - 1
+	filtered_entry_count := len(editor.browse_state.filtered_indices)
+	if filtered_entry_count == 0 {
+		editor.browse_state.selected_index = 0
+	} else if editor.browse_state.selected_index >= filtered_entry_count {
+		editor.browse_state.selected_index = filtered_entry_count - 1
 	}
-	if ed.browse.selected < 0 { ed.browse.selected = 0 }
+	if editor.browse_state.selected_index < 0 { editor.browse_state.selected_index = 0 }
 }
 
 @(private="file")
-browse_filter_append :: proc(ed: ^Editor, text: string) {
-	for b in transmute([]u8)text {
-		append(&ed.browse.filter, b)
+browse_filter_append :: proc(editor: ^Editor, text_to_append: string) {
+	for byte_value in transmute([]u8)text_to_append {
+		append(&editor.browse_state.filter_buffer, byte_value)
 	}
-	browse_apply_filter(ed)
+	browse_apply_filter(editor)
 }
 
 @(private="file")
-browse_filter_backspace :: proc(ed: ^Editor) {
-	n := len(ed.browse.filter)
-	if n == 0 { return }
-	i := n - 1
+browse_filter_backspace :: proc(editor: ^Editor) {
+	filter_length := len(editor.browse_state.filter_buffer)
+	if filter_length == 0 { return }
+	new_end_index := filter_length - 1
 	// Walk back over UTF-8 continuation bytes
-	for i > 0 && (ed.browse.filter[i] & 0xC0) == 0x80 {
-		i -= 1
+	for new_end_index > 0 && (editor.browse_state.filter_buffer[new_end_index] & 0xC0) == 0x80 {
+		new_end_index -= 1
 	}
-	resize(&ed.browse.filter, i)
-	browse_apply_filter(ed)
+	resize(&editor.browse_state.filter_buffer, new_end_index)
+	browse_apply_filter(editor)
 }
 
 // --- Navigation ---
 
 @(private="file")
-browse_move_selection :: proc(ed: ^Editor, delta: int) {
-	n := len(ed.browse.filtered_idx)
-	if n == 0 { return }
-	new_sel := ed.browse.selected + delta
-	if new_sel < 0 { new_sel = 0 }
-	if new_sel >= n { new_sel = n - 1 }
-	ed.browse.selected = new_sel
+browse_move_selection :: proc(editor: ^Editor, selection_delta: int) {
+	filtered_entry_count := len(editor.browse_state.filtered_indices)
+	if filtered_entry_count == 0 { return }
+	new_selection := editor.browse_state.selected_index + selection_delta
+	if new_selection < 0 { new_selection = 0 }
+	if new_selection >= filtered_entry_count { new_selection = filtered_entry_count - 1 }
+	editor.browse_state.selected_index = new_selection
 }
 
 // Maximum file size we'll load into the editor. Anything larger is rejected
@@ -334,57 +336,57 @@ OpenTarget :: enum {
 }
 
 @(private="file")
-browse_activate :: proc(ed: ^Editor, target: OpenTarget = .Active) {
-	n := len(ed.browse.filtered_idx)
-	if n == 0 { return }
-	if ed.browse.selected < 0 || ed.browse.selected >= n { return }
+browse_activate :: proc(editor: ^Editor, open_target: OpenTarget = .Active) {
+	filtered_entry_count := len(editor.browse_state.filtered_indices)
+	if filtered_entry_count == 0 { return }
+	if editor.browse_state.selected_index < 0 || editor.browse_state.selected_index >= filtered_entry_count { return }
 
-	idx := ed.browse.filtered_idx[ed.browse.selected]
-	entry := ed.browse.entries[idx]
+	source_entry_index := editor.browse_state.filtered_indices[editor.browse_state.selected_index]
+	entry := editor.browse_state.entries[source_entry_index]
 
-	parts := [2]string{ed.browse.cwd, entry.name}
-	joined, _ := filepath.join(parts[:], context.temp_allocator)
-	full_path, _ := filepath.clean(joined, context.temp_allocator)
+	path_parts := [2]string{editor.browse_state.current_working_directory, entry.name}
+	joined_path, _ := filepath.join(path_parts[:], context.temp_allocator)
+	full_path, _ := filepath.clean(joined_path, context.temp_allocator)
 
 	if entry.is_dir {
-		browse_load_directory(ed, full_path)
+		browse_load_directory(editor, full_path)
 		return
 	}
 
-	data, err := os.read_entire_file_from_path(full_path, context.allocator)
-	if err != nil {
-		browse_set_error(ed, fmt.tprintf("Cannot open %s: %v", entry.name, err))
+	file_data, read_file_error := os.read_entire_file_from_path(full_path, context.allocator)
+	if read_file_error != nil {
+		browse_set_error(editor, fmt.tprintf("Cannot open %s: %v", entry.name, read_file_error))
 		return
 	}
-	defer delete(data)
+	defer delete(file_data)
 
-	if len(data) < 0 || len(data) > MAX_FILE_BYTES {
-		browse_set_error(ed, fmt.tprintf("File %s is too large (%d bytes)", entry.name, len(data)))
+	if len(file_data) < 0 || len(file_data) > MAX_FILE_BYTES {
+		browse_set_error(editor, fmt.tprintf("File %s is too large (%d bytes)", entry.name, len(file_data)))
 		return
 	}
 
-	content := strings.clone(string(data))
-	//defer delete(content)
+	file_content := strings.clone(string(file_data))
+	//defer delete(file_content)
 
 	// Pick destination pane based on the requested open target.
-	target_pane := ed.active
-	if target == .SplitSecondary {
-		ed.split_active = true
-		target_pane = 1
-		ed.active = 1 // focus follows the new content
+	target_pane_index := editor.active_pane_index
+	if open_target == .SplitSecondary {
+		editor.split_active = true
+		target_pane_index = 1
+		editor.active_pane_index = 1 // focus follows the new content
 	}
 
-	editor_open_string_in_pane(ed, target_pane, content, full_path)
-	browse_close(ed)
+	editor_open_string_in_pane(editor, target_pane_index, file_content, full_path)
+	browse_close(editor)
 }
 
 // --- Input ---
 
 @(private)
-browse_handle_event :: proc(ed: ^Editor, event: ^sdl3.Event) {
+browse_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 	// While a rename/new-file popup is open, every event goes to it.
-	if browse_prompt_active(ed) {
-		browse_prompt_handle_event(ed, event)
+	if browse_prompt_active(editor) {
+		browse_prompt_handle_event(editor, event)
 		return
 	}
 
@@ -392,49 +394,49 @@ browse_handle_event :: proc(ed: ^Editor, event: ^sdl3.Event) {
 	case .TEXT_INPUT:
 		input_text := string(event.text.text)
 		if len(input_text) > 0 {
-			browse_filter_append(ed, input_text)
+			browse_filter_append(editor, input_text)
 		}
 
 	case .KEY_DOWN:
-		key  := event.key.key
-		mod  := event.key.mod
-		ctrl := .LCTRL in mod || .RCTRL in mod
+		pressed_key   := event.key.key
+		key_modifiers := event.key.mod
+		ctrl_held := .LCTRL in key_modifiers || .RCTRL in key_modifiers
 
 		// Ctrl-prefixed actions: rename, new file, undo last fs change.
-		if ctrl {
-			switch key {
-			case sdl3.K_R: browse_prompt_open_rename(ed); return
-			case sdl3.K_N: browse_prompt_open_new_file(ed); return
-			case sdl3.K_Z: browse_undo(ed); return
+		if ctrl_held {
+			switch pressed_key {
+			case sdl3.K_R: browse_prompt_open_rename(editor); return
+			case sdl3.K_N: browse_prompt_open_new_file(editor); return
+			case sdl3.K_Z: browse_undo(editor); return
 			}
 		}
 
-		switch key {
+		switch pressed_key {
 		case sdl3.K_ESCAPE, sdl3.K_F2:
-			browse_close(ed)
+			browse_close(editor)
 		case sdl3.K_UP:
-			browse_move_selection(ed, -1)
+			browse_move_selection(editor, -1)
 		case sdl3.K_DOWN:
-			browse_move_selection(ed, 1)
+			browse_move_selection(editor, 1)
 		case sdl3.K_PAGEUP:
-			step := ed.browse.visible_rows
-			if step < 1 { step = 1 }
-			browse_move_selection(ed, -step)
+			page_step := editor.browse_state.visible_row_count
+			if page_step < 1 { page_step = 1 }
+			browse_move_selection(editor, -page_step)
 		case sdl3.K_PAGEDOWN:
-			step := ed.browse.visible_rows
-			if step < 1 { step = 1 }
-			browse_move_selection(ed, step)
+			page_step := editor.browse_state.visible_row_count
+			if page_step < 1 { page_step = 1 }
+			browse_move_selection(editor, page_step)
 		case sdl3.K_HOME:
-			browse_move_selection(ed, -len(ed.browse.filtered_idx))
+			browse_move_selection(editor, -len(editor.browse_state.filtered_indices))
 		case sdl3.K_END:
-			browse_move_selection(ed, len(ed.browse.filtered_idx))
+			browse_move_selection(editor, len(editor.browse_state.filtered_indices))
 		case sdl3.K_RETURN:
-			shift := .LSHIFT in event.key.mod || .RSHIFT in event.key.mod
-			browse_activate(ed, .SplitSecondary if shift else .Active)
+			shift_held := .LSHIFT in event.key.mod || .RSHIFT in event.key.mod
+			browse_activate(editor, .SplitSecondary if shift_held else .Active)
 		case sdl3.K_BACKSPACE:
-			browse_filter_backspace(ed)
+			browse_filter_backspace(editor)
 		case sdl3.K_F3:
-			browse_toggle_flat(ed)
+			browse_toggle_flat(editor)
 		}
 	}
 }
@@ -442,85 +444,85 @@ browse_handle_event :: proc(ed: ^Editor, event: ^sdl3.Event) {
 // --- Rendering ---
 
 @(private)
-browse_render :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, width, height: i32) {
-	ctx := ui.Context{
-		renderer    = renderer,
-		font        = ed.font,
-		engine      = ed.engine,
-		char_width  = ed.char_width,
-		line_height = ed.line_height,
+browse_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewport_width, viewport_height: i32) {
+	ui_context := ui.Context{
+		renderer        = renderer,
+		font            = editor.font,
+		engine          = editor.text_engine,
+		character_width = editor.character_width,
+		line_height     = editor.line_height,
 	}
 	theme := ui.default_theme()
 
-	ui.draw_dim_overlay(&ctx, width, height, theme.overlay)
+	ui.draw_dim_overlay(&ui_context, viewport_width, viewport_height, theme.overlay)
 
 	// Dialog rect
-	want_cols: i32 = 86
-	want_rows: i32 = 60
-	dialog_w := min(want_cols * ed.char_width + 32, width  - 40)
-	dialog_h := min(want_rows * ed.line_height + 40, height - 40)
-	if dialog_w < 240 { dialog_w = min(width  - 16, 240) }
-	if dialog_h < 240 { dialog_h = min(height - 16, 240) }
-	dialog_x := (width  - dialog_w) / 2
-	dialog_y := (height - dialog_h) / 2
-	dialog_rect := sdl3.FRect{f32(dialog_x), f32(dialog_y), f32(dialog_w), f32(dialog_h)}
+	desired_columns: i32 = 86
+	desired_rows: i32 = 60
+	dialog_width  := min(desired_columns * editor.character_width + 32, viewport_width  - 40)
+	dialog_height := min(desired_rows * editor.line_height + 40, viewport_height - 40)
+	if dialog_width  < 240 { dialog_width  = min(viewport_width  - 16, 240) }
+	if dialog_height < 240 { dialog_height = min(viewport_height - 16, 240) }
+	dialog_x := (viewport_width  - dialog_width)  / 2
+	dialog_y := (viewport_height - dialog_height) / 2
+	dialog_rectangle := sdl3.FRect{f32(dialog_x), f32(dialog_y), f32(dialog_width), f32(dialog_height)}
 
-	mode_tag := ed.browse.flat_mode ? "  (flat)" : ""
-	title := fmt.tprintf("Browse — %s%s", ed.browse.cwd, mode_tag)
-	content := ui.draw_window(&ctx, dialog_rect, title, theme)
+	mode_tag := editor.browse_state.flat_mode ? "  (flat)" : ""
+	title := fmt.tprintf("Browse — %s%s", editor.browse_state.current_working_directory, mode_tag)
+	content_rectangle := ui.draw_window(&ui_context, dialog_rectangle, title, theme)
 
-	line_step := ed.line_height
-	x := i32(content.x)
-	y := i32(content.y)
-	w := i32(content.w)
+	line_step := editor.line_height
+	content_x := i32(content_rectangle.x)
+	content_y := i32(content_rectangle.y)
+	content_width := i32(content_rectangle.w)
 
 	// Filter field
-	filter_str := string(ed.browse.filter[:])
-	ui.draw_input_field(&ctx, x, y, w, "Filter: ", filter_str, theme)
-	y += line_step + 8 // include underline gap
+	filter_string := string(editor.browse_state.filter_buffer[:])
+	ui.draw_input_field(&ui_context, content_x, content_y, content_width, "Filter: ", filter_string, theme)
+	content_y += line_step + 8 // include underline gap
 
 	// Footer reservation
 	footer_height: i32 = line_step + 12
-	list_top := y
-	list_bottom := i32(dialog_rect.y + dialog_rect.h) - footer_height - 12
+	list_top_y := content_y
+	list_bottom_y := i32(dialog_rectangle.y + dialog_rectangle.h) - footer_height - 12
 
 	// Reserve a line for the error message, if any.
-	if len(ed.browse.error_msg) > 0 {
-		list_bottom -= line_step
+	if len(editor.browse_state.error_message) > 0 {
+		list_bottom_y -= line_step
 	}
 
-	list_height := list_bottom - list_top
-	visible_rows := int(list_height / line_step)
-	if visible_rows < 1 { visible_rows = 1 }
-	ed.browse.visible_rows = visible_rows
+	list_area_height := list_bottom_y - list_top_y
+	computed_visible_rows := int(list_area_height / line_step)
+	if computed_visible_rows < 1 { computed_visible_rows = 1 }
+	editor.browse_state.visible_row_count = computed_visible_rows
 
 	// Adjust scroll so the selected row is in view.
-	if ed.browse.selected < ed.browse.scroll {
-		ed.browse.scroll = ed.browse.selected
-	} else if ed.browse.selected >= ed.browse.scroll + visible_rows {
-		ed.browse.scroll = ed.browse.selected - visible_rows + 1
+	if editor.browse_state.selected_index < editor.browse_state.scroll_offset {
+		editor.browse_state.scroll_offset = editor.browse_state.selected_index
+	} else if editor.browse_state.selected_index >= editor.browse_state.scroll_offset + computed_visible_rows {
+		editor.browse_state.scroll_offset = editor.browse_state.selected_index - computed_visible_rows + 1
 	}
-	if ed.browse.scroll < 0 { ed.browse.scroll = 0 }
+	if editor.browse_state.scroll_offset < 0 { editor.browse_state.scroll_offset = 0 }
 
 	// Draw entries
-	end := min(ed.browse.scroll + visible_rows, len(ed.browse.filtered_idx))
-	for i := ed.browse.scroll; i < end; i += 1 {
-		entry := ed.browse.entries[ed.browse.filtered_idx[i]]
-		row_y := list_top + i32(i - ed.browse.scroll) * line_step
-		icon: ui.ListRowIcon = entry.is_dir ? .Folder : .File
+	end_row_index := min(editor.browse_state.scroll_offset + computed_visible_rows, len(editor.browse_state.filtered_indices))
+	for row_index := editor.browse_state.scroll_offset; row_index < end_row_index; row_index += 1 {
+		entry := editor.browse_state.entries[editor.browse_state.filtered_indices[row_index]]
+		row_y_position := list_top_y + i32(row_index - editor.browse_state.scroll_offset) * line_step
+		row_icon: ui.ListRowIcon = entry.is_dir ? .Folder : .File
 
 		// Git status tints the label color; selection still wins for visual
-		// emphasis (we keep the brighter title_fg on the selected row so the
-		// selection is unambiguous even on already-tinted entries).
-		color_override: Maybe(sdl3.FColor)
-		if i != ed.browse.selected {
+		// emphasis (we keep the brighter title_foreground on the selected
+		// row so the selection is unambiguous even on already-tinted entries).
+		label_color_override: Maybe(sdl3.FColor)
+		if row_index != editor.browse_state.selected_index {
 			switch entry.git_status {
-			case .None:                                                   // no tint
-			case .Modified:  color_override = ed.git_modified_fg
-			case .Added:     color_override = ed.git_added_fg
-			case .Untracked: color_override = ed.git_untracked_fg
-			case .Renamed:   color_override = ed.git_renamed_fg
-			case .Deleted:   color_override = ed.git_deleted_fg
+			case .None:                                                                  // no tint
+			case .Modified:  label_color_override = editor.git_modified_foreground
+			case .Added:     label_color_override = editor.git_added_foreground
+			case .Untracked: label_color_override = editor.git_untracked_foreground
+			case .Renamed:   label_color_override = editor.git_renamed_foreground
+			case .Deleted:   label_color_override = editor.git_deleted_foreground
 			}
 		}
 
@@ -528,33 +530,33 @@ browse_render :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, width, height: i32)
 		// git status tag. The slot is filled with [N]/[M]/[D]/[R] when the
 		// entry has a status and left blank otherwise, so names line up in
 		// the same column regardless of whether they have a tag.
-		tag := git_status_tag(entry.git_status)
-		if len(tag) == 0 { tag = "   " }
-		label := fmt.tprintf("%s %s", tag, entry.name)
+		git_status_tag_string := git_status_tag(entry.git_status)
+		if len(git_status_tag_string) == 0 { git_status_tag_string = "   " }
+		row_label := fmt.tprintf("%s %s", git_status_tag_string, entry.name)
 
-		ui.draw_list_row(&ctx, x, row_y, w, label, i == ed.browse.selected, theme, icon, color_override)
+		ui.draw_list_row(&ui_context, content_x, row_y_position, content_width, row_label, row_index == editor.browse_state.selected_index, theme, row_icon, label_color_override)
 	}
 
-	if len(ed.browse.filtered_idx) == 0 {
-		empty_msg := len(ed.browse.filter) > 0 ? "(no matches)" : "(empty)"
-		ui.draw_text(&ctx, empty_msg, x + 8, list_top, theme.dim_fg)
+	if len(editor.browse_state.filtered_indices) == 0 {
+		empty_message := len(editor.browse_state.filter_buffer) > 0 ? "(no matches)" : "(empty)"
+		ui.draw_text(&ui_context, empty_message, content_x + 8, list_top_y, theme.dim_foreground)
 	}
 
 	// Error line (if any), drawn just below the list area.
-	if len(ed.browse.error_msg) > 0 {
-		err_y := list_bottom
-		ui.draw_text(&ctx, ed.browse.error_msg, x, err_y, sdl3.FColor{0.95, 0.42, 0.42, 1.0})
+	if len(editor.browse_state.error_message) > 0 {
+		error_y := list_bottom_y
+		ui.draw_text(&ui_context, editor.browse_state.error_message, content_x, error_y, sdl3.FColor{0.95, 0.42, 0.42, 1.0})
 	}
 
 	// Footer hint
-	hint := "Up/Down nav  Enter open  Ctrl+R rename  Ctrl+N new  Ctrl+Z undo  F3 flat  Esc"
-	fw, _ := ui.text_size(&ctx, hint)
-	foot_x := i32(dialog_rect.x + (dialog_rect.w - f32(fw)) / 2)
-	foot_y := i32(dialog_rect.y + dialog_rect.h) - line_step - 10
-	ui.draw_text(&ctx, hint, foot_x, foot_y, theme.dim_fg)
+	hint_text := "Up/Down nav  Enter open  Ctrl+R rename  Ctrl+N new  Ctrl+Z undo  F3 flat  Esc"
+	hint_width, _ := ui.text_size(&ui_context, hint_text)
+	footer_x := i32(dialog_rectangle.x + (dialog_rectangle.w - f32(hint_width)) / 2)
+	footer_y := i32(dialog_rectangle.y + dialog_rectangle.h) - line_step - 10
+	ui.draw_text(&ui_context, hint_text, footer_x, footer_y, theme.dim_foreground)
 
 	// Rename / new-file popup, if any, on top of the browse modal.
-	if browse_prompt_active(ed) {
-		browse_prompt_render(ed, renderer, width, height)
+	if browse_prompt_active(editor) {
+		browse_prompt_render(editor, renderer, viewport_width, viewport_height)
 	}
 }

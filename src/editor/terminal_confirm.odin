@@ -10,118 +10,118 @@ import "../ui"
 // machinery in editor_handle_event picks it up without special-casing.
 @(private)
 TerminalCloseConfirm :: struct {
-	focus_yes: bool,        // true == "Yes" button focused, false == "No"
-	yes_rect:  sdl3.FRect,  // filled in by the renderer for mouse hit-test
-	no_rect:   sdl3.FRect,
+	yes_is_focused:     bool,       // true == "Yes" button focused, false == "No"
+	yes_button_rectangle: sdl3.FRect, // filled in by the renderer for mouse hit-test
+	no_button_rectangle:  sdl3.FRect,
 }
 
 @(private)
-terminal_close_confirm_open :: proc(ed: ^Editor) {
-	if _, ok := ed.panes[1].content.(TerminalPane); !ok { return }
-	ed.terminal_close_confirm = TerminalCloseConfirm{ focus_yes = false } // default to No so an accidental Enter doesn't kill the shell
-	ed.show_terminal_close_confirm = true
+terminal_close_confirm_open :: proc(editor: ^Editor) {
+	if _, is_terminal_pane := editor.panes[1].content.(TerminalPane); !is_terminal_pane { return }
+	editor.terminal_close_confirm = TerminalCloseConfirm{ yes_is_focused = false } // default to No so an accidental Enter doesn't kill the shell
+	editor.show_terminal_close_confirm = true
 }
 
 @(private)
-terminal_close_confirm_dismiss :: proc(ed: ^Editor) {
-	ed.show_terminal_close_confirm = false
+terminal_close_confirm_dismiss :: proc(editor: ^Editor) {
+	editor.show_terminal_close_confirm = false
 }
 
 @(private)
-terminal_close_confirm_handle_event :: proc(ed: ^Editor, event: ^sdl3.Event) {
-	cc := &ed.terminal_close_confirm
+terminal_close_confirm_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
+	confirm_state := &editor.terminal_close_confirm
 
 	#partial switch event.type {
 	case .KEY_DOWN:
-		key := event.key.key
-		switch key {
+		pressed_key := event.key.key
+		switch pressed_key {
 		case sdl3.K_ESCAPE, sdl3.K_N:
-			terminal_close_confirm_dismiss(ed)
+			terminal_close_confirm_dismiss(editor)
 		case sdl3.K_Y:
-			terminal_close_confirm_dismiss(ed)
-			editor_close_terminal(ed)
+			terminal_close_confirm_dismiss(editor)
+			editor_close_terminal(editor)
 		case sdl3.K_RETURN, sdl3.K_KP_ENTER:
-			terminal_close_confirm_dismiss(ed)
-			if cc.focus_yes { editor_close_terminal(ed) }
+			terminal_close_confirm_dismiss(editor)
+			if confirm_state.yes_is_focused { editor_close_terminal(editor) }
 		case sdl3.K_LEFT, sdl3.K_RIGHT, sdl3.K_TAB:
-			cc.focus_yes = !cc.focus_yes
+			confirm_state.yes_is_focused = !confirm_state.yes_is_focused
 		}
 
 	case .MOUSE_BUTTON_DOWN:
-		x := event.button.x
-		y := event.button.y
-		if ui.point_in_rect(cc.yes_rect, x, y) {
-			terminal_close_confirm_dismiss(ed)
-			editor_close_terminal(ed)
+		mouse_x := event.button.x
+		mouse_y := event.button.y
+		if ui.point_in_rect(confirm_state.yes_button_rectangle, mouse_x, mouse_y) {
+			terminal_close_confirm_dismiss(editor)
+			editor_close_terminal(editor)
 			return
 		}
-		if ui.point_in_rect(cc.no_rect, x, y) {
-			terminal_close_confirm_dismiss(ed)
+		if ui.point_in_rect(confirm_state.no_button_rectangle, mouse_x, mouse_y) {
+			terminal_close_confirm_dismiss(editor)
 		}
 
 	case .MOUSE_MOTION:
 		// Move focus to whichever button the cursor is over so the keyboard
 		// state matches what the user sees highlighted.
-		x := event.motion.x
-		y := event.motion.y
-		if ui.point_in_rect(cc.yes_rect, x, y) { cc.focus_yes = true  }
-		if ui.point_in_rect(cc.no_rect,  x, y) { cc.focus_yes = false }
+		mouse_x := event.motion.x
+		mouse_y := event.motion.y
+		if ui.point_in_rect(confirm_state.yes_button_rectangle, mouse_x, mouse_y) { confirm_state.yes_is_focused = true  }
+		if ui.point_in_rect(confirm_state.no_button_rectangle,  mouse_x, mouse_y) { confirm_state.yes_is_focused = false }
 	}
 }
 
 @(private)
-terminal_close_confirm_render :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, width, height: i32) {
-	ctx := ui.Context{
-		renderer    = renderer,
-		font        = ed.font,
-		engine      = ed.engine,
-		char_width  = ed.char_width,
-		line_height = ed.line_height,
+terminal_close_confirm_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewport_width, viewport_height: i32) {
+	ui_context := ui.Context{
+		renderer        = renderer,
+		font            = editor.font,
+		engine          = editor.text_engine,
+		character_width = editor.character_width,
+		line_height     = editor.line_height,
 	}
 	theme := ui.default_theme()
 
-	ui.draw_dim_overlay(&ctx, width, height, theme.overlay)
+	ui.draw_dim_overlay(&ui_context, viewport_width, viewport_height, theme.overlay)
 
 	// Compact dialog: title strip + one question line + a row with two
 	// buttons. Sized in cells so it scales with the editor's font.
-	cw, lh := f32(ed.char_width), f32(ed.line_height)
+	character_width_f, line_height_f := f32(editor.character_width), f32(editor.line_height)
 
-	dialog_w := f32(64) * cw
-	if dialog_w > f32(width) - 60  { dialog_w = f32(width) - 60 }
-	if dialog_w < 320              { dialog_w = 320 }
-	dialog_h := lh*2 + 24 + lh + 12 + 36 + 50 // title + question + spacer + buttons + bottom padding
-	if dialog_h > f32(height) - 60 { dialog_h = f32(height) - 60 }
+	dialog_width := f32(64) * character_width_f
+	if dialog_width > f32(viewport_width) - 60  { dialog_width = f32(viewport_width) - 60 }
+	if dialog_width < 320                       { dialog_width = 320 }
+	dialog_height := line_height_f*2 + 24 + line_height_f + 12 + 36 + 50 // title + question + spacer + buttons + bottom padding
+	if dialog_height > f32(viewport_height) - 60 { dialog_height = f32(viewport_height) - 60 }
 
-	dx := (f32(width)  - dialog_w) / 2
-	dy := (f32(height) - dialog_h) / 2
-	rect := sdl3.FRect{ dx, dy, dialog_w, dialog_h }
+	dialog_x := (f32(viewport_width)  - dialog_width) / 2
+	dialog_y := (f32(viewport_height) - dialog_height) / 2
+	dialog_rectangle := sdl3.FRect{ dialog_x, dialog_y, dialog_width, dialog_height }
 
-	content := ui.draw_window(&ctx, rect, "Close terminal", theme)
+	content_rectangle := ui.draw_window(&ui_context, dialog_rectangle, "Close terminal", theme)
 
-	question := "Closing the terminal will end the running shell."
-	hint     := "Are you sure?"
-	ui.draw_text(&ctx, question, i32(content.x), i32(content.y), theme.text_fg)
-	ui.draw_text(&ctx, hint,     i32(content.x), i32(content.y) + ed.line_height + 6, theme.dim_fg)
+	question_text := "Closing the terminal will end the running shell."
+	hint_text     := "Are you sure?"
+	ui.draw_text(&ui_context, question_text, i32(content_rectangle.x), i32(content_rectangle.y), theme.text_foreground)
+	ui.draw_text(&ui_context, hint_text,     i32(content_rectangle.x), i32(content_rectangle.y) + editor.line_height + 6, theme.dim_foreground)
 
-	cc := &ed.terminal_close_confirm
+	confirm_state := &editor.terminal_close_confirm
 
 	// Two buttons, right-aligned, "No" on the right closest to the user's
 	// thumb the way native dialogs lay them out on Windows.
-	btn_w := f32(96)
-	btn_h := f32(32)
-	gap   := f32(12)
-	bx_no  := content.x + content.w - btn_w
-	bx_yes := bx_no - btn_w - gap
-	by     := content.y + content.h - btn_h - 32
-	cc.yes_rect = sdl3.FRect{ bx_yes, by, btn_w, btn_h }
-	cc.no_rect  = sdl3.FRect{ bx_no,  by, btn_w, btn_h }
+	button_width  := f32(96)
+	button_height := f32(32)
+	button_gap    := f32(12)
+	no_button_x  := content_rectangle.x + content_rectangle.w - button_width
+	yes_button_x := no_button_x - button_width - button_gap
+	button_y     := content_rectangle.y + content_rectangle.h - button_height - 32
+	confirm_state.yes_button_rectangle = sdl3.FRect{ yes_button_x, button_y, button_width, button_height }
+	confirm_state.no_button_rectangle  = sdl3.FRect{ no_button_x,  button_y, button_width, button_height }
 
-	ui.draw_button(&ctx, cc.yes_rect, "Yes",  cc.focus_yes,  theme)
-	ui.draw_button(&ctx, cc.no_rect,  "No",  !cc.focus_yes,  theme)
+	ui.draw_button(&ui_context, confirm_state.yes_button_rectangle, "Yes",  confirm_state.yes_is_focused,  theme)
+	ui.draw_button(&ui_context, confirm_state.no_button_rectangle,  "No",  !confirm_state.yes_is_focused,  theme)
 
-	foot := "←/→ or Tab to switch    Enter confirms    Esc cancels"
-	fw, _ := ui.text_size(&ctx, foot)
-	foot_x := i32(rect.x + (rect.w - f32(fw)) / 2)
-	foot_y := i32(rect.y + rect.h) - ed.line_height - 8
-	ui.draw_text(&ctx, foot, foot_x, foot_y, theme.dim_fg)
+	footer_text := "←/→ or Tab to switch    Enter confirms    Esc cancels"
+	footer_width, _ := ui.text_size(&ui_context, footer_text)
+	footer_x := i32(dialog_rectangle.x + (dialog_rectangle.w - f32(footer_width)) / 2)
+	footer_y := i32(dialog_rectangle.y + dialog_rectangle.h) - editor.line_height - 8
+	ui.draw_text(&ui_context, footer_text, footer_x, footer_y, theme.dim_foreground)
 }

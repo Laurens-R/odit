@@ -23,7 +23,7 @@ import "../ui"
 // can coexist (each is independent), and a pane's content can be swapped to a
 // different content type later without disturbing this struct.
 EditorPane :: struct {
-	doc:             document.Document,
+	document:        document.Document,
 	file_path:       string, // owned absolute path; "" for an untitled doc
 	language:        ^syntax.Definition, // nil → plain text rendering
 	symbols:         [dynamic]syntax.Symbol,           // declarations found in this doc (owned names)
@@ -31,7 +31,7 @@ EditorPane :: struct {
 
 	// Cursor position (in document coordinates)
 	cursor_line:     u32,
-	cursor_col:      u32, // byte offset within the line
+	cursor_column:   u32, // byte offset within the line
 	cursor_offset:   u32, // absolute byte offset in document
 
 	// Viewport (which portion of the document is visible)
@@ -53,21 +53,21 @@ EditorPane :: struct {
 	wrap_mode:       bool,
 
 	// Interactive scrollbar state. The renderer writes the current
-	// `track_rect` / `thumb_rect` here every frame; mouse handlers in
-	// `mouse.odin` read those rects to hit-test hover and drag. `hovered`
-	// widens the next paint; `dragging` locks scroll updates onto the
-	// thumb under the cursor.
+	// `track_rectangle` / `thumb_rectangle` here every frame; mouse
+	// handlers in `mouse.odin` read those rects to hit-test hover and
+	// drag. `is_hovered` widens the next paint; `is_dragging` locks scroll
+	// updates onto the thumb under the cursor.
 	scrollbar:       ScrollbarState,
 
 	// Selection
-	sel_active:      bool,
-	sel_anchor:      u32, // byte offset of selection anchor (other end is cursor_offset)
-	mouse_dragging:  bool, // left mouse button held; motion extends selection
+	selection_active:  bool,
+	selection_anchor:  u32, // byte offset of selection anchor (other end is cursor_offset)
+	mouse_dragging:    bool, // left mouse button held; motion extends selection
 
 	gutter_width:    i32, // line-number gutter width in pixels (set during render)
 
 	// Symbol re-analysis bookkeeping. `symbols_dirty` flips true whenever the
-	// pane's document is mutated; `last_analysis_time` is `ed.clock` at the
+	// pane's document is mutated; `last_analysis_time` is `editor.clock` at the
 	// last rebuild. Together with `Editor.last_keystroke_time` they gate the
 	// auto-reanalyze pass in `editor_update`.
 	symbols_dirty:        bool,
@@ -78,11 +78,11 @@ EditorPane :: struct {
 // every frame by the renderer; the rest persists between frames so hover /
 // drag survive across event ticks.
 ScrollbarState :: struct {
-	track_rect: sdl3.FRect,
-	thumb_rect: sdl3.FRect,
-	hovered:    bool,
-	dragging:   bool,
-	drag_dy:    f32, // y-offset within the thumb at drag start
+	track_rectangle: sdl3.FRect,
+	thumb_rectangle: sdl3.FRect,
+	is_hovered:      bool,
+	is_dragging:     bool,
+	drag_delta_y:    f32, // y-offset within the thumb at drag start
 }
 
 // A pane that hosts an embedded terminal emulator instead of a document.
@@ -91,7 +91,7 @@ ScrollbarState :: struct {
 // terminal by value so the union variant stays a single word and the
 // terminal's internal pointers (mutex, thread handle) are address-stable.
 TerminalPane :: struct {
-	term: ^terminal.Terminal,
+	terminal: ^terminal.Terminal,
 }
 
 // Tagged union of all pane content kinds. Add variants here as new pane types
@@ -111,21 +111,21 @@ PaneContent :: union {
 // F9-close can put the editor back into single- vs split-pane mode exactly
 // the way the user left it.
 Pane :: struct {
-	rect:                sdl3.Rect,
+	rectangle:           sdl3.Rect,
 	content:             PaneContent,
 	saved_content:       PaneContent, // zero-value when nothing stashed
 	saved_split_active:  bool,
-	has_saved:           bool,
+	has_saved_content:   bool,
 }
 
 // Top-level editor state. Shared resources (font, modals, palette) live here;
-// per-pane state lives in `panes`. `active` selects which pane receives
-// keyboard input and is shown with the visible cursor (when its content is an
-// editor pane).
+// per-pane state lives in `panes`. `active_pane_index` selects which pane
+// receives keyboard input and is shown with the visible cursor (when its
+// content is an editor pane).
 Editor :: struct {
-	panes:           [2]Pane,
-	active:          int,  // 0 or 1
-	split_active:    bool, // when false, only panes[0] is rendered (full width)
+	panes:             [2]Pane,
+	active_pane_index: int,  // 0 or 1
+	split_active:      bool, // when false, only panes[0] is rendered (full width)
 
 	// Split divider position when `split_active`. Stored as a fraction of
 	// the full window width (left pane share), so the layout adapts to
@@ -153,23 +153,23 @@ Editor :: struct {
 	// are scattered: every input handler, the cursor-blink toggle, terminal
 	// output drains, smooth-scroll animation, window resize. When nothing's
 	// happening, the entire render path is skipped and we just `Sleep(16)`.
-	dirty: bool,
+	needs_redraw: bool,
 
 	// Rendering (shared between panes)
-	font:            ^ttf.Font,
-	engine:          ^ttf.TextEngine,
-	font_size:       f32,
-	char_width:      i32,
-	line_height:     i32,
-	padding_x:       i32,
-	padding_y:       i32,
+	font:             ^ttf.Font,
+	text_engine:      ^ttf.TextEngine,
+	font_size:        f32,
+	character_width:  i32,
+	line_height:      i32,
+	padding_x:        i32,
+	padding_y:        i32,
 
 	// Blink (shared rhythm; cursor only drawn in the active pane's editor)
 	cursor_visible:  bool,
 	cursor_timer:    f64,
 
-	// Monotonic clock (seconds) accumulated from `editor_update`'s dt. Used
-	// as the time base for auto-reanalysis debouncing.
+	// Monotonic clock (seconds) accumulated from `editor_update`'s delta_time.
+	// Used as the time base for auto-reanalysis debouncing.
 	clock:                f64,
 	last_keystroke_time:  f64,
 
@@ -177,41 +177,41 @@ Editor :: struct {
 	show_help:       bool,
 	help_scroll:     i32,
 	show_browse:     bool,
-	browse:          BrowseState,
+	browse_state:    BrowseState,
 
 	// Diff mode (compares views[0]'s doc against views[1]'s doc)
 	diff_state:      DiffState,
 
 	// Colors (terminal palette)
-	bg_color:        sdl3.FColor,
-	fg_color:        sdl3.FColor,
-	cursor_color:    sdl3.FColor,
-	line_num_color:  sdl3.FColor,
-	sel_color:       sdl3.FColor,
-	status_bg:       sdl3.FColor,
-	status_fg:       sdl3.FColor,
-	divider_color:   sdl3.FColor,
+	background_color:  sdl3.FColor,
+	foreground_color:  sdl3.FColor,
+	cursor_color:      sdl3.FColor,
+	line_number_color: sdl3.FColor,
+	selection_color:   sdl3.FColor,
+	status_bar_background: sdl3.FColor,
+	status_bar_foreground: sdl3.FColor,
+	divider_color:     sdl3.FColor,
 
 	// Diff-mode row backgrounds
-	diff_delete_bg:  sdl3.FColor, // line only on the left (red-tinted)
-	diff_insert_bg:  sdl3.FColor, // line only on the right (green-tinted)
-	diff_gap_bg:     sdl3.FColor, // gap on this side aligning the other pane
+	diff_delete_background:  sdl3.FColor, // line only on the left (red-tinted)
+	diff_insert_background:  sdl3.FColor, // line only on the right (green-tinted)
+	diff_gap_background:     sdl3.FColor, // gap on this side aligning the other pane
 
 	// File-browser git status tints
-	git_modified_fg:  sdl3.FColor,
-	git_added_fg:     sdl3.FColor,
-	git_untracked_fg: sdl3.FColor,
-	git_renamed_fg:   sdl3.FColor,
-	git_deleted_fg:   sdl3.FColor,
+	git_modified_foreground:  sdl3.FColor,
+	git_added_foreground:     sdl3.FColor,
+	git_untracked_foreground: sdl3.FColor,
+	git_renamed_foreground:   sdl3.FColor,
+	git_deleted_foreground:   sdl3.FColor,
 
 	// Syntax-highlighting palette (used by render when a pane has a language)
-	syntax_keyword_fg:      sdl3.FColor,
-	syntax_type_fg:         sdl3.FColor,
-	syntax_string_fg:       sdl3.FColor,
-	syntax_number_fg:       sdl3.FColor,
-	syntax_comment_fg:      sdl3.FColor,
-	syntax_preprocessor_fg: sdl3.FColor,
-	syntax_symbol_fg:       sdl3.FColor,
+	syntax_keyword_foreground:      sdl3.FColor,
+	syntax_type_foreground:         sdl3.FColor,
+	syntax_string_foreground:       sdl3.FColor,
+	syntax_number_foreground:       sdl3.FColor,
+	syntax_comment_foreground:      sdl3.FColor,
+	syntax_preprocessor_foreground: sdl3.FColor,
+	syntax_symbol_foreground:       sdl3.FColor,
 
 	// Symbol-jump (F6) dialog state
 	show_symbols:   bool,
@@ -231,99 +231,99 @@ SCROLL_SMOOTHNESS :: 18.0 // higher = snappier; lower = floatier
 // as a corrupt input rather than being passed to the piece tree.
 EDITOR_MAX_DOCUMENT_BYTES :: 1024 * 1024 * 1024 // 1 GiB
 
-editor_init :: proc(ed: ^Editor, engine: ^ttf.TextEngine, font: ^ttf.Font, font_size: f32) {
+editor_init :: proc(editor: ^Editor, text_engine: ^ttf.TextEngine, font: ^ttf.Font, font_size: f32) {
 	// Initialize both panes as empty editor panes. Future code paths can
 	// reassign `panes[i].content` to a different content type when the user
 	// opens a non-editor view.
-	for i in 0..<len(ed.panes) {
-		ep: EditorPane
-		document.document_init(&ep.doc, "")
-		ed.panes[i].content = ep
+	for pane_index in 0..<len(editor.panes) {
+		editor_pane: EditorPane
+		document.document_init(&editor_pane.document, "")
+		editor.panes[pane_index].content = editor_pane
 	}
-	ed.active = 0
-	ed.split_active = false
-	ed.split_ratio  = 0.5 // default 50/50 when the split is opened
+	editor.active_pane_index = 0
+	editor.split_active = false
+	editor.split_ratio  = 0.5 // default 50/50 when the split is opened
 
 	// Cache the two cursors we ever swap between. `EW_RESIZE` is the
 	// closest system cursor to a "grab the column divider" indicator; SDL3
 	// doesn't expose a dedicated grab/grabbing shape, and on Windows it
 	// renders as the familiar double-headed left/right arrow.
-	ed.cursor_default   = sdl3.CreateSystemCursor(.DEFAULT)
-	ed.cursor_resize_ew = sdl3.CreateSystemCursor(.EW_RESIZE)
-	ed.current_cursor   = ed.cursor_default
-	if ed.cursor_default != nil { _ = sdl3.SetCursor(ed.cursor_default) }
+	editor.cursor_default   = sdl3.CreateSystemCursor(.DEFAULT)
+	editor.cursor_resize_ew = sdl3.CreateSystemCursor(.EW_RESIZE)
+	editor.current_cursor   = editor.cursor_default
+	if editor.cursor_default != nil { _ = sdl3.SetCursor(editor.cursor_default) }
 
-	ui.text_cache_init(&ed.text_cache, engine, font, 1024)
+	ui.text_cache_init(&editor.text_cache, text_engine, font, 1024)
 
 	// Force an initial render so the first frame paints, then keep the
 	// flag accurate via the various setters below.
-	ed.dirty = true
+	editor.needs_redraw = true
 
-	ed.font = font
-	ed.engine = engine
-	ed.font_size = font_size
-	ed.cursor_visible = true
-	ed.cursor_timer = 0
+	editor.font = font
+	editor.text_engine = text_engine
+	editor.font_size = font_size
+	editor.cursor_visible = true
+	editor.cursor_timer = 0
 
-	ed.padding_x = 8
-	ed.padding_y = 4
+	editor.padding_x = 8
+	editor.padding_y = 4
 
 	// Measure monospace character dimensions
-	ed.line_height = i32(ttf.GetFontLineSkip(font))
-	w: i32
-	ttf.GetStringSize(font, "M", 1, &w, nil)
-	ed.char_width = w
+	editor.line_height = i32(ttf.GetFontLineSkip(font))
+	measured_width: i32
+	ttf.GetStringSize(font, "M", 1, &measured_width, nil)
+	editor.character_width = measured_width
 
 	// Terminal dark theme
-	ed.bg_color       = sdl3.FColor{0.11, 0.11, 0.14, 1.0}
-	ed.fg_color       = sdl3.FColor{0.85, 0.85, 0.85, 1.0}
-	ed.cursor_color   = sdl3.FColor{0.9, 0.9, 0.9, 1.0}
-	ed.line_num_color = sdl3.FColor{0.4, 0.45, 0.5, 1.0}
-	ed.sel_color      = sdl3.FColor{0.22, 0.36, 0.60, 1.0}
-	ed.status_bg      = sdl3.FColor{0.18, 0.20, 0.25, 1.0}
-	ed.status_fg      = sdl3.FColor{0.7, 0.75, 0.8, 1.0}
-	ed.divider_color  = sdl3.FColor{0.30, 0.34, 0.42, 1.0}
-	ed.diff_delete_bg = sdl3.FColor{0.28, 0.10, 0.12, 1.0}
-	ed.diff_insert_bg = sdl3.FColor{0.10, 0.28, 0.14, 1.0}
-	ed.diff_gap_bg    = sdl3.FColor{0.07, 0.08, 0.11, 1.0}
+	editor.background_color       = sdl3.FColor{0.11, 0.11, 0.14, 1.0}
+	editor.foreground_color       = sdl3.FColor{0.85, 0.85, 0.85, 1.0}
+	editor.cursor_color           = sdl3.FColor{0.9, 0.9, 0.9, 1.0}
+	editor.line_number_color      = sdl3.FColor{0.4, 0.45, 0.5, 1.0}
+	editor.selection_color        = sdl3.FColor{0.22, 0.36, 0.60, 1.0}
+	editor.status_bar_background  = sdl3.FColor{0.18, 0.20, 0.25, 1.0}
+	editor.status_bar_foreground  = sdl3.FColor{0.7, 0.75, 0.8, 1.0}
+	editor.divider_color          = sdl3.FColor{0.30, 0.34, 0.42, 1.0}
+	editor.diff_delete_background = sdl3.FColor{0.28, 0.10, 0.12, 1.0}
+	editor.diff_insert_background = sdl3.FColor{0.10, 0.28, 0.14, 1.0}
+	editor.diff_gap_background    = sdl3.FColor{0.07, 0.08, 0.11, 1.0}
 
-	ed.git_modified_fg  = sdl3.FColor{0.95, 0.78, 0.42, 1.0} // amber
-	ed.git_added_fg     = sdl3.FColor{0.45, 0.85, 0.50, 1.0} // green
-	ed.git_untracked_fg = sdl3.FColor{0.50, 0.78, 0.95, 1.0} // light blue
-	ed.git_renamed_fg   = sdl3.FColor{0.78, 0.62, 0.95, 1.0} // purple
-	ed.git_deleted_fg   = sdl3.FColor{0.92, 0.45, 0.45, 1.0} // red
+	editor.git_modified_foreground  = sdl3.FColor{0.95, 0.78, 0.42, 1.0} // amber
+	editor.git_added_foreground     = sdl3.FColor{0.45, 0.85, 0.50, 1.0} // green
+	editor.git_untracked_foreground = sdl3.FColor{0.50, 0.78, 0.95, 1.0} // light blue
+	editor.git_renamed_foreground   = sdl3.FColor{0.78, 0.62, 0.95, 1.0} // purple
+	editor.git_deleted_foreground   = sdl3.FColor{0.92, 0.45, 0.45, 1.0} // red
 
-	ed.syntax_keyword_fg      = sdl3.FColor{0.55, 0.70, 0.95, 1.0} // soft blue
-	ed.syntax_type_fg         = sdl3.FColor{0.48, 0.82, 0.85, 1.0} // teal
-	ed.syntax_string_fg       = sdl3.FColor{0.65, 0.85, 0.55, 1.0} // soft green
-	ed.syntax_number_fg       = sdl3.FColor{0.92, 0.70, 0.45, 1.0} // orange
-	ed.syntax_comment_fg      = sdl3.FColor{0.45, 0.50, 0.58, 1.0} // dim grey
-	ed.syntax_preprocessor_fg = sdl3.FColor{0.88, 0.55, 0.78, 1.0} // magenta
-	ed.syntax_symbol_fg       = sdl3.FColor{0.95, 0.90, 0.55, 1.0} // pale yellow
+	editor.syntax_keyword_foreground      = sdl3.FColor{0.55, 0.70, 0.95, 1.0} // soft blue
+	editor.syntax_type_foreground         = sdl3.FColor{0.48, 0.82, 0.85, 1.0} // teal
+	editor.syntax_string_foreground       = sdl3.FColor{0.65, 0.85, 0.55, 1.0} // soft green
+	editor.syntax_number_foreground       = sdl3.FColor{0.92, 0.70, 0.45, 1.0} // orange
+	editor.syntax_comment_foreground      = sdl3.FColor{0.45, 0.50, 0.58, 1.0} // dim grey
+	editor.syntax_preprocessor_foreground = sdl3.FColor{0.88, 0.55, 0.78, 1.0} // magenta
+	editor.syntax_symbol_foreground       = sdl3.FColor{0.95, 0.90, 0.55, 1.0} // pale yellow
 
 	syntax.init()
 }
 
-editor_destroy :: proc(ed: ^Editor) {
-	for i in 0..<len(ed.panes) {
-		pane_destroy(&ed.panes[i])
+editor_destroy :: proc(editor: ^Editor) {
+	for pane_index in 0..<len(editor.panes) {
+		pane_destroy(&editor.panes[pane_index])
 	}
-	browse_state_destroy(ed)
-	diff_state_destroy(&ed.diff_state)
-	symbols_dialog_destroy(&ed.symbols_dialog)
+	browse_state_destroy(editor)
+	diff_state_destroy(&editor.diff_state)
+	symbols_dialog_destroy(&editor.symbols_dialog)
 	syntax.destroy()
-	if ed.cursor_default   != nil { sdl3.DestroyCursor(ed.cursor_default)   }
-	if ed.cursor_resize_ew != nil { sdl3.DestroyCursor(ed.cursor_resize_ew) }
-	ui.text_cache_destroy(&ed.text_cache)
+	if editor.cursor_default   != nil { sdl3.DestroyCursor(editor.cursor_default)   }
+	if editor.cursor_resize_ew != nil { sdl3.DestroyCursor(editor.cursor_resize_ew) }
+	ui.text_cache_destroy(&editor.text_cache)
 }
 
 // Per-content cleanup. Add cases here as new content types are introduced.
 @(private)
-pane_destroy :: proc(p: ^Pane) {
-	pane_content_destroy(&p.content)
-	if p.has_saved {
-		pane_content_destroy(&p.saved_content)
-		p.has_saved = false
+pane_destroy :: proc(pane: ^Pane) {
+	pane_content_destroy(&pane.content)
+	if pane.has_saved_content {
+		pane_content_destroy(&pane.saved_content)
+		pane.has_saved_content = false
 	}
 }
 
@@ -331,21 +331,21 @@ pane_destroy :: proc(p: ^Pane) {
 // Factored so the terminal stash/restore dance can release whatever the
 // pane's previous content held.
 @(private)
-pane_content_destroy :: proc(content: ^PaneContent) {
-	#partial switch &c in content {
+pane_content_destroy :: proc(pane_content: ^PaneContent) {
+	#partial switch &content_value in pane_content {
 	case EditorPane:
-		document.document_destroy(&c.doc)
-		if len(c.file_path) > 0 {
-			delete(c.file_path)
-			c.file_path = ""
+		document.document_destroy(&content_value.document)
+		if len(content_value.file_path) > 0 {
+			delete(content_value.file_path)
+			content_value.file_path = ""
 		}
-		for s in c.symbols { delete(s.name) }
-		delete(c.symbols)
-		delete(c.symbol_names)
+		for symbol in content_value.symbols { delete(symbol.name) }
+		delete(content_value.symbols)
+		delete(content_value.symbol_names)
 	case TerminalPane:
-		if c.term != nil {
-			terminal.terminal_destroy(c.term)
-			c.term = nil
+		if content_value.terminal != nil {
+			terminal.terminal_destroy(content_value.terminal)
+			content_value.terminal = nil
 		}
 	}
 }
@@ -353,45 +353,45 @@ pane_content_destroy :: proc(content: ^PaneContent) {
 // Height of the title strip at the top of every editor pane (filename area).
 // Used by both render and mouse-coordinate translation.
 @(private)
-editor_title_bar_height :: proc(ed: ^Editor) -> i32 {
-	return ed.line_height + 6
+editor_title_bar_height :: proc(editor: ^Editor) -> i32 {
+	return editor.line_height + 6
 }
 
 // --- Pane accessors -------------------------------------------------------
 
 @(private)
-editor_active_pane :: proc(ed: ^Editor) -> ^Pane {
-	return &ed.panes[ed.active]
+editor_active_pane :: proc(editor: ^Editor) -> ^Pane {
+	return &editor.panes[editor.active_pane_index]
 }
 
 // Returns the active pane's `EditorPane`, or nil if the active pane is not an
 // editor pane. Most cursor/selection/clipboard procs short-circuit on nil so
 // they're safe to call regardless of what kind of pane is currently focused.
 @(private)
-editor_active_editor_pane :: proc(ed: ^Editor) -> ^EditorPane {
-	return pane_as_editor(&ed.panes[ed.active])
+editor_active_editor_pane :: proc(editor: ^Editor) -> ^EditorPane {
+	return pane_as_editor(&editor.panes[editor.active_pane_index])
 }
 
 @(private)
-pane_as_editor :: proc(p: ^Pane) -> ^EditorPane {
-	ep, ok := &p.content.(EditorPane)
-	return ep if ok else nil
+pane_as_editor :: proc(pane: ^Pane) -> ^EditorPane {
+	editor_pane_value, is_editor_pane := &pane.content.(EditorPane)
+	return editor_pane_value if is_editor_pane else nil
 }
 
 // Returns 2 when a split is showing both panes; 1 otherwise.
 @(private)
-editor_visible_pane_count :: proc(ed: ^Editor) -> int {
-	return 2 if ed.split_active else 1
+editor_visible_pane_count :: proc(editor: ^Editor) -> int {
+	return 2 if editor.split_active else 1
 }
 
 // Hit-test: which pane is the given pixel position over? Returns -1 if none.
 @(private)
-editor_pane_at :: proc(ed: ^Editor, x, y: f32) -> int {
-	for i in 0..<editor_visible_pane_count(ed) {
-		r := ed.panes[i].rect
-		if x >= f32(r.x) && x < f32(r.x + r.w) &&
-		   y >= f32(r.y) && y < f32(r.y + r.h) {
-			return i
+editor_pane_at :: proc(editor: ^Editor, pixel_x, pixel_y: f32) -> int {
+	for pane_index in 0..<editor_visible_pane_count(editor) {
+		pane_rectangle := editor.panes[pane_index].rectangle
+		if pixel_x >= f32(pane_rectangle.x) && pixel_x < f32(pane_rectangle.x + pane_rectangle.w) &&
+		   pixel_y >= f32(pane_rectangle.y) && pixel_y < f32(pane_rectangle.y + pane_rectangle.h) {
+			return pane_index
 		}
 	}
 	return -1
@@ -399,11 +399,11 @@ editor_pane_at :: proc(ed: ^Editor, x, y: f32) -> int {
 
 // Toggle focus to the other pane (no-op when no split is active).
 @(private)
-editor_focus_other_pane :: proc(ed: ^Editor) {
-	if !ed.split_active { return }
-	ed.active = 1 - ed.active
-	ed.cursor_visible = true
-	ed.cursor_timer = 0
+editor_focus_other_pane :: proc(editor: ^Editor) {
+	if !editor.split_active { return }
+	editor.active_pane_index = 1 - editor.active_pane_index
+	editor.cursor_visible = true
+	editor.cursor_timer = 0
 }
 
 // --- Terminal pane toggle (F9) --------------------------------------------
@@ -413,128 +413,128 @@ editor_focus_other_pane :: proc(ed: ^Editor) {
 // terminal is already running this is a no-op so a stray F9 press doesn't
 // kill a working shell.
 @(private)
-editor_open_terminal :: proc(ed: ^Editor) {
-	pane_idx := 1
-	pane := &ed.panes[pane_idx]
+editor_open_terminal :: proc(editor: ^Editor) {
+	terminal_pane_index := 1
+	pane := &editor.panes[terminal_pane_index]
 
 	// Already a terminal — nothing to do.
-	if _, ok := pane.content.(TerminalPane); ok { return }
+	if _, is_terminal_pane := pane.content.(TerminalPane); is_terminal_pane { return }
 
-	rect := pane.rect
-	if rect.w == 0 || rect.h == 0 {
+	pane_rectangle := pane.rectangle
+	if pane_rectangle.w == 0 || pane_rectangle.h == 0 {
 		// Pane hasn't been laid out yet; conjure something reasonable so
 		// the shell gets a sane initial size and the renderer adjusts on
 		// the next frame.
-		rect = sdl3.Rect{ x = 0, y = 0, w = 720, h = 480 }
+		pane_rectangle = sdl3.Rect{ x = 0, y = 0, w = 720, h = 480 }
 	}
-	cw := ed.char_width;  if cw <= 0 { cw = 8 }
-	lh := ed.line_height; if lh <= 0 { lh = 16 }
+	character_width := editor.character_width;  if character_width <= 0 { character_width = 8 }
+	line_height     := editor.line_height;      if line_height     <= 0 { line_height     = 16 }
 
-	rows := max(i32(4),  (rect.h - editor_title_bar_height(ed)) / lh)
-	cols := max(i32(10), rect.w / cw)
+	row_count    := max(i32(4),  (pane_rectangle.h - editor_title_bar_height(editor)) / line_height)
+	column_count := max(i32(10), pane_rectangle.w / character_width)
 
 	// Match the terminal's default colors to the editor palette so plain
 	// shell output blends with the surrounding UI instead of sitting on a
 	// black slab.
-	fg := terminal.Color{ ed.fg_color.r, ed.fg_color.g, ed.fg_color.b, ed.fg_color.a }
-	bg := terminal.Color{ ed.bg_color.r, ed.bg_color.g, ed.bg_color.b, ed.bg_color.a }
+	default_foreground := terminal.Color{ editor.foreground_color.r, editor.foreground_color.g, editor.foreground_color.b, editor.foreground_color.a }
+	default_background := terminal.Color{ editor.background_color.r, editor.background_color.g, editor.background_color.b, editor.background_color.a }
 
-	term := terminal.terminal_new(rows, cols, fg, bg)
-	if term == nil { return }
+	new_terminal := terminal.terminal_new(row_count, column_count, default_foreground, default_background)
+	if new_terminal == nil { return }
 
 	// Stash both the previous content AND the previous split state so
 	// closing the terminal puts the editor back exactly as it was — single
 	// pane if it started single, split with the original right-side doc if
 	// it started split. Drop any prior stash defensively.
-	if pane.has_saved {
+	if pane.has_saved_content {
 		pane_content_destroy(&pane.saved_content)
-		pane.has_saved = false
+		pane.has_saved_content = false
 	}
 	pane.saved_content      = pane.content
-	pane.saved_split_active = ed.split_active
-	pane.has_saved          = true
+	pane.saved_split_active = editor.split_active
+	pane.has_saved_content  = true
 
-	pane.content       = TerminalPane{ term = term }
-	ed.split_active    = true
-	ed.active          = pane_idx
+	pane.content              = TerminalPane{ terminal = new_terminal }
+	editor.split_active       = true
+	editor.active_pane_index  = terminal_pane_index
 }
 
 // F9-again: shut the terminal down and restore both the document that was
 // stashed when it opened AND the split state that was in effect then.
 @(private)
-editor_close_terminal :: proc(ed: ^Editor) {
-	pane_idx := 1
-	pane := &ed.panes[pane_idx]
+editor_close_terminal :: proc(editor: ^Editor) {
+	terminal_pane_index := 1
+	pane := &editor.panes[terminal_pane_index]
 
-	tp, ok := &pane.content.(TerminalPane)
-	if !ok { return }
+	terminal_pane, is_terminal_pane := &pane.content.(TerminalPane)
+	if !is_terminal_pane { return }
 
-	if tp.term != nil {
-		terminal.terminal_destroy(tp.term)
-		tp.term = nil
+	if terminal_pane.terminal != nil {
+		terminal.terminal_destroy(terminal_pane.terminal)
+		terminal_pane.terminal = nil
 	}
 
-	if pane.has_saved {
+	if pane.has_saved_content {
 		pane.content            = pane.saved_content
-		ed.split_active         = pane.saved_split_active
+		editor.split_active     = pane.saved_split_active
 		pane.saved_content      = PaneContent{}
 		pane.saved_split_active = false
-		pane.has_saved          = false
+		pane.has_saved_content  = false
 	} else {
 		// No stash recorded — defensively reset to single-pane mode.
-		pane.content    = PaneContent{}
-		ed.split_active = false
+		pane.content        = PaneContent{}
+		editor.split_active = false
 	}
 
 	// If we ended up single-pane, focus has to be on pane 0.
-	if !ed.split_active { ed.active = 0 }
+	if !editor.split_active { editor.active_pane_index = 0 }
 }
 
 // Single entry point bound to F9. Opening a fresh terminal is fire-and-
 // forget; closing one prompts with a Yes/No dialog so an accidental press
 // doesn't nuke a running shell.
 @(private)
-editor_toggle_terminal :: proc(ed: ^Editor) {
-	if _, ok := ed.panes[1].content.(TerminalPane); ok {
-		terminal_close_confirm_open(ed)
+editor_toggle_terminal :: proc(editor: ^Editor) {
+	if _, is_terminal_pane := editor.panes[1].content.(TerminalPane); is_terminal_pane {
+		terminal_close_confirm_open(editor)
 	} else {
-		editor_open_terminal(ed)
+		editor_open_terminal(editor)
 	}
 }
 
 // --- Public open-string entry points --------------------------------------
 
-editor_open_string :: proc(ed: ^Editor, content: string) {
-	editor_open_string_in_pane(ed, ed.active, content)
+editor_open_string :: proc(editor: ^Editor, content_text: string) {
+	editor_open_string_in_pane(editor, editor.active_pane_index, content_text)
 }
 
 // Load a string into a specific pane, replacing its content with a fresh
 // editor pane regardless of the previous content type. `file_path` is stored
 // on the pane for display in the title bar; pass "" for an untitled doc.
-editor_open_string_in_pane :: proc(ed: ^Editor, pane_idx: int, content: string, file_path: string = "") {
-	if pane_idx < 0 || pane_idx >= len(ed.panes) { return }
+editor_open_string_in_pane :: proc(editor: ^Editor, pane_index: int, content_text: string, file_path: string = "") {
+	if pane_index < 0 || pane_index >= len(editor.panes) { return }
 
-	safe := content
-	if len(safe) < 0 || len(safe) > EDITOR_MAX_DOCUMENT_BYTES {
-		safe = ""
+	safe_content := content_text
+	if len(safe_content) < 0 || len(safe_content) > EDITOR_MAX_DOCUMENT_BYTES {
+		safe_content = ""
 	}
 
 	// Tear down whatever was in the pane and replace with a fresh editor.
-	pane_destroy(&ed.panes[pane_idx])
+	pane_destroy(&editor.panes[pane_index])
 
-	ep: EditorPane
-	document.document_init(&ep.doc, safe)
+	new_editor_pane: EditorPane
+	document.document_init(&new_editor_pane.document, safe_content)
 	if len(file_path) > 0 {
-		ep.file_path = strings.clone(file_path)
-		ep.language  = syntax.get_definition_for_path(file_path)
+		new_editor_pane.file_path = strings.clone(file_path)
+		new_editor_pane.language  = syntax.get_definition_for_path(file_path)
 	}
-	ed.panes[pane_idx].content = ep
+	editor.panes[pane_index].content = new_editor_pane
 
 	// Build the per-pane symbol index now that the doc + language are wired
 	// up. `pane_rebuild_symbols` is defined in symbols.odin.
-	if ep.language != nil {
-		if v := pane_as_editor(&ed.panes[pane_idx]); v != nil {
-			pane_rebuild_symbols(v)
+	if new_editor_pane.language != nil {
+		if editor_pane := pane_as_editor(&editor.panes[pane_index]); editor_pane != nil {
+			pane_rebuild_symbols(editor_pane)
 		}
 	}
 }
@@ -544,22 +544,22 @@ editor_open_string_in_pane :: proc(ed: ^Editor, pane_idx: int, content: string, 
 // (key/text/mouse events, cursor blink, scroll animation, terminal output)
 // all funnel through here so the main loop can skip render+present on
 // frames where nothing has actually changed.
-editor_mark_dirty :: proc(ed: ^Editor) {
-	ed.dirty = true
+editor_mark_dirty :: proc(editor: ^Editor) {
+	editor.needs_redraw = true
 }
 
 // Drop the dirty flag — called by the main loop right after `editor_render`.
-editor_mark_clean :: proc(ed: ^Editor) {
-	ed.dirty = false
+editor_mark_clean :: proc(editor: ^Editor) {
+	editor.needs_redraw = false
 }
 
 // True when this frame must be drawn. Wraps the flag so the main loop never
 // reads internal state directly.
-editor_needs_render :: proc(ed: ^Editor) -> bool {
-	return ed.dirty
+editor_needs_render :: proc(editor: ^Editor) -> bool {
+	return editor.needs_redraw
 }
 
 // True when a modal dialog (help, browse, future popups) currently owns input.
-editor_is_modal_open :: proc(ed: ^Editor) -> bool {
-	return ed.show_help || ed.show_browse || ed.show_symbols || ed.show_terminal_close_confirm
+editor_is_modal_open :: proc(editor: ^Editor) -> bool {
+	return editor.show_help || editor.show_browse || editor.show_symbols || editor.show_terminal_close_confirm
 }

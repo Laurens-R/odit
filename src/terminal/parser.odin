@@ -8,415 +8,415 @@ import "core:unicode/utf8"
 // enough for PowerShell, cmd.exe, and most ANSI-emitting CLIs to render
 // correctly. OSC payloads are consumed but not acted on yet.
 @(private)
-parser_feed :: proc(t: ^Terminal, data: []u8) {
-	p := &t.parser
-	s := &t.screen
+parser_feed :: proc(terminal: ^Terminal, data: []u8) {
+	parser := &terminal.parser
+	screen := &terminal.screen
 
-	i := 0
-	for i < len(data) {
-		b := data[i]
-		i += 1
+	data_index := 0
+	for data_index < len(data) {
+		current_byte := data[data_index]
+		data_index += 1
 
-		switch p.state {
+		switch parser.state {
 		case .Ground:
-			parser_ground_byte(t, s, b, data[i:], &i)
+			parser_ground_byte(terminal, screen, current_byte, data[data_index:], &data_index)
 
 		case .Escape:
-			parser_escape_byte(t, s, b)
+			parser_escape_byte(terminal, screen, current_byte)
 
 		case .Csi:
-			parser_csi_byte(t, s, b)
+			parser_csi_byte(terminal, screen, current_byte)
 
 		case .Osc:
 			// Consume until BEL (0x07) or ST (ESC \). We don't act on OSC
 			// yet, but we must exit cleanly or the parser stays stuck.
-			if b == 0x07 { p.state = .Ground }
+			if current_byte == 0x07 { parser.state = .Ground }
 			// ESC \ string terminator handled in .Escape from the next byte.
 		}
 	}
 }
 
 @(private="file")
-parser_ground_byte :: proc(t: ^Terminal, s: ^Screen, b: u8, rest: []u8, i_inout: ^int) {
-	p := &t.parser
-	switch b {
+parser_ground_byte :: proc(terminal: ^Terminal, screen: ^Screen, current_byte: u8, remaining_data: []u8, data_index_inout: ^int) {
+	parser := &terminal.parser
+	switch current_byte {
 	case 0x07: // BEL — ignored (could flash later)
-	case 0x08: screen_backspace(s)
-	case 0x09: screen_tab(s)
-	case 0x0A: screen_line_feed(s)
-	case 0x0B: screen_line_feed(s) // VT
-	case 0x0C: screen_line_feed(s) // FF
-	case 0x0D: screen_carriage_return(s)
-	case 0x1B: p.state = .Escape; parser_reset_csi(p)
+	case 0x08: screen_backspace(screen)
+	case 0x09: screen_tab(screen)
+	case 0x0A: screen_line_feed(screen)
+	case 0x0B: screen_line_feed(screen) // VT
+	case 0x0C: screen_line_feed(screen) // FF
+	case 0x0D: screen_carriage_return(screen)
+	case 0x1B: parser.state = .Escape; parser_reset_csi(parser)
 	case:
-		if b < 0x20 { return } // drop other C0 controls silently
+		if current_byte < 0x20 { return } // drop other C0 controls silently
 		// Decode the leading byte plus any UTF-8 continuation bytes that
 		// happen to be available in this same chunk.
-		if b < 0x80 {
-			screen_put_rune(s, rune(b))
+		if current_byte < 0x80 {
+			screen_put_rune(screen, rune(current_byte))
 			return
 		}
-		// Multi-byte UTF-8: try to assemble from the head + `rest`.
+		// Multi-byte UTF-8: try to assemble from the head + `remaining_data`.
 		// Worst case is a 4-byte sequence, so peek up to 3 trailing bytes.
-		buf: [4]u8
-		buf[0] = b
-		needed := 0
+		utf8_buffer: [4]u8
+		utf8_buffer[0] = current_byte
+		continuation_bytes_needed := 0
 		switch {
-		case b & 0xE0 == 0xC0: needed = 1
-		case b & 0xF0 == 0xE0: needed = 2
-		case b & 0xF8 == 0xF0: needed = 3
-		case:                   needed = 0 // stray continuation; render as '?'
+		case current_byte & 0xE0 == 0xC0: continuation_bytes_needed = 1
+		case current_byte & 0xF0 == 0xE0: continuation_bytes_needed = 2
+		case current_byte & 0xF8 == 0xF0: continuation_bytes_needed = 3
+		case:                              continuation_bytes_needed = 0 // stray continuation; render as '?'
 		}
-		if needed == 0 || needed > len(rest) {
-			screen_put_rune(s, '?')
+		if continuation_bytes_needed == 0 || continuation_bytes_needed > len(remaining_data) {
+			screen_put_rune(screen, '?')
 			return
 		}
-		for k in 0..<needed { buf[1+k] = rest[k] }
-		r, size := utf8.decode_rune(buf[:1+needed])
-		_ = size
-		screen_put_rune(s, r)
-		i_inout^ += needed
+		for continuation_index in 0..<continuation_bytes_needed { utf8_buffer[1+continuation_index] = remaining_data[continuation_index] }
+		decoded_rune, _ := utf8.decode_rune(utf8_buffer[:1+continuation_bytes_needed])
+		screen_put_rune(screen, decoded_rune)
+		data_index_inout^ += continuation_bytes_needed
 	}
 }
 
 @(private="file")
-parser_escape_byte :: proc(t: ^Terminal, s: ^Screen, b: u8) {
-	p := &t.parser
-	switch b {
+parser_escape_byte :: proc(terminal: ^Terminal, screen: ^Screen, current_byte: u8) {
+	parser := &terminal.parser
+	switch current_byte {
 	case '[':
-		p.state = .Csi
-		parser_reset_csi(p)
+		parser.state = .Csi
+		parser_reset_csi(parser)
 	case ']':
-		p.state = .Osc
+		parser.state = .Osc
 	case '\\':
 		// String terminator for OSC, etc.
-		p.state = .Ground
+		parser.state = .Ground
 	case '7':
-		s.saved_row = s.cursor_row
-		s.saved_col = s.cursor_col
-		p.state = .Ground
+		screen.saved_cursor_row    = screen.cursor_row
+		screen.saved_cursor_column = screen.cursor_column
+		parser.state = .Ground
 	case '8':
-		s.cursor_row = s.saved_row
-		s.cursor_col = s.saved_col
-		p.state = .Ground
+		screen.cursor_row    = screen.saved_cursor_row
+		screen.cursor_column = screen.saved_cursor_column
+		parser.state = .Ground
 	case 'M':
 		// Reverse Index — move up, scroll down at top of region.
-		if s.cursor_row == s.scroll_top {
-			screen_scroll_down(s, 1)
-		} else if s.cursor_row > 0 {
-			s.cursor_row -= 1
+		if screen.cursor_row == screen.scroll_region_top {
+			screen_scroll_down(screen, 1)
+		} else if screen.cursor_row > 0 {
+			screen.cursor_row -= 1
 		}
-		p.state = .Ground
+		parser.state = .Ground
 	case 'c':
 		// RIS — full reset.
-		s.attrs = 0
-		s.fg = s.default_fg
-		s.bg = s.default_bg
-		s.cursor_row = 0
-		s.cursor_col = 0
-		s.scroll_top = 0
-		s.scroll_bottom = s.rows - 1
-		screen_clear(s)
-		p.state = .Ground
+		screen.current_attributes       = 0
+		screen.current_foreground_color = screen.default_foreground_color
+		screen.current_background_color = screen.default_background_color
+		screen.cursor_row               = 0
+		screen.cursor_column            = 0
+		screen.scroll_region_top        = 0
+		screen.scroll_region_bottom     = screen.rows - 1
+		screen_clear(screen)
+		parser.state = .Ground
 	case:
 		// Unrecognized 2-byte escape — drop and resume.
-		p.state = .Ground
+		parser.state = .Ground
 	}
 }
 
 @(private="file")
-parser_csi_byte :: proc(t: ^Terminal, s: ^Screen, b: u8) {
-	p := &t.parser
+parser_csi_byte :: proc(terminal: ^Terminal, screen: ^Screen, current_byte: u8) {
+	parser := &terminal.parser
 	// Parameter bytes 0x30–0x3F. Digits build numeric params, ';' separates.
-	if b >= '0' && b <= '9' {
-		if p.nparams == 0 { p.nparams = 1; p.params[0] = 0 }
-		v := p.params[p.nparams-1]
-		if v < 0 { v = 0 }
-		p.params[p.nparams-1] = v*10 + i32(b - '0')
+	if current_byte >= '0' && current_byte <= '9' {
+		if parser.parameter_count == 0 { parser.parameter_count = 1; parser.parameters[0] = 0 }
+		current_value := parser.parameters[parser.parameter_count-1]
+		if current_value < 0 { current_value = 0 }
+		parser.parameters[parser.parameter_count-1] = current_value*10 + i32(current_byte - '0')
 		return
 	}
-	if b == ';' {
-		if p.nparams < len(p.params) {
-			p.nparams += 1
-			p.params[p.nparams-1] = 0
+	if current_byte == ';' {
+		if parser.parameter_count < len(parser.parameters) {
+			parser.parameter_count += 1
+			parser.parameters[parser.parameter_count-1] = 0
 		}
 		return
 	}
-	if b == '?' || b == '<' || b == '=' || b == '>' {
+	if current_byte == '?' || current_byte == '<' || current_byte == '=' || current_byte == '>' {
 		// Private mode marker. We remember it but most ?-modes are ignored.
-		p.private_mark = b
+		parser.private_mark = current_byte
 		return
 	}
-	if b >= 0x20 && b <= 0x2F {
+	if current_byte >= 0x20 && current_byte <= 0x2F {
 		// Intermediate (' '..'/'); rare. Remember the last one.
-		p.intermediate = b
+		parser.intermediate_byte = current_byte
 		return
 	}
 	// Final byte 0x40–0x7E — dispatch and return to Ground.
-	parser_csi_dispatch(t, s, b)
-	p.state = .Ground
+	parser_csi_dispatch(terminal, screen, current_byte)
+	parser.state = .Ground
 }
 
 @(private="file")
-parser_csi_dispatch :: proc(t: ^Terminal, s: ^Screen, final: u8) {
-	p := &t.parser
+parser_csi_dispatch :: proc(terminal: ^Terminal, screen: ^Screen, final_byte: u8) {
+	parser := &terminal.parser
 
-	// Ensure at least one slot so `param_or_default` works uniformly.
-	if p.nparams == 0 { p.nparams = 1; p.params[0] = 0 }
+	// Ensure at least one slot so `parameter_or_default` works uniformly.
+	if parser.parameter_count == 0 { parser.parameter_count = 1; parser.parameters[0] = 0 }
 
-	switch final {
+	switch final_byte {
 	case 'A':
-		screen_move_cursor(s, -param_or_default(p, 0, 1), 0)
+		screen_move_cursor(screen, -parameter_or_default(parser, 0, 1), 0)
 	case 'B', 'e':
-		screen_move_cursor(s,  param_or_default(p, 0, 1), 0)
+		screen_move_cursor(screen,  parameter_or_default(parser, 0, 1), 0)
 	case 'C', 'a':
-		screen_move_cursor(s,  0,  param_or_default(p, 0, 1))
+		screen_move_cursor(screen,  0,  parameter_or_default(parser, 0, 1))
 	case 'D':
-		screen_move_cursor(s,  0, -param_or_default(p, 0, 1))
+		screen_move_cursor(screen,  0, -parameter_or_default(parser, 0, 1))
 	case 'E':
-		screen_move_cursor(s,  param_or_default(p, 0, 1), 0)
-		s.cursor_col = 0
+		screen_move_cursor(screen,  parameter_or_default(parser, 0, 1), 0)
+		screen.cursor_column = 0
 	case 'F':
-		screen_move_cursor(s, -param_or_default(p, 0, 1), 0)
-		s.cursor_col = 0
+		screen_move_cursor(screen, -parameter_or_default(parser, 0, 1), 0)
+		screen.cursor_column = 0
 	case 'G', '`':
-		screen_set_cursor(s, s.cursor_row + 1, param_or_default(p, 0, 1))
+		screen_set_cursor(screen, screen.cursor_row + 1, parameter_or_default(parser, 0, 1))
 	case 'H', 'f':
-		screen_set_cursor(s, param_or_default(p, 0, 1), param_or_default(p, 1, 1))
+		screen_set_cursor(screen, parameter_or_default(parser, 0, 1), parameter_or_default(parser, 1, 1))
 	case 'd':
-		screen_set_cursor(s, param_or_default(p, 0, 1), s.cursor_col + 1)
+		screen_set_cursor(screen, parameter_or_default(parser, 0, 1), screen.cursor_column + 1)
 	case 'J':
-		screen_erase_display(s, param_or_default(p, 0, 0))
+		screen_erase_display(screen, parameter_or_default(parser, 0, 0))
 	case 'K':
-		screen_erase_line(s, param_or_default(p, 0, 0))
+		screen_erase_line(screen, parameter_or_default(parser, 0, 0))
 	case 'L':
 		// Insert lines at cursor (within scroll region).
-		screen_insert_lines(s, param_or_default(p, 0, 1))
+		screen_insert_lines(screen, parameter_or_default(parser, 0, 1))
 	case 'M':
-		screen_delete_lines(s, param_or_default(p, 0, 1))
+		screen_delete_lines(screen, parameter_or_default(parser, 0, 1))
 	case 'P':
-		screen_delete_chars(s, param_or_default(p, 0, 1))
+		screen_delete_chars(screen, parameter_or_default(parser, 0, 1))
 	case '@':
-		screen_insert_chars(s, param_or_default(p, 0, 1))
+		screen_insert_chars(screen, parameter_or_default(parser, 0, 1))
 	case 'S':
-		screen_scroll_up(s,   param_or_default(p, 0, 1))
+		screen_scroll_up(screen,   parameter_or_default(parser, 0, 1))
 	case 'T':
-		screen_scroll_down(s, param_or_default(p, 0, 1))
+		screen_scroll_down(screen, parameter_or_default(parser, 0, 1))
 	case 'X':
 		// ECH — erase n chars from cursor, no cursor move.
-		screen_erase_chars(s, param_or_default(p, 0, 1))
+		screen_erase_chars(screen, parameter_or_default(parser, 0, 1))
 	case 'r':
 		// Set scroll region.
-		top    := param_or_default(p, 0, 1) - 1
-		bottom := param_or_default(p, 1, s.rows) - 1
-		if top < 0          { top = 0 }
-		if bottom >= s.rows { bottom = s.rows - 1 }
-		if top < bottom {
-			s.scroll_top    = top
-			s.scroll_bottom = bottom
-			s.cursor_row    = 0
-			s.cursor_col    = 0
+		new_region_top    := parameter_or_default(parser, 0, 1) - 1
+		new_region_bottom := parameter_or_default(parser, 1, screen.rows) - 1
+		if new_region_top < 0               { new_region_top = 0 }
+		if new_region_bottom >= screen.rows { new_region_bottom = screen.rows - 1 }
+		if new_region_top < new_region_bottom {
+			screen.scroll_region_top    = new_region_top
+			screen.scroll_region_bottom = new_region_bottom
+			screen.cursor_row           = 0
+			screen.cursor_column        = 0
 		}
 	case 's':
-		s.saved_row = s.cursor_row
-		s.saved_col = s.cursor_col
+		screen.saved_cursor_row    = screen.cursor_row
+		screen.saved_cursor_column = screen.cursor_column
 	case 'u':
-		s.cursor_row = s.saved_row
-		s.cursor_col = s.saved_col
+		screen.cursor_row    = screen.saved_cursor_row
+		screen.cursor_column = screen.saved_cursor_column
 	case 'h', 'l':
 		// (Re)set modes. We only act on ?25 (show/hide cursor).
-		if p.private_mark == '?' {
-			for k in 0..<p.nparams {
-				if p.params[k] == 25 {
-					s.cursor_visible = final == 'h'
+		if parser.private_mark == '?' {
+			for parameter_index in 0..<parser.parameter_count {
+				if parser.parameters[parameter_index] == 25 {
+					screen.cursor_visible = final_byte == 'h'
 				}
 			}
 		}
 	case 'm':
-		sgr_apply(s, p.params[:p.nparams], &t.palette)
+		sgr_apply(screen, parser.parameters[:parser.parameter_count], &terminal.palette)
 	}
 }
 
 @(private="file")
-param_or_default :: proc(p: ^Parser, idx: int, default_value: i32) -> i32 {
-	if idx >= p.nparams { return default_value }
-	v := p.params[idx]
-	if v <= 0 { return default_value }
-	return v
+parameter_or_default :: proc(parser: ^Parser, parameter_index: int, default_value: i32) -> i32 {
+	if parameter_index >= parser.parameter_count { return default_value }
+	parameter_value := parser.parameters[parameter_index]
+	if parameter_value <= 0 { return default_value }
+	return parameter_value
 }
 
 @(private="file")
-parser_reset_csi :: proc(p: ^Parser) {
-	p.nparams = 0
-	p.private_mark = 0
-	p.intermediate = 0
-	for i in 0..<len(p.params) { p.params[i] = 0 }
+parser_reset_csi :: proc(parser: ^Parser) {
+	parser.parameter_count = 0
+	parser.private_mark = 0
+	parser.intermediate_byte = 0
+	for parameter_index in 0..<len(parser.parameters) { parser.parameters[parameter_index] = 0 }
 }
 
 // --- SGR (colors + attrs) ----------------------------------------------
 
 @(private="file")
-sgr_apply :: proc(s: ^Screen, params: []i32, palette: ^[256]Color) {
-	if len(params) == 0 {
-		s.attrs = 0
-		s.fg = s.default_fg
-		s.bg = s.default_bg
+sgr_apply :: proc(screen: ^Screen, sgr_parameters: []i32, palette: ^[256]Color) {
+	if len(sgr_parameters) == 0 {
+		screen.current_attributes       = 0
+		screen.current_foreground_color = screen.default_foreground_color
+		screen.current_background_color = screen.default_background_color
 		return
 	}
-	i := 0
-	for i < len(params) {
-		p := params[i]
-		switch p {
+	parameter_index := 0
+	for parameter_index < len(sgr_parameters) {
+		current_parameter := sgr_parameters[parameter_index]
+		switch current_parameter {
 		case 0:
-			s.attrs = 0
-			s.fg = s.default_fg
-			s.bg = s.default_bg
-		case 1:  s.attrs |= ATTR_BOLD
-		case 2:  s.attrs |= ATTR_DIM
-		case 3:  s.attrs |= ATTR_ITALIC
-		case 4:  s.attrs |= ATTR_UNDERLINE
-		case 7:  s.attrs |= ATTR_REVERSE
-		case 22: s.attrs &~= (ATTR_BOLD | ATTR_DIM)
-		case 23: s.attrs &~= ATTR_ITALIC
-		case 24: s.attrs &~= ATTR_UNDERLINE
-		case 27: s.attrs &~= ATTR_REVERSE
+			screen.current_attributes       = 0
+			screen.current_foreground_color = screen.default_foreground_color
+			screen.current_background_color = screen.default_background_color
+		case 1:  screen.current_attributes |= ATTRIBUTE_BOLD
+		case 2:  screen.current_attributes |= ATTRIBUTE_DIM
+		case 3:  screen.current_attributes |= ATTRIBUTE_ITALIC
+		case 4:  screen.current_attributes |= ATTRIBUTE_UNDERLINE
+		case 7:  screen.current_attributes |= ATTRIBUTE_REVERSE
+		case 22: screen.current_attributes &~= (ATTRIBUTE_BOLD | ATTRIBUTE_DIM)
+		case 23: screen.current_attributes &~= ATTRIBUTE_ITALIC
+		case 24: screen.current_attributes &~= ATTRIBUTE_UNDERLINE
+		case 27: screen.current_attributes &~= ATTRIBUTE_REVERSE
 		case 30, 31, 32, 33, 34, 35, 36, 37:
-			s.fg = palette[p - 30]
+			screen.current_foreground_color = palette[current_parameter - 30]
 		case 38:
 			// 38;5;<idx> (256-color) or 38;2;r;g;b (truecolor).
-			if i + 1 < len(params) {
-				switch params[i+1] {
+			if parameter_index + 1 < len(sgr_parameters) {
+				switch sgr_parameters[parameter_index+1] {
 				case 5:
-					if i + 2 < len(params) {
-						idx := params[i+2]
-						if idx < 0 { idx = 0 }; if idx > 255 { idx = 255 }
-						s.fg = palette[idx]
-						i += 2
+					if parameter_index + 2 < len(sgr_parameters) {
+						palette_index := sgr_parameters[parameter_index+2]
+						if palette_index < 0 { palette_index = 0 }; if palette_index > 255 { palette_index = 255 }
+						screen.current_foreground_color = palette[palette_index]
+						parameter_index += 2
 					}
 				case 2:
-					if i + 4 < len(params) {
-						s.fg = color_from_rgb(params[i+2], params[i+3], params[i+4])
-						i += 4
+					if parameter_index + 4 < len(sgr_parameters) {
+						screen.current_foreground_color = color_from_rgb(sgr_parameters[parameter_index+2], sgr_parameters[parameter_index+3], sgr_parameters[parameter_index+4])
+						parameter_index += 4
 					}
 				}
 			}
-		case 39: s.fg = s.default_fg
+		case 39: screen.current_foreground_color = screen.default_foreground_color
 		case 40, 41, 42, 43, 44, 45, 46, 47:
-			s.bg = palette[p - 40]
+			screen.current_background_color = palette[current_parameter - 40]
 		case 48:
-			if i + 1 < len(params) {
-				switch params[i+1] {
+			if parameter_index + 1 < len(sgr_parameters) {
+				switch sgr_parameters[parameter_index+1] {
 				case 5:
-					if i + 2 < len(params) {
-						idx := params[i+2]
-						if idx < 0 { idx = 0 }; if idx > 255 { idx = 255 }
-						s.bg = palette[idx]
-						i += 2
+					if parameter_index + 2 < len(sgr_parameters) {
+						palette_index := sgr_parameters[parameter_index+2]
+						if palette_index < 0 { palette_index = 0 }; if palette_index > 255 { palette_index = 255 }
+						screen.current_background_color = palette[palette_index]
+						parameter_index += 2
 					}
 				case 2:
-					if i + 4 < len(params) {
-						s.bg = color_from_rgb(params[i+2], params[i+3], params[i+4])
-						i += 4
+					if parameter_index + 4 < len(sgr_parameters) {
+						screen.current_background_color = color_from_rgb(sgr_parameters[parameter_index+2], sgr_parameters[parameter_index+3], sgr_parameters[parameter_index+4])
+						parameter_index += 4
 					}
 				}
 			}
-		case 49: s.bg = s.default_bg
+		case 49: screen.current_background_color = screen.default_background_color
 		case 90, 91, 92, 93, 94, 95, 96, 97:
-			s.fg = palette[8 + (p - 90)]
+			screen.current_foreground_color = palette[8 + (current_parameter - 90)]
 		case 100, 101, 102, 103, 104, 105, 106, 107:
-			s.bg = palette[8 + (p - 100)]
+			screen.current_background_color = palette[8 + (current_parameter - 100)]
 		}
-		i += 1
+		parameter_index += 1
 	}
 }
 
 @(private="file")
-color_from_rgb :: proc(r, g, b: i32) -> Color {
-	cr := r; if cr < 0 { cr = 0 }; if cr > 255 { cr = 255 }
-	cg := g; if cg < 0 { cg = 0 }; if cg > 255 { cg = 255 }
-	cb := b; if cb < 0 { cb = 0 }; if cb > 255 { cb = 255 }
-	return Color{ f32(cr)/255.0, f32(cg)/255.0, f32(cb)/255.0, 1.0 }
+color_from_rgb :: proc(red, green, blue: i32) -> Color {
+	clamped_red   := red;   if clamped_red   < 0 { clamped_red   = 0 }; if clamped_red   > 255 { clamped_red   = 255 }
+	clamped_green := green; if clamped_green < 0 { clamped_green = 0 }; if clamped_green > 255 { clamped_green = 255 }
+	clamped_blue  := blue;  if clamped_blue  < 0 { clamped_blue  = 0 }; if clamped_blue  > 255 { clamped_blue  = 255 }
+	return Color{ red = f32(clamped_red)/255.0, green = f32(clamped_green)/255.0, blue = f32(clamped_blue)/255.0, alpha = 1.0 }
 }
 
 // --- Less-common screen ops referenced by the parser -------------------
 
 @(private)
-screen_scroll_down :: proc(s: ^Screen, n: i32) {
-	if n <= 0 { return }
-	top, bot := s.scroll_top, s.scroll_bottom
-	if top >= bot { return }
-	region_rows := bot - top + 1
-	shift := n; if shift > region_rows { shift = region_rows }
-	for r := bot; r >= top + shift; r -= 1 {
-		src := (r - shift) * s.cols
-		dst := r * s.cols
-		for c in 0..<s.cols { s.cells[dst + c] = s.cells[src + c] }
+screen_scroll_down :: proc(screen: ^Screen, line_count: i32) {
+	if line_count <= 0 { return }
+	region_top    := screen.scroll_region_top
+	region_bottom := screen.scroll_region_bottom
+	if region_top >= region_bottom { return }
+	region_row_count := region_bottom - region_top + 1
+	shift_amount := line_count; if shift_amount > region_row_count { shift_amount = region_row_count }
+	for row_index := region_bottom; row_index >= region_top + shift_amount; row_index -= 1 {
+		source_row_base      := (row_index - shift_amount) * screen.columns
+		destination_row_base := row_index * screen.columns
+		for column_index in 0..<screen.columns { screen.cells[destination_row_base + column_index] = screen.cells[source_row_base + column_index] }
 	}
-	blank := Cell{ ch = ' ', fg = s.default_fg, bg = s.bg }
-	for r in top ..< (top + shift) {
-		base := r * s.cols
-		for c in 0..<s.cols { s.cells[base + c] = blank }
+	blank_cell := Cell{ character = ' ', foreground_color = screen.default_foreground_color, background_color = screen.current_background_color }
+	for row_index in region_top ..< (region_top + shift_amount) {
+		row_base := row_index * screen.columns
+		for column_index in 0..<screen.columns { screen.cells[row_base + column_index] = blank_cell }
 	}
 }
 
 @(private)
-screen_insert_lines :: proc(s: ^Screen, n: i32) {
-	// Insert n blank lines at cursor, pushing existing lines down within the
+screen_insert_lines :: proc(screen: ^Screen, line_count: i32) {
+	// Insert line_count blank lines at cursor, pushing existing lines down within the
 	// scroll region.
-	if s.cursor_row < s.scroll_top || s.cursor_row > s.scroll_bottom { return }
-	old_top := s.scroll_top
-	s.scroll_top = s.cursor_row
-	screen_scroll_down(s, n)
-	s.scroll_top = old_top
+	if screen.cursor_row < screen.scroll_region_top || screen.cursor_row > screen.scroll_region_bottom { return }
+	saved_region_top := screen.scroll_region_top
+	screen.scroll_region_top = screen.cursor_row
+	screen_scroll_down(screen, line_count)
+	screen.scroll_region_top = saved_region_top
 }
 
 @(private)
-screen_delete_lines :: proc(s: ^Screen, n: i32) {
-	if s.cursor_row < s.scroll_top || s.cursor_row > s.scroll_bottom { return }
-	old_top := s.scroll_top
-	s.scroll_top = s.cursor_row
-	screen_scroll_up(s, n)
-	s.scroll_top = old_top
+screen_delete_lines :: proc(screen: ^Screen, line_count: i32) {
+	if screen.cursor_row < screen.scroll_region_top || screen.cursor_row > screen.scroll_region_bottom { return }
+	saved_region_top := screen.scroll_region_top
+	screen.scroll_region_top = screen.cursor_row
+	screen_scroll_up(screen, line_count)
+	screen.scroll_region_top = saved_region_top
 }
 
 @(private)
-screen_delete_chars :: proc(s: ^Screen, n: i32) {
-	count := n; if count < 1 { count = 1 }
-	row_base := s.cursor_row * s.cols
-	end := s.cols
-	for c := s.cursor_col; c < end - count; c += 1 {
-		s.cells[row_base + c] = s.cells[row_base + c + count]
+screen_delete_chars :: proc(screen: ^Screen, character_count: i32) {
+	resolved_count := character_count; if resolved_count < 1 { resolved_count = 1 }
+	row_base := screen.cursor_row * screen.columns
+	end_column := screen.columns
+	for column_index := screen.cursor_column; column_index < end_column - resolved_count; column_index += 1 {
+		screen.cells[row_base + column_index] = screen.cells[row_base + column_index + resolved_count]
 	}
-	blank := Cell{ ch = ' ', fg = s.default_fg, bg = s.bg }
-	for c in (end - count) ..< end {
-		if c < 0 { continue }
-		s.cells[row_base + c] = blank
-	}
-}
-
-@(private)
-screen_insert_chars :: proc(s: ^Screen, n: i32) {
-	count := n; if count < 1 { count = 1 }
-	row_base := s.cursor_row * s.cols
-	for c := s.cols - 1; c >= s.cursor_col + count; c -= 1 {
-		s.cells[row_base + c] = s.cells[row_base + c - count]
-	}
-	blank := Cell{ ch = ' ', fg = s.default_fg, bg = s.bg }
-	end := s.cursor_col + count
-	if end > s.cols { end = s.cols }
-	for c in s.cursor_col ..< end {
-		s.cells[row_base + c] = blank
+	blank_cell := Cell{ character = ' ', foreground_color = screen.default_foreground_color, background_color = screen.current_background_color }
+	for column_index in (end_column - resolved_count) ..< end_column {
+		if column_index < 0 { continue }
+		screen.cells[row_base + column_index] = blank_cell
 	}
 }
 
 @(private)
-screen_erase_chars :: proc(s: ^Screen, n: i32) {
-	count := n; if count < 1 { count = 1 }
-	row_base := s.cursor_row * s.cols
-	blank := Cell{ ch = ' ', fg = s.default_fg, bg = s.bg }
-	for k in 0..<count {
-		c := s.cursor_col + k
-		if c >= s.cols { break }
-		s.cells[row_base + c] = blank
+screen_insert_chars :: proc(screen: ^Screen, character_count: i32) {
+	resolved_count := character_count; if resolved_count < 1 { resolved_count = 1 }
+	row_base := screen.cursor_row * screen.columns
+	for column_index := screen.columns - 1; column_index >= screen.cursor_column + resolved_count; column_index -= 1 {
+		screen.cells[row_base + column_index] = screen.cells[row_base + column_index - resolved_count]
+	}
+	blank_cell := Cell{ character = ' ', foreground_color = screen.default_foreground_color, background_color = screen.current_background_color }
+	end_column := screen.cursor_column + resolved_count
+	if end_column > screen.columns { end_column = screen.columns }
+	for column_index in screen.cursor_column ..< end_column {
+		screen.cells[row_base + column_index] = blank_cell
+	}
+}
+
+@(private)
+screen_erase_chars :: proc(screen: ^Screen, character_count: i32) {
+	resolved_count := character_count; if resolved_count < 1 { resolved_count = 1 }
+	row_base := screen.cursor_row * screen.columns
+	blank_cell := Cell{ character = ' ', foreground_color = screen.default_foreground_color, background_color = screen.current_background_color }
+	for offset_index in 0..<resolved_count {
+		column_index := screen.cursor_column + offset_index
+		if column_index >= screen.columns { break }
+		screen.cells[row_base + column_index] = blank_cell
 	}
 }

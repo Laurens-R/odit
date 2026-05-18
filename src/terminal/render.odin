@@ -12,139 +12,140 @@ import "../ui"
 // SDL_ttf doesn't pay the per-glyph submission cost for every cell. Finally
 // draw a block cursor on top.
 //
-// `cache` is the editor's shared `ui.TextCache`. Going through it instead of
-// `ttf.CreateText` / `ttf.DestroyText` cuts per-frame GPU texture churn
-// dramatically — most rows repeat unchanged frame-to-frame.
-terminal_render :: proc(t: ^Terminal, renderer: ^sdl3.Renderer, font: ^ttf.Font, engine: ^ttf.TextEngine, cache: ^ui.TextCache) {
-	if t == nil { return }
-	s := &t.screen
-	if t.char_width <= 0 || t.line_height <= 0 { return }
+// `text_cache` is the editor's shared `ui.TextCache`. Going through it
+// instead of `ttf.CreateText` / `ttf.DestroyText` cuts per-frame GPU texture
+// churn dramatically — most rows repeat unchanged frame-to-frame.
+terminal_render :: proc(terminal: ^Terminal, renderer: ^sdl3.Renderer, font: ^ttf.Font, engine: ^ttf.TextEngine, text_cache: ^ui.TextCache) {
+	if terminal == nil { return }
+	screen := &terminal.screen
+	if terminal.character_width <= 0 || terminal.line_height <= 0 { return }
 
 	// Solid background.
-	bg := s.default_bg
-	sdl3.SetRenderDrawColorFloat(renderer, bg.r, bg.g, bg.b, bg.a)
+	background_color := screen.default_background_color
+	sdl3.SetRenderDrawColorFloat(renderer, background_color.red, background_color.green, background_color.blue, background_color.alpha)
 	sdl3.RenderFillRect(renderer, &sdl3.FRect{
-		f32(t.rect.x), f32(t.rect.y), f32(t.rect.w), f32(t.rect.h),
+		f32(terminal.rectangle.x), f32(terminal.rectangle.y), f32(terminal.rectangle.w), f32(terminal.rectangle.h),
 	})
 
 	// Per-row pass: contiguous runs of cells that share fg/bg/attrs render
 	// together as one text-call. This keeps per-frame work tied to the
-	// number of *spans* on screen, not to cols*rows.
-	cw, lh := t.char_width, t.line_height
-	for row in 0..<s.rows {
-		y := i32(t.rect.y) + row * lh
+	// number of *spans* on screen, not to columns*rows.
+	character_width := terminal.character_width
+	line_height     := terminal.line_height
+	for row_index in 0..<screen.rows {
+		row_y_position := i32(terminal.rectangle.y) + row_index * line_height
 
 		// First pass: paint background rectangles for any cell whose bg
 		// differs from the screen default. Coalesce adjacent equal-bg
 		// cells into one rect.
-		run_start := i32(-1)
-		run_bg    := bg
-		for col in 0..<s.cols {
-			cell := s.cells[row*s.cols + col]
-			cb := effective_bg(cell)
-			if !color_equal(cb, bg) {
-				if run_start < 0 || !color_equal(cb, run_bg) {
-					if run_start >= 0 { fill_run(renderer, t.rect.x, y, run_start, col, cw, lh, run_bg) }
-					run_start = col
-					run_bg    = cb
+		background_run_start := i32(-1)
+		background_run_color := background_color
+		for column_index in 0..<screen.columns {
+			cell := screen.cells[row_index*screen.columns + column_index]
+			effective_cell_background := effective_background(cell)
+			if !colors_are_equal(effective_cell_background, background_color) {
+				if background_run_start < 0 || !colors_are_equal(effective_cell_background, background_run_color) {
+					if background_run_start >= 0 { fill_background_run(renderer, terminal.rectangle.x, row_y_position, background_run_start, column_index, character_width, line_height, background_run_color) }
+					background_run_start = column_index
+					background_run_color = effective_cell_background
 				}
-			} else if run_start >= 0 {
-				fill_run(renderer, t.rect.x, y, run_start, col, cw, lh, run_bg)
-				run_start = -1
+			} else if background_run_start >= 0 {
+				fill_background_run(renderer, terminal.rectangle.x, row_y_position, background_run_start, column_index, character_width, line_height, background_run_color)
+				background_run_start = -1
 			}
 		}
-		if run_start >= 0 { fill_run(renderer, t.rect.x, y, run_start, s.cols, cw, lh, run_bg) }
+		if background_run_start >= 0 { fill_background_run(renderer, terminal.rectangle.x, row_y_position, background_run_start, screen.columns, character_width, line_height, background_run_color) }
 
 		// Second pass: glyphs. Build runes per fg-run and submit each run
 		// as one CreateText/Draw pair.
-		sb: strings.Builder
-		strings.builder_init(&sb, 0, int(s.cols)*4, context.temp_allocator)
+		text_run_builder: strings.Builder
+		strings.builder_init(&text_run_builder, 0, int(screen.columns)*4, context.temp_allocator)
 
-		run_col   := i32(0)
-		run_fg    := s.default_fg
-		run_len   := 0
-		for col in 0..<s.cols {
-			cell := s.cells[row*s.cols + col]
-			cf := effective_fg(cell)
-			if run_len == 0 {
-				run_col = col
-				run_fg  = cf
-				strings.builder_reset(&sb)
-			} else if !color_equal(cf, run_fg) {
-				draw_run(renderer, cache, &sb, t.rect.x + run_col*cw, y, run_fg)
-				run_col = col
-				run_fg  = cf
-				run_len = 0
-				strings.builder_reset(&sb)
+		text_run_start_column := i32(0)
+		text_run_color        := screen.default_foreground_color
+		text_run_length       := 0
+		for column_index in 0..<screen.columns {
+			cell := screen.cells[row_index*screen.columns + column_index]
+			effective_cell_foreground := effective_foreground(cell)
+			if text_run_length == 0 {
+				text_run_start_column = column_index
+				text_run_color        = effective_cell_foreground
+				strings.builder_reset(&text_run_builder)
+			} else if !colors_are_equal(effective_cell_foreground, text_run_color) {
+				draw_text_run(renderer, text_cache, &text_run_builder, terminal.rectangle.x + text_run_start_column*character_width, row_y_position, text_run_color)
+				text_run_start_column = column_index
+				text_run_color        = effective_cell_foreground
+				text_run_length       = 0
+				strings.builder_reset(&text_run_builder)
 			}
-			r := cell.ch
-			if r == 0 || r == ' ' {
-				strings.write_byte(&sb, ' ')
+			cell_character := cell.character
+			if cell_character == 0 || cell_character == ' ' {
+				strings.write_byte(&text_run_builder, ' ')
 			} else {
-				bytes, sz := utf8.encode_rune(r)
-				for k in 0..<sz { strings.write_byte(&sb, bytes[k]) }
+				rune_bytes, rune_byte_count := utf8.encode_rune(cell_character)
+				for byte_index in 0..<rune_byte_count { strings.write_byte(&text_run_builder, rune_bytes[byte_index]) }
 			}
-			run_len += 1
+			text_run_length += 1
 		}
-		if run_len > 0 {
-			draw_run(renderer, cache, &sb, t.rect.x + run_col*cw, y, run_fg)
+		if text_run_length > 0 {
+			draw_text_run(renderer, text_cache, &text_run_builder, terminal.rectangle.x + text_run_start_column*character_width, row_y_position, text_run_color)
 		}
 	}
 
 	// Block cursor (filled rectangle over the cell at the cursor position).
-	if s.cursor_visible && t.cursor_visible {
-		cx := i32(t.rect.x) + s.cursor_col * cw
-		cy := i32(t.rect.y) + s.cursor_row * lh
-		fg := s.default_fg
-		sdl3.SetRenderDrawColorFloat(renderer, fg.r, fg.g, fg.b, 0.6)
-		sdl3.RenderFillRect(renderer, &sdl3.FRect{ f32(cx), f32(cy), f32(cw), f32(lh) })
+	if screen.cursor_visible && terminal.cursor_visible {
+		cursor_pixel_x := i32(terminal.rectangle.x) + screen.cursor_column * character_width
+		cursor_pixel_y := i32(terminal.rectangle.y) + screen.cursor_row * line_height
+		cursor_foreground_color := screen.default_foreground_color
+		sdl3.SetRenderDrawColorFloat(renderer, cursor_foreground_color.red, cursor_foreground_color.green, cursor_foreground_color.blue, 0.6)
+		sdl3.RenderFillRect(renderer, &sdl3.FRect{ f32(cursor_pixel_x), f32(cursor_pixel_y), f32(character_width), f32(line_height) })
 
 		// Re-render the cell glyph in the background color on top of the
 		// cursor so the character stays visible.
-		cell := s.cells[s.cursor_row*s.cols + s.cursor_col]
-		if cell.ch != 0 && cell.ch != ' ' {
-			sb: strings.Builder
-			strings.builder_init(&sb, 0, 4, context.temp_allocator)
-			bytes, sz := utf8.encode_rune(cell.ch)
-			for k in 0..<sz { strings.write_byte(&sb, bytes[k]) }
-			draw_run(renderer, cache, &sb, cx, cy, s.default_bg)
+		cursor_cell := screen.cells[screen.cursor_row*screen.columns + screen.cursor_column]
+		if cursor_cell.character != 0 && cursor_cell.character != ' ' {
+			cursor_glyph_builder: strings.Builder
+			strings.builder_init(&cursor_glyph_builder, 0, 4, context.temp_allocator)
+			rune_bytes, rune_byte_count := utf8.encode_rune(cursor_cell.character)
+			for byte_index in 0..<rune_byte_count { strings.write_byte(&cursor_glyph_builder, rune_bytes[byte_index]) }
+			draw_text_run(renderer, text_cache, &cursor_glyph_builder, cursor_pixel_x, cursor_pixel_y, screen.default_background_color)
 		}
 	}
 }
 
 @(private="file")
-fill_run :: proc(renderer: ^sdl3.Renderer, ox, oy, start_col, end_col, cw, lh: i32, color: Color) {
-	rect := sdl3.FRect{
-		f32(ox + start_col*cw), f32(oy),
-		f32((end_col - start_col) * cw), f32(lh),
+fill_background_run :: proc(renderer: ^sdl3.Renderer, origin_x, origin_y, start_column, end_column, character_width, line_height: i32, color: Color) {
+	run_rectangle := sdl3.FRect{
+		f32(origin_x + start_column*character_width), f32(origin_y),
+		f32((end_column - start_column) * character_width), f32(line_height),
 	}
-	sdl3.SetRenderDrawColorFloat(renderer, color.r, color.g, color.b, color.a)
-	sdl3.RenderFillRect(renderer, &rect)
+	sdl3.SetRenderDrawColorFloat(renderer, color.red, color.green, color.blue, color.alpha)
+	sdl3.RenderFillRect(renderer, &run_rectangle)
 }
 
 @(private="file")
-draw_run :: proc(renderer: ^sdl3.Renderer, cache: ^ui.TextCache, sb: ^strings.Builder, x, y: i32, color: Color) {
-	s := strings.to_string(sb^)
-	if len(s) == 0 { return }
-	text_obj := ui.text_cache_get(cache, s)
-	if text_obj == nil { return }
-	_ = ttf.SetTextColorFloat(text_obj, color.r, color.g, color.b, color.a)
-	_ = ttf.DrawRendererText(text_obj, f32(x), f32(y))
+draw_text_run :: proc(renderer: ^sdl3.Renderer, text_cache: ^ui.TextCache, builder: ^strings.Builder, x_position, y_position: i32, color: Color) {
+	built_text := strings.to_string(builder^)
+	if len(built_text) == 0 { return }
+	text_object := ui.text_cache_get(text_cache, built_text)
+	if text_object == nil { return }
+	_ = ttf.SetTextColorFloat(text_object, color.red, color.green, color.blue, color.alpha)
+	_ = ttf.DrawRendererText(text_object, f32(x_position), f32(y_position))
 }
 
 @(private="file")
-color_equal :: #force_inline proc(a, b: Color) -> bool {
-	return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a
+colors_are_equal :: #force_inline proc(first_color, second_color: Color) -> bool {
+	return first_color.red == second_color.red && first_color.green == second_color.green && first_color.blue == second_color.blue && first_color.alpha == second_color.alpha
 }
 
 @(private="file")
-effective_fg :: #force_inline proc(c: Cell) -> Color {
-	if c.attrs & ATTR_REVERSE != 0 { return c.bg }
-	return c.fg
+effective_foreground :: #force_inline proc(cell: Cell) -> Color {
+	if cell.attributes & ATTRIBUTE_REVERSE != 0 { return cell.background_color }
+	return cell.foreground_color
 }
 
 @(private="file")
-effective_bg :: #force_inline proc(c: Cell) -> Color {
-	if c.attrs & ATTR_REVERSE != 0 { return c.fg }
-	return c.bg
+effective_background :: #force_inline proc(cell: Cell) -> Color {
+	if cell.attributes & ATTRIBUTE_REVERSE != 0 { return cell.foreground_color }
+	return cell.background_color
 }

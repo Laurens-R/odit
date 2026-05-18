@@ -98,16 +98,16 @@ PatternTokenKind :: enum u8 {
 
 // Field roles by kind:
 //   .Literal          → `text` holds the literal token
-//   .Optional, .Not   → `inner` points to the wrapped sub-token. The inner
-//                       can be any placeholder, a literal, or a fully nested
-//                       OPTION (so `{OPTIONAL:{OPTION:A|B}}` works).
-//   .Option           → `options` holds one PatternToken per alternative
+//   .Optional, .Not   → `inner_token` points to the wrapped sub-token. The
+//                       inner can be any placeholder, a literal, or a fully
+//                       nested OPTION (so `{OPTIONAL:{OPTION:A|B}}` works).
+//   .Option           → `alternatives` holds one PatternToken per alternative
 //   anything else     → fields unused
 PatternToken :: struct {
-	kind:    PatternTokenKind,
-	text:    string,           // owned when kind == .Literal
-	inner:   ^PatternToken,    // owned; populated for .Optional / .Not
-	options: []PatternToken,   // owned; populated for .Option
+	kind:         PatternTokenKind,
+	text:         string,           // owned when kind == .Literal
+	inner_token:  ^PatternToken,    // owned; populated for .Optional / .Not
+	alternatives: []PatternToken,   // owned; populated for .Option
 }
 
 // A whitespace-separated pattern matched against the whole-file lexeme
@@ -165,8 +165,8 @@ global_language_definitions: [dynamic]^Definition
 // Register a parsed definition with the global registry. Called once per
 // language at startup (see `init`).
 @(private)
-register :: proc(def: ^Definition) {
-	append(&global_language_definitions, def)
+register :: proc(definition: ^Definition) {
+	append(&global_language_definitions, definition)
 }
 
 // Look up the definition for a given file path by examining its extension.
@@ -176,15 +176,15 @@ get_definition_for_path :: proc(path: string) -> ^Definition {
 	if len(path) == 0 { return nil }
 
 	// Find the last '.'
-	dot := -1
+	last_dot_index := -1
 	for path_char_index := len(path) - 1; path_char_index >= 0; path_char_index -= 1 {
-		path_char := path[path_char_index]
-		if path_char == '/' || path_char == '\\' { break }
-		if path_char == '.' { dot = path_char_index; break }
+		path_character := path[path_char_index]
+		if path_character == '/' || path_character == '\\' { break }
+		if path_character == '.' { last_dot_index = path_char_index; break }
 	}
-	if dot < 0 || dot == len(path) - 1 { return nil }
+	if last_dot_index < 0 || last_dot_index == len(path) - 1 { return nil }
 
-	extension := path[dot + 1:]
+	extension := path[last_dot_index + 1:]
 	for language_definition in global_language_definitions {
 		for definition_extension in language_definition.extensions {
 			if strings.equal_fold(definition_extension, extension) {
@@ -204,51 +204,51 @@ init :: proc() {
 
 // Tear down everything `init` allocated.
 destroy :: proc() {
-	for def in global_language_definitions {
-		free_definition(def)
+	for language_definition in global_language_definitions {
+		free_definition(language_definition)
 	}
 	delete(global_language_definitions)
 	global_language_definitions = nil
 }
 
 // Recursively release everything a PatternToken owns: its literal text, any
-// nested `inner` sub-token (Optional / Not), and any alternation `options`.
-// Cleanup walks the same shape the loader built, so changes here must stay
-// in lockstep with `parse_pattern_token` / `parse_inner_token`.
+// nested `inner_token` sub-token (Optional / Not), and any alternation
+// `alternatives`. Cleanup walks the same shape the loader built, so changes
+// here must stay in lockstep with `parse_pattern_token` / `parse_inner_token`.
 @(private)
-free_pattern_token :: proc(token: PatternToken) {
-	if token.kind == .Literal { delete(token.text) }
-	if token.inner != nil {
-		free_pattern_token(token.inner^)
-		free(token.inner)
+free_pattern_token :: proc(pattern_token: PatternToken) {
+	if pattern_token.kind == .Literal { delete(pattern_token.text) }
+	if pattern_token.inner_token != nil {
+		free_pattern_token(pattern_token.inner_token^)
+		free(pattern_token.inner_token)
 	}
-	if token.options != nil {
-		for opt in token.options { free_pattern_token(opt) }
-		delete(token.options)
+	if pattern_token.alternatives != nil {
+		for alternative in pattern_token.alternatives { free_pattern_token(alternative) }
+		delete(pattern_token.alternatives)
 	}
 }
 
 @(private="file")
-free_definition :: proc(def: ^Definition) {
-	delete(def.name)
-	for s in def.extensions { delete(s) }
-	delete(def.extensions)
-	delete(def.line_comment)
-	delete(def.block_comment_start)
-	delete(def.block_comment_end)
-	delete(def.preprocessor_prefix)
-	for s in def.keywords { delete(s) }
-	delete(def.keywords)
-	for s in def.types { delete(s) }
-	delete(def.types)
-	for s in def.scope_start { delete(s) }
-	delete(def.scope_start)
-	for s in def.scope_end { delete(s) }
-	delete(def.scope_end)
-	for p in def.symbol_patterns {
-		for t in p.tokens { free_pattern_token(t) }
-		delete(p.tokens)
+free_definition :: proc(language_definition: ^Definition) {
+	delete(language_definition.name)
+	for extension_string in language_definition.extensions { delete(extension_string) }
+	delete(language_definition.extensions)
+	delete(language_definition.line_comment)
+	delete(language_definition.block_comment_start)
+	delete(language_definition.block_comment_end)
+	delete(language_definition.preprocessor_prefix)
+	for keyword_string in language_definition.keywords { delete(keyword_string) }
+	delete(language_definition.keywords)
+	for type_string in language_definition.types { delete(type_string) }
+	delete(language_definition.types)
+	for scope_start_string in language_definition.scope_start { delete(scope_start_string) }
+	delete(language_definition.scope_start)
+	for scope_end_string in language_definition.scope_end { delete(scope_end_string) }
+	delete(language_definition.scope_end)
+	for pattern in language_definition.symbol_patterns {
+		for pattern_token in pattern.tokens { free_pattern_token(pattern_token) }
+		delete(pattern.tokens)
 	}
-	delete(def.symbol_patterns)
-	free(def)
+	delete(language_definition.symbol_patterns)
+	free(language_definition)
 }
