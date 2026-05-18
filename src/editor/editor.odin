@@ -77,6 +77,11 @@ EditorPane :: struct {
 	// auto-reanalyze pass in `editor_update`.
 	symbols_dirty:        bool,
 	last_analysis_time:   f64,
+
+	// Same idea as `symbols_dirty` but for the markdown preview's idle
+	// auto-refresh. Set on every document mutation; cleared once the preview
+	// re-parses the source (or eagerly when no preview is open).
+	markdown_dirty:       bool,
 }
 
 // Per-pane scrollbar interaction state. Track + thumb rects are rewritten
@@ -458,6 +463,16 @@ editor_bottom_bar_height_for_pane :: proc(editor: ^Editor, pane_index: int) -> i
 @(private)
 editor_active_pane :: proc(editor: ^Editor) -> ^Pane {
 	return &editor.panes[editor.active_pane_index]
+}
+
+// Single sink for "this pane's document just changed". Flips every dirty flag
+// that gates an idle/debounced rebuild so future flags (next time we add
+// another debounced consumer) get picked up by every existing mutation site
+// for free.
+@(private)
+pane_mark_document_modified :: proc(editor_pane: ^EditorPane) {
+	editor_pane.symbols_dirty  = true
+	editor_pane.markdown_dirty = true
 }
 
 // Returns the active pane's `EditorPane`, or nil if the active pane is not an

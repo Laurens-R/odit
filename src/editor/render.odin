@@ -131,6 +131,10 @@ editor_update :: proc(editor: ^Editor, delta_time: f64) {
 			}
 		}
 	}
+
+	// Idle auto-refresh for any open markdown preview, gated on a 2-second
+	// pause after the last keystroke.
+	markdown_preview_auto_refresh_tick(editor)
 }
 
 @(private="file")

@@ -308,15 +308,107 @@ markdown_preview_open :: proc(editor: ^Editor) {
 		if !is_markdown_language(content_value.language) { return }
 		markdown_fonts_ensure_loaded(&editor.markdown_fonts)
 		markdown_preview_open_in_opposite(editor, active_pane_index, &content_value)
+		// Preview is now in sync with the source.
+		content_value.markdown_dirty = false
 
 	case MarkdownPreviewPane:
-		opposite_pane_index := 1 - active_pane_index
-		if opposite_pane_index < 0 || opposite_pane_index >= len(editor.panes) { return }
-		source_pane := pane_as_editor(&editor.panes[opposite_pane_index]); if source_pane == nil { return }
-		if !is_markdown_language(source_pane.language) { return }
-		markdown_fonts_ensure_loaded(&editor.markdown_fonts)
+		// F5 from the preview itself is a CLOSE — tear the preview down and
+		// collapse the split so the source MD pane gets the full width back.
+		// (Auto-refresh handles "keep the preview current" without the user
+		// needing to mash F5.)
+		markdown_preview_close_active(editor)
+	}
+}
+
+// Tear down the preview pane and collapse the split, leaving the source
+// editor pane as the single visible pane. Symmetric with the post-Ctrl+F4
+// editor-close collapse in save_close.odin.
+@(private="file")
+markdown_preview_close_active :: proc(editor: ^Editor) {
+	active_pane_index := editor.active_pane_index
+	if active_pane_index < 0 || active_pane_index >= len(editor.panes) { return }
+	if _, is_preview := editor.panes[active_pane_index].content.(MarkdownPreviewPane); !is_preview { return }
+
+	if !editor.split_active {
+		// Edge case: a preview is open with no split (shouldn't really happen,
+		// since F5 forces the split on). Just blank the pane.
+		pane_destroy(&editor.panes[active_pane_index])
+		editor.panes[active_pane_index].content = PaneContent{}
+		editor.active_pane_index = 0
+		return
+	}
+
+	// Same shape as the editor close in save_close.odin: the surviving pane
+	// always ends up in pane[0], which is the canonical home for
+	// single-pane mode.
+	if active_pane_index == 0 {
+		pane_content_destroy(&editor.panes[0].content)
+		editor.panes[0].content = editor.panes[1].content
+		editor.panes[1].content = PaneContent{}
+		if editor.panes[1].has_saved_content {
+			pane_content_destroy(&editor.panes[1].saved_content)
+			editor.panes[1].saved_content   = PaneContent{}
+			editor.panes[1].has_saved_content = false
+		}
+	} else {
+		pane_destroy(&editor.panes[1])
+	}
+
+	editor.split_active      = false
+	editor.active_pane_index = 0
+
+	// Any markdown_dirty on the surviving source pane is now meaningless —
+	// there's nothing to auto-refresh into anymore.
+	if surviving := pane_as_editor(&editor.panes[0]); surviving != nil {
+		surviving.markdown_dirty = false
+	}
+}
+
+// Idle auto-refresh. Called from `editor_update` once per frame. For every
+// EditorPane that (a) has the Markdown language, (b) has been edited since
+// the last refresh, and (c) is paired with a preview in the opposite pane,
+// re-parse the document into that preview — but only after a 2s pause from
+// the most recent keystroke, so we don't thrash the layout mid-typing.
+//
+// If a source has the dirty flag set but its opposite isn't a preview (the
+// user closed it), we eagerly clear the flag so it doesn't linger forever.
+@(private)
+markdown_preview_auto_refresh_tick :: proc(editor: ^Editor) {
+	for pane_index in 0..<len(editor.panes) {
+		source_pane := pane_as_editor(&editor.panes[pane_index]); if source_pane == nil { continue }
+		if !source_pane.markdown_dirty { continue }
+
+		opposite_pane_index := 1 - pane_index
+		if opposite_pane_index < 0 || opposite_pane_index >= len(editor.panes) {
+			source_pane.markdown_dirty = false
+			continue
+		}
+
+		preview_value, is_preview := &editor.panes[opposite_pane_index].content.(MarkdownPreviewPane)
+		if !is_preview {
+			// No counterpart preview is open — there's nothing to refresh,
+			// and the next F5 will pull fresh content from the source anyway.
+			source_pane.markdown_dirty = false
+			continue
+		}
+
+		// Only refresh when the file is still markdown — language could have
+		// changed (Save As, browser-driven retarget) since the flag was set.
+		if !is_markdown_language(source_pane.language) {
+			source_pane.markdown_dirty = false
+			continue
+		}
+
+		// Wait until the user has actually paused. `last_keystroke_time` is
+		// stamped on every key event in input.odin, so this debounces across
+		// all panes, which is what we want — clicking around between panes
+		// shouldn't trigger a refresh, but typing should reset the clock.
+		if editor.clock - editor.last_keystroke_time < 2.0 { continue }
+
 		fresh_content_text := document.document_get_text(&source_pane.document, context.temp_allocator)
-		markdown_preview_pane_set_content(&content_value, fresh_content_text, source_pane.file_path)
+		markdown_preview_pane_set_content(preview_value, fresh_content_text, source_pane.file_path)
+		source_pane.markdown_dirty = false
+		editor_mark_dirty(editor)
 	}
 }
 

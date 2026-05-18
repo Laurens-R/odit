@@ -28,7 +28,7 @@ delete_selection :: proc(editor: ^Editor) -> bool {
 	editor_pane.selection_active = false
 	if !has_selection { return false }
 	document.document_delete(&editor_pane.document, low_offset, high_offset - low_offset)
-	editor_pane.symbols_dirty = true
+	pane_mark_document_modified(editor_pane)
 	editor_pane.cursor_offset = low_offset
 	sync_cursor_from_offset(editor)
 	return true

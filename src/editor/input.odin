@@ -327,7 +327,7 @@ editor_handle_key :: proc(editor: ^Editor, event: ^sdl3.Event) {
 			deletion_length := prev_char_len(editor)
 			document.document_delete(&editor_pane.document, editor_pane.cursor_offset - deletion_length, deletion_length)
 			editor_pane.cursor_offset -= deletion_length
-			editor_pane.symbols_dirty = true
+			pane_mark_document_modified(editor_pane)
 			sync_cursor_from_offset(editor)
 		}
 
@@ -338,7 +338,7 @@ editor_handle_key :: proc(editor: ^Editor, event: ^sdl3.Event) {
 		if editor_pane.cursor_offset < document_length {
 			deletion_length := next_char_len(editor)
 			document.document_delete(&editor_pane.document, editor_pane.cursor_offset, deletion_length)
-			editor_pane.symbols_dirty = true
+			pane_mark_document_modified(editor_pane)
 			sync_cursor_from_offset(editor)
 		}
 
