@@ -25,6 +25,11 @@ import "../ui"
 EditorPane :: struct {
 	document:        document.Document,
 	file_path:       string, // owned absolute path; "" for an untitled doc
+	// Optional title-bar override; when non-empty the pane shows this label
+	// instead of `filepath_base(file_path)`. Used by F3's git-history viewer
+	// to surface "filename @ short-hash" without retargeting the pane at a
+	// fake on-disk path that Ctrl+S would then happily overwrite.
+	display_title_override: string, // owned, "" when not overridden
 	language:        ^syntax.Definition, // nil → plain text rendering
 	symbols:         [dynamic]syntax.Symbol,           // declarations found in this doc (owned names)
 	symbol_names:    map[string]syntax.SymbolKind,     // set view of `symbols` for fast highlighter lookup
@@ -196,6 +201,8 @@ Editor :: struct {
 	diff_delete_background:  sdl3.FColor, // line only on the left (red-tinted)
 	diff_insert_background:  sdl3.FColor, // line only on the right (green-tinted)
 	diff_gap_background:     sdl3.FColor, // gap on this side aligning the other pane
+	diff_change_background:  sdl3.FColor, // line content differs but line exists on both sides
+	diff_change_inline_highlight: sdl3.FColor, // alpha-blended overlay on the differing bytes only
 
 	// File-browser git status tints
 	git_modified_foreground:  sdl3.FColor,
@@ -222,6 +229,50 @@ Editor :: struct {
 	// killing the shell immediately.
 	show_terminal_close_confirm: bool,
 	terminal_close_confirm:      TerminalCloseConfirm,
+
+	// Find mode (Ctrl+F). Attached to a single pane at a time; closes on
+	// click outside the bar, on Esc, or on pane switch.
+	find:                       FindState,
+	find_match_background:      sdl3.FColor, // all matches
+	find_match_active_background: sdl3.FColor, // currently selected match
+
+	// Find-and-replace mode (Ctrl+R). Lives at the same bottom-of-pane spot
+	// as Find; opening one closes the other. Live preview is rolled back on
+	// Esc and coalesced into one Compound undo entry on Enter.
+	replace:                    ReplaceState,
+
+	// Find-in-files dialog (Ctrl+Shift+F). Modal: takes over input while
+	// `show_find_in_files` is true.
+	show_find_in_files:         bool,
+	find_in_files:              FindInFilesState,
+
+	// Replace-in-files dialog (Ctrl+Shift+R). Modal companion to the find
+	// dialog — does destructive on-disk writes when the user commits.
+	show_replace_in_files:      bool,
+	replace_in_files:           ReplaceInFilesState,
+
+	// Save-As path-input modal. Opens directly via Ctrl+Shift+S, indirectly
+	// via Ctrl+S on an untitled doc, and from the Yes branch of the close
+	// confirmation when the file has no path yet.
+	show_save_as:               bool,
+	save_as_dialog:             SaveAsDialog,
+
+	// Yes/No/Cancel prompt fired by Ctrl+F4 on a dirty document.
+	show_close_confirm:         bool,
+	close_confirm_dialog:       CloseConfirmDialog,
+
+	// Git history viewer (F3). Lists past revisions of the active pane's
+	// file; activating one opens that revision in the opposite pane.
+	show_git_history:           bool,
+	git_history_dialog:         GitHistoryDialog,
+
+	// Project root, set by Ctrl+P in the file browser. Owned absolute path;
+	// "" when unset. When set:
+	//   - The F2 browser defaults to it on next open if the cached cwd has
+	//     wandered outside the root.
+	//   - The F9 terminal spawns with it as the working directory.
+	//   - The status bar shows it at all times.
+	project_root:               string,
 }
 
 CURSOR_BLINK_RATE :: 0.53 // seconds
@@ -286,12 +337,17 @@ editor_init :: proc(editor: ^Editor, text_engine: ^ttf.TextEngine, font: ^ttf.Fo
 	editor.diff_delete_background = sdl3.FColor{0.28, 0.10, 0.12, 1.0}
 	editor.diff_insert_background = sdl3.FColor{0.10, 0.28, 0.14, 1.0}
 	editor.diff_gap_background    = sdl3.FColor{0.07, 0.08, 0.11, 1.0}
+	editor.diff_change_background        = sdl3.FColor{0.24, 0.20, 0.08, 1.0}  // dim amber tint over the whole row
+	editor.diff_change_inline_highlight  = sdl3.FColor{0.78, 0.60, 0.18, 0.55} // brighter amber on the differing bytes
 
 	editor.git_modified_foreground  = sdl3.FColor{0.95, 0.78, 0.42, 1.0} // amber
 	editor.git_added_foreground     = sdl3.FColor{0.45, 0.85, 0.50, 1.0} // green
 	editor.git_untracked_foreground = sdl3.FColor{0.50, 0.78, 0.95, 1.0} // light blue
 	editor.git_renamed_foreground   = sdl3.FColor{0.78, 0.62, 0.95, 1.0} // purple
 	editor.git_deleted_foreground   = sdl3.FColor{0.92, 0.45, 0.45, 1.0} // red
+
+	editor.find_match_background          = sdl3.FColor{0.55, 0.50, 0.15, 0.55} // muted yellow
+	editor.find_match_active_background   = sdl3.FColor{0.95, 0.78, 0.20, 0.85} // bright amber
 
 	editor.syntax_keyword_foreground      = sdl3.FColor{0.55, 0.70, 0.95, 1.0} // soft blue
 	editor.syntax_type_foreground         = sdl3.FColor{0.48, 0.82, 0.85, 1.0} // teal
@@ -311,6 +367,16 @@ editor_destroy :: proc(editor: ^Editor) {
 	browse_state_destroy(editor)
 	diff_state_destroy(&editor.diff_state)
 	symbols_dialog_destroy(&editor.symbols_dialog)
+	find_state_destroy(&editor.find)
+	replace_state_destroy(&editor.replace)
+	find_in_files_destroy(&editor.find_in_files)
+	replace_in_files_destroy(&editor.replace_in_files)
+	save_as_dialog_destroy(&editor.save_as_dialog)
+	git_history_dialog_destroy(&editor.git_history_dialog)
+	if len(editor.project_root) > 0 {
+		delete(editor.project_root)
+		editor.project_root = ""
+	}
 	syntax.destroy()
 	if editor.cursor_default   != nil { sdl3.DestroyCursor(editor.cursor_default)   }
 	if editor.cursor_resize_ew != nil { sdl3.DestroyCursor(editor.cursor_resize_ew) }
@@ -339,6 +405,10 @@ pane_content_destroy :: proc(pane_content: ^PaneContent) {
 			delete(content_value.file_path)
 			content_value.file_path = ""
 		}
+		if len(content_value.display_title_override) > 0 {
+			delete(content_value.display_title_override)
+			content_value.display_title_override = ""
+		}
 		for symbol in content_value.symbols { delete(symbol.name) }
 		delete(content_value.symbols)
 		delete(content_value.symbol_names)
@@ -355,6 +425,23 @@ pane_content_destroy :: proc(pane_content: ^PaneContent) {
 @(private)
 editor_title_bar_height :: proc(editor: ^Editor) -> i32 {
 	return editor.line_height + 6
+}
+
+// Pixel height reserved for the find bar at the bottom of a pane when find
+// mode is active on that pane. Returns 0 when find isn't active for this pane.
+@(private)
+editor_find_bar_height_for_pane :: proc(editor: ^Editor, pane_index: int) -> i32 {
+	if !editor.find.active                       { return 0 }
+	if editor.find.pane_index != pane_index      { return 0 }
+	return editor.line_height + 10
+}
+
+// Total pixel height reserved at the bottom of a pane for any active overlay
+// bar (find OR replace — only one can be active at a time). Used by the
+// renderer to shrink the text-area height.
+@(private)
+editor_bottom_bar_height_for_pane :: proc(editor: ^Editor, pane_index: int) -> i32 {
+	return editor_find_bar_height_for_pane(editor, pane_index) + replace_bar_height_for_pane(editor, pane_index)
 }
 
 // --- Pane accessors -------------------------------------------------------
@@ -439,7 +526,10 @@ editor_open_terminal :: proc(editor: ^Editor) {
 	default_foreground := terminal.Color{ editor.foreground_color.r, editor.foreground_color.g, editor.foreground_color.b, editor.foreground_color.a }
 	default_background := terminal.Color{ editor.background_color.r, editor.background_color.g, editor.background_color.b, editor.background_color.a }
 
-	new_terminal := terminal.terminal_new(row_count, column_count, default_foreground, default_background)
+	// When a project root is set, anchor the shell there so terminal commands
+	// run relative to the project regardless of where the editor was launched
+	// from. Otherwise inherit the editor's own cwd ("" = pass nil to spawn).
+	new_terminal := terminal.terminal_new(row_count, column_count, default_foreground, default_background, editor.project_root)
 	if new_terminal == nil { return }
 
 	// Stash both the previous content AND the previous split state so
@@ -561,5 +651,72 @@ editor_needs_render :: proc(editor: ^Editor) -> bool {
 
 // True when a modal dialog (help, browse, future popups) currently owns input.
 editor_is_modal_open :: proc(editor: ^Editor) -> bool {
-	return editor.show_help || editor.show_browse || editor.show_symbols || editor.show_terminal_close_confirm
+	return editor.show_help || editor.show_browse || editor.show_symbols || editor.show_terminal_close_confirm || editor.show_find_in_files || editor.show_replace_in_files || editor.show_save_as || editor.show_close_confirm || editor.show_git_history
+}
+
+// --- Project root ---------------------------------------------------------
+
+// Replace the current project root. Pass "" to clear it. `path` is copied —
+// the caller retains ownership of the buffer they pass in. Idempotent / safe
+// to call repeatedly.
+@(private)
+editor_set_project_root :: proc(editor: ^Editor, path: string) {
+	if len(editor.project_root) > 0 {
+		delete(editor.project_root)
+		editor.project_root = ""
+	}
+	if len(path) > 0 {
+		editor.project_root = strings.clone(path)
+	}
+}
+
+// True when `path` is the project root or sits inside it. Caller passes
+// already-normalized absolute paths; we just do a case-insensitive prefix
+// check with a separator boundary so `C:/foo` is not treated as inside
+// `C:/foobar`. Returns false if no project root is set.
+@(private)
+editor_path_inside_project_root :: proc(editor: ^Editor, path: string) -> bool {
+	if len(editor.project_root) == 0 { return false }
+	if len(path) == 0                { return false }
+	if path_equals_ignore_case(path, editor.project_root) { return true }
+
+	root_length := len(editor.project_root)
+	if len(path) <= root_length { return false }
+	if !path_has_prefix_ignore_case(path, editor.project_root) { return false }
+	// Boundary check — refuse a hit where `editor.project_root` is just a
+	// prefix of a longer sibling name.
+	boundary_byte := path[root_length]
+	return boundary_byte == '/' || boundary_byte == '\\'
+}
+
+// Case-insensitive path equality. ASCII-only fold; full Unicode case folding
+// would need a real table and we don't need it for path matching on the
+// platforms we target.
+@(private="file")
+path_equals_ignore_case :: proc(a, b: string) -> bool {
+	if len(a) != len(b) { return false }
+	for byte_index in 0..<len(a) {
+		if ascii_fold_lower(a[byte_index]) != ascii_fold_lower(b[byte_index]) { return false }
+	}
+	return true
+}
+
+@(private="file")
+path_has_prefix_ignore_case :: proc(path, prefix: string) -> bool {
+	if len(prefix) > len(path) { return false }
+	for byte_index in 0..<len(prefix) {
+		if ascii_fold_lower(path[byte_index]) != ascii_fold_lower(prefix[byte_index]) { return false }
+	}
+	return true
+}
+
+// ASCII case-fold AND separator-fold. We want both `\` and `/` to compare as
+// equal so paths from different sources (filepath.clean output, raw cwd, etc.)
+// compare correctly. Full Unicode folding isn't needed for path matching on
+// the platforms we target.
+@(private="file")
+ascii_fold_lower :: proc(byte_value: u8) -> u8 {
+	if byte_value >= 'A' && byte_value <= 'Z' { return byte_value + ('a' - 'A') }
+	if byte_value == '\\' { return '/' }
+	return byte_value
 }

@@ -67,8 +67,11 @@ foreign kernel32 {
 // On success, `terminal.pty_state` is fully populated and ready for read/write.
 // On failure, everything is closed and the proc returns false; the caller
 // typically falls back to "no terminal".
+//
+// `working_directory` is passed to CreateProcessW as lpCurrentDirectory.
+// Pass "" to inherit the parent's cwd.
 @(private)
-pty_spawn :: proc(terminal: ^Terminal, columns, rows: i32) -> bool {
+pty_spawn :: proc(terminal: ^Terminal, columns, rows: i32, working_directory: string = "") -> bool {
 	pty_state := &terminal.pty_state
 	pty_state^ = PtyState{}
 
@@ -134,6 +137,12 @@ pty_spawn :: proc(terminal: ^Terminal, columns, rows: i32) -> bool {
 	// requires lpCommandLine to be mutable.
 	command_line_wstring := win32.utf8_to_wstring(`powershell.exe -NoLogo`)
 
+	// Optional working directory. Empty string → pass nil (inherit parent's cwd).
+	working_directory_wstring: win32.wstring = nil
+	if len(working_directory) > 0 {
+		working_directory_wstring = win32.utf8_to_wstring(working_directory)
+	}
+
 	process_information := win32.PROCESS_INFORMATION{}
 	process_created := win32.CreateProcessW(
 		nil,                          // lpApplicationName
@@ -141,7 +150,8 @@ pty_spawn :: proc(terminal: ^Terminal, columns, rows: i32) -> bool {
 		nil, nil,
 		false,                        // bInheritHandles — handles flow via the attribute list
 		EXTENDED_STARTUPINFO_PRESENT,
-		nil, nil,
+		nil,
+		working_directory_wstring,    // lpCurrentDirectory — nil = inherit
 		&startup_info.StartupInfo,
 		&process_information,
 	)

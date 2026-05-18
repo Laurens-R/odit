@@ -1,0 +1,218 @@
+{
+  "name": "VBA",
+  "extensions": [
+    "vba"
+  ],
+  "line_comment": "'",
+  "block_comment_start": "",
+  "block_comment_end": "",
+  "preprocessor_prefix": "#",
+  "keywords": [
+    "AddressOf",
+    "And",
+    "As",
+    "Attribute",
+    "Boolean",
+    "ByRef",
+    "ByVal",
+    "Call",
+    "Case",
+    "Const",
+    "Declare",
+    "Dim",
+    "Do",
+    "Each",
+    "Else",
+    "ElseIf",
+    "Empty",
+    "End",
+    "Enum",
+    "Eqv",
+    "Erase",
+    "Error",
+    "Event",
+    "Exit",
+    "False",
+    "For",
+    "Friend",
+    "Function",
+    "Get",
+    "Global",
+    "GoSub",
+    "GoTo",
+    "If",
+    "Imp",
+    "Implements",
+    "In",
+    "Is",
+    "Let",
+    "Lib",
+    "Like",
+    "Loop",
+    "Me",
+    "Mod",
+    "New",
+    "Next",
+    "Not",
+    "Nothing",
+    "Null",
+    "On",
+    "Option",
+    "Optional",
+    "Or",
+    "ParamArray",
+    "Preserve",
+    "Private",
+    "Property",
+    "Public",
+    "Put",
+    "RaiseEvent",
+    "ReDim",
+    "REM",
+    "Resume",
+    "Return",
+    "Select",
+    "Set",
+    "Static",
+    "Step",
+    "Stop",
+    "Sub",
+    "Then",
+    "To",
+    "True",
+    "Type",
+    "Until",
+    "Wend",
+    "While",
+    "With",
+    "WithEvents",
+    "Xor"
+  ],
+  "types": [
+    "Boolean",
+    "Byte",
+    "Currency",
+    "Date",
+    "Decimal",
+    "Double",
+    "Integer",
+    "Long",
+    "LongLong",
+    "LongPtr",
+    "Object",
+    "Single",
+    "String",
+    "Variant",
+    "Application",
+    "Workbook",
+    "Workbooks",
+    "Worksheet",
+    "Worksheets",
+    "Range",
+    "Cells",
+    "Selection",
+    "ActiveCell",
+    "ActiveSheet",
+    "ActiveWorkbook",
+    "ThisWorkbook",
+    "Chart",
+    "Charts",
+    "ChartObject",
+    "ChartObjects",
+    "PivotTable",
+    "PivotTables",
+    "Comment",
+    "Comments",
+    "Document",
+    "Documents",
+    "Paragraph",
+    "Paragraphs",
+    "Slide",
+    "Slides",
+    "Shape",
+    "Shapes",
+    "Form",
+    "Forms",
+    "Control",
+    "Controls",
+    "UserForm",
+    "Collection",
+    "Dictionary",
+    "FileSystemObject",
+    "Folder",
+    "File",
+    "Drive",
+    "TextStream",
+    "WshShell",
+    "WshNetwork"
+  ],
+  "scope_start": [
+    "Sub",
+    "Function",
+    "Property",
+    "Type",
+    "Enum",
+    "With"
+  ],
+  "scope_end": [
+    "End"
+  ],
+  "symbol_patterns": [
+    {
+      "pattern": "{NOTHING} {OPTIONAL:Public} {OPTIONAL:Private} {OPTIONAL:Friend} {OPTIONAL:Static} Sub {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} {OPTIONAL:Public} {OPTIONAL:Private} {OPTIONAL:Friend} {OPTIONAL:Static} Function {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} {OPTIONAL:Public} {OPTIONAL:Private} {OPTIONAL:Friend} Property Get {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} {OPTIONAL:Public} {OPTIONAL:Private} {OPTIONAL:Friend} Property Let {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} {OPTIONAL:Public} {OPTIONAL:Private} {OPTIONAL:Friend} Property Set {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} {OPTIONAL:Public} {OPTIONAL:Private} {OPTIONAL:Friend} Event {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} {OPTIONAL:Public} {OPTIONAL:Private} Declare Sub {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} {OPTIONAL:Public} {OPTIONAL:Private} Declare Function {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} {OPTIONAL:Public} {OPTIONAL:Private} {OPTIONAL:PtrSafe} Declare Sub {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} {OPTIONAL:Public} {OPTIONAL:Private} {OPTIONAL:PtrSafe} Declare Function {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} {OPTIONAL:Public} {OPTIONAL:Private} Type {NAME}",
+      "kind": "Type"
+    },
+    {
+      "pattern": "{NOTHING} {OPTIONAL:Public} {OPTIONAL:Private} Enum {NAME}",
+      "kind": "Type"
+    },
+    {
+      "pattern": "{NOTHING} {OPTIONAL:Public} {OPTIONAL:Private} {OPTIONAL:Global} Const {NAME}",
+      "kind": "Variable"
+    },
+    {
+      "pattern": "{NOTHING} {OPTIONAL:Public} {OPTIONAL:Private} {OPTIONAL:Global} {OPTIONAL:Static} Dim {NAME}",
+      "kind": "Variable"
+    }
+  ]
+}

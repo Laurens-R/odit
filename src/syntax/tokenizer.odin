@@ -11,24 +11,35 @@ import "core:strings"
 // `Comment` colour on its first and last lines (where the markers appear).
 // Good enough as a fallback when no LSP/tree-sitter is available; a future
 // pass can add a small line-state machine to fix the multi-line case.
-tokenize_line :: proc(language_definition: ^Definition, line: string, tokens: ^[dynamic]Token, symbol_names: map[string]SymbolKind = {}) {
+tokenize_line :: proc(
+	language_definition: ^Definition,
+	line: string,
+	tokens: ^[dynamic]Token,
+	symbol_names: map[string]SymbolKind = {},
+) {
 	if language_definition == nil {
-		if len(line) > 0 { append(tokens, Token{.Default, 0, len(line)}) }
+		if len(line) > 0 {append(tokens, Token{.Default, 0, len(line)})}
 		return
 	}
 
 	line_length := len(line)
-	if line_length == 0 { return }
+	if line_length == 0 {return}
 
 	// Whole-line preprocessor directive — when the first non-whitespace char
 	// matches the language's preprocessor prefix.
 	if len(language_definition.preprocessor_prefix) > 0 {
 		first_non_whitespace_index := 0
-		for first_non_whitespace_index < line_length && (line[first_non_whitespace_index] == ' ' || line[first_non_whitespace_index] == '\t') {
+		for first_non_whitespace_index < line_length &&
+		    (line[first_non_whitespace_index] == ' ' || line[first_non_whitespace_index] == '\t') {
 			first_non_whitespace_index += 1
 		}
-		if first_non_whitespace_index < line_length && strings.has_prefix(line[first_non_whitespace_index:], language_definition.preprocessor_prefix) {
-			if first_non_whitespace_index > 0 { append(tokens, Token{.Default, 0, first_non_whitespace_index}) }
+		if first_non_whitespace_index < line_length &&
+		   strings.has_prefix(
+			   line[first_non_whitespace_index:],
+			   language_definition.preprocessor_prefix,
+		   ) {
+			if first_non_whitespace_index >
+			   0 {append(tokens, Token{.Default, 0, first_non_whitespace_index})}
 			append(tokens, Token{.Preprocessor, first_non_whitespace_index, line_length})
 			return
 		}
@@ -45,20 +56,29 @@ tokenize_line :: proc(language_definition: ^Definition, line: string, tokens: ^[
 
 	for character_index < line_length {
 		// Line comment — runs to EOL.
-		if len(language_definition.line_comment) > 0 && match_at(line, character_index, language_definition.line_comment) {
+		if len(language_definition.line_comment) > 0 &&
+		   match_at(line, character_index, language_definition.line_comment) {
 			flush_default_run(tokens, default_run_start, character_index)
 			append(tokens, Token{.Comment, character_index, line_length})
 			return
 		}
 
 		// Block comment — try to find the closing marker on the same line.
-		if len(language_definition.block_comment_start) > 0 && match_at(line, character_index, language_definition.block_comment_start) {
+		if len(language_definition.block_comment_start) > 0 &&
+		   match_at(line, character_index, language_definition.block_comment_start) {
 			flush_default_run(tokens, default_run_start, character_index)
 			remaining_line := line[character_index + len(language_definition.block_comment_start):]
-			end_marker_offset := strings.index(remaining_line, language_definition.block_comment_end)
+			end_marker_offset := strings.index(
+				remaining_line,
+				language_definition.block_comment_end,
+			)
 			block_comment_end := line_length
 			if end_marker_offset >= 0 {
-				block_comment_end = character_index + len(language_definition.block_comment_start) + end_marker_offset + len(language_definition.block_comment_end)
+				block_comment_end =
+					character_index +
+					len(language_definition.block_comment_start) +
+					end_marker_offset +
+					len(language_definition.block_comment_end)
 			}
 			append(tokens, Token{.Comment, character_index, block_comment_end})
 			character_index = block_comment_end
@@ -74,8 +94,9 @@ tokenize_line :: proc(language_definition: ^Definition, line: string, tokens: ^[
 			quote_character := line_character
 			next_character_index := character_index + 1
 			for next_character_index < line_length {
-				if line[next_character_index] == '\\' && next_character_index + 1 < line_length { next_character_index += 2; continue }
-				if line[next_character_index] == quote_character { next_character_index += 1; break }
+				if line[next_character_index] == '\\' &&
+				   next_character_index + 1 < line_length {next_character_index += 2; continue}
+				if line[next_character_index] == quote_character {next_character_index += 1; break}
 				next_character_index += 1
 			}
 			append(tokens, Token{.String, character_index, next_character_index})
@@ -91,16 +112,37 @@ tokenize_line :: proc(language_definition: ^Definition, line: string, tokens: ^[
 			next_character_index := character_index + 1
 			for next_character_index < line_length {
 				next_character := line[next_character_index]
-				if is_digit(next_character) || next_character == '.' || next_character == '_' || next_character == 'x' || next_character == 'X' ||
-				   next_character == 'o' || next_character == 'O' || next_character == 'b' || next_character == 'B' ||
-				   next_character == 'e' || next_character == 'E' || next_character == 'p' || next_character == 'P' ||
-				   next_character == '+' || next_character == '-' || next_character == 'u' || next_character == 'U' || next_character == 'l' || next_character == 'L' || next_character == 'f' || next_character == 'F' ||
-				   (next_character >= 'a' && next_character <= 'f') || (next_character >= 'A' && next_character <= 'F') {
+				if is_digit(next_character) ||
+				   next_character == '.' ||
+				   next_character == '_' ||
+				   next_character == 'x' ||
+				   next_character == 'X' ||
+				   next_character == 'o' ||
+				   next_character == 'O' ||
+				   next_character == 'b' ||
+				   next_character == 'B' ||
+				   next_character == 'e' ||
+				   next_character == 'E' ||
+				   next_character == 'p' ||
+				   next_character == 'P' ||
+				   next_character == '+' ||
+				   next_character == '-' ||
+				   next_character == 'u' ||
+				   next_character == 'U' ||
+				   next_character == 'l' ||
+				   next_character == 'L' ||
+				   next_character == 'f' ||
+				   next_character == 'F' ||
+				   (next_character >= 'a' && next_character <= 'f') ||
+				   (next_character >= 'A' && next_character <= 'F') {
 					// Sign chars (+/-) only inside an exponent — refuse them
 					// after the very start so `1+2` doesn't fuse.
 					if (next_character == '+' || next_character == '-') {
 						previous_character := line[next_character_index - 1]
-						if !(previous_character == 'e' || previous_character == 'E' || previous_character == 'p' || previous_character == 'P') { break }
+						if !(previous_character == 'e' ||
+							   previous_character == 'E' ||
+							   previous_character == 'p' ||
+							   previous_character == 'P') {break}
 					}
 					next_character_index += 1
 				} else {
@@ -117,7 +159,8 @@ tokenize_line :: proc(language_definition: ^Definition, line: string, tokens: ^[
 		if is_identifier_start(line_character) {
 			flush_default_run(tokens, default_run_start, character_index)
 			next_character_index := character_index + 1
-			for next_character_index < line_length && is_identifier_part(line[next_character_index]) { next_character_index += 1 }
+			for next_character_index < line_length &&
+			    is_identifier_part(line[next_character_index]) {next_character_index += 1}
 			identifier_word := line[character_index:next_character_index]
 			identifier_kind: TokenKind = .Default
 			if is_in_list(identifier_word, language_definition.keywords) {
@@ -141,31 +184,36 @@ tokenize_line :: proc(language_definition: ^Definition, line: string, tokens: ^[
 	flush_default_run(tokens, default_run_start, line_length)
 }
 
-@(private="file")
+@(private = "file")
 match_at :: proc(text: string, character_index: int, prefix: string) -> bool {
-	if character_index + len(prefix) > len(text) { return false }
-	return text[character_index:character_index+len(prefix)] == prefix
+	if character_index + len(prefix) > len(text) {return false}
+	return text[character_index:character_index + len(prefix)] == prefix
 }
 
-@(private="file")
+@(private = "file")
 is_digit :: proc(character_value: u8) -> bool {
 	return character_value >= '0' && character_value <= '9'
 }
 
-@(private="file")
+@(private = "file")
 is_identifier_start :: proc(character_value: u8) -> bool {
-	return (character_value >= 'a' && character_value <= 'z') || (character_value >= 'A' && character_value <= 'Z') || character_value == '_' || character_value >= 0x80
+	return(
+		(character_value >= 'a' && character_value <= 'z') ||
+		(character_value >= 'A' && character_value <= 'Z') ||
+		character_value == '_' ||
+		character_value >= 0x80 \
+	)
 }
 
-@(private="file")
+@(private = "file")
 is_identifier_part :: proc(character_value: u8) -> bool {
 	return is_identifier_start(character_value) || is_digit(character_value)
 }
 
-@(private="file")
+@(private = "file")
 is_in_list :: proc(word: string, word_list: []string) -> bool {
 	for list_word in word_list {
-		if list_word == word { return true }
+		if list_word == word {return true}
 	}
 	return false
 }

@@ -41,20 +41,37 @@ Write-Host "==> odin $($odinArguments -join ' ')"
 & odin @odinArguments
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+function Copy-IfChanged {
+    param([string]$Source, [string]$DestinationDirectory)
+
+    $sourceItem      = Get-Item -LiteralPath $Source
+    $destinationPath = Join-Path $DestinationDirectory $sourceItem.Name
+
+    if (Test-Path -LiteralPath $destinationPath) {
+        $destinationItem = Get-Item -LiteralPath $destinationPath
+        if ($destinationItem.Length -eq $sourceItem.Length -and
+            $destinationItem.LastWriteTimeUtc -ge $sourceItem.LastWriteTimeUtc) {
+            Write-Host "    up-to-date: $($sourceItem.Name)"
+            return
+        }
+    }
+
+    Copy-Item -Force -LiteralPath $sourceItem.FullName -Destination $destinationPath
+    Write-Host "    staged: $($sourceItem.Name)"
+}
+
 # Copy platform-specific runtime libraries (DLLs / .so / .dylib).
 $vendorPlatformDirectory = Join-Path 'vendor' $Target
 if (Test-Path $vendorPlatformDirectory) {
     Get-ChildItem -Path $vendorPlatformDirectory -File | Where-Object { $_.Name -ne 'README.md' } | ForEach-Object {
-        Copy-Item -Force $_.FullName -Destination $outputDirectory
-        Write-Host "    staged: $($_.Name)"
+        Copy-IfChanged -Source $_.FullName -DestinationDirectory $outputDirectory
     }
 }
 
 # Shared cross-platform assets.
 $sharedFont = Join-Path 'vendor' 'font.ttf'
 if (Test-Path $sharedFont) {
-    Copy-Item -Force $sharedFont -Destination $outputDirectory
-    Write-Host "    staged: font.ttf"
+    Copy-IfChanged -Source $sharedFont -DestinationDirectory $outputDirectory
 }
 
 Write-Host "==> build complete: $outputBinary"

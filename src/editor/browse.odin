@@ -74,13 +74,31 @@ browse_state_destroy :: proc(editor: ^Editor) {
 browse_open :: proc(editor: ^Editor) {
 	if editor.show_browse { return }
 
+	// Decide the directory to land on. Precedence:
+	//   1. Cached browser cwd from a previous open, IF either no project root
+	//      is set or the cached cwd sits inside the project root.
+	//   2. Project root, if one is set (so the user lands at the top of their
+	//      project after wandering elsewhere in a previous open).
+	//   3. The process's current working directory.
 	start_directory_path: string
-	if len(editor.browse_state.current_working_directory) > 0 {
-		// Use a temp clone because browse_load_directory frees
-		// editor.browse_state.current_working_directory before taking
+	cached_cwd := editor.browse_state.current_working_directory
+
+	use_cached_cwd := false
+	if len(cached_cwd) > 0 {
+		if len(editor.project_root) == 0 || editor_path_inside_project_root(editor, cached_cwd) {
+			use_cached_cwd = true
+		}
+	}
+
+	switch {
+	case use_cached_cwd:
+		// Clone to a temp buffer because browse_load_directory frees the
+		// editor.browse_state.current_working_directory string before taking
 		// ownership of its argument.
-		start_directory_path = strings.clone(editor.browse_state.current_working_directory, context.temp_allocator)
-	} else {
+		start_directory_path = strings.clone(cached_cwd, context.temp_allocator)
+	case len(editor.project_root) > 0:
+		start_directory_path = strings.clone(editor.project_root, context.temp_allocator)
+	case:
 		working_directory, get_directory_error := os.get_working_directory(context.temp_allocator)
 		if get_directory_error != nil {
 			start_directory_path = "."
@@ -91,6 +109,21 @@ browse_open :: proc(editor: ^Editor) {
 
 	editor.show_browse = true
 	browse_load_directory(editor, start_directory_path)
+}
+
+// Bound to Ctrl+P inside the file browser. Snapshots the browser's current
+// directory as the editor's project root; subsequent terminal spawns and
+// browser opens will anchor against it.
+@(private="file")
+browse_set_project_root_to_current :: proc(editor: ^Editor) {
+	current_directory := editor.browse_state.current_working_directory
+	if len(current_directory) == 0 { return }
+	cleaned_directory, _ := filepath.clean(current_directory, context.temp_allocator)
+	editor_set_project_root(editor, cleaned_directory)
+	// No popup confirmation — the status bar at the bottom of the screen
+	// shows the project root persistently, so the user can see the change
+	// took effect as soon as they close the browser (and even before, by
+	// peeking past the dialog).
 }
 
 @(private)
@@ -402,12 +435,13 @@ browse_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 		key_modifiers := event.key.mod
 		ctrl_held := .LCTRL in key_modifiers || .RCTRL in key_modifiers
 
-		// Ctrl-prefixed actions: rename, new file, undo last fs change.
+		// Ctrl-prefixed actions: rename, new file, undo last fs change, set project root.
 		if ctrl_held {
 			switch pressed_key {
 			case sdl3.K_R: browse_prompt_open_rename(editor); return
 			case sdl3.K_N: browse_prompt_open_new_file(editor); return
 			case sdl3.K_Z: browse_undo(editor); return
+			case sdl3.K_P: browse_set_project_root_to_current(editor); return
 			}
 		}
 
@@ -457,7 +491,7 @@ browse_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewport_width,
 	ui.draw_dim_overlay(&ui_context, viewport_width, viewport_height, theme.overlay)
 
 	// Dialog rect
-	desired_columns: i32 = 86
+	desired_columns: i32 = 100
 	desired_rows: i32 = 60
 	dialog_width  := min(desired_columns * editor.character_width + 32, viewport_width  - 40)
 	dialog_height := min(desired_rows * editor.line_height + 40, viewport_height - 40)
@@ -549,7 +583,7 @@ browse_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewport_width,
 	}
 
 	// Footer hint
-	hint_text := "Up/Down nav  Enter open  Ctrl+R rename  Ctrl+N new  Ctrl+Z undo  F3 flat  Esc"
+	hint_text := "Enter open  Ctrl+P set project root  Ctrl+R rename  Ctrl+N new  Ctrl+Z undo  F3 flat  Esc"
 	hint_width, _ := ui.text_size(&ui_context, hint_text)
 	footer_x := i32(dialog_rectangle.x + (dialog_rectangle.w - f32(hint_width)) / 2)
 	footer_y := i32(dialog_rectangle.y + dialog_rectangle.h) - line_step - 10

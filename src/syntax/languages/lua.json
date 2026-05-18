@@ -1,0 +1,64 @@
+{
+  "name": "Lua",
+  "extensions": [
+    "lua"
+  ],
+  "line_comment": "--",
+  "block_comment_start": "--[[",
+  "block_comment_end": "]]",
+  "preprocessor_prefix": "",
+  "keywords": [
+    "and",
+    "break",
+    "do",
+    "else",
+    "elseif",
+    "end",
+    "false",
+    "for",
+    "function",
+    "goto",
+    "if",
+    "in",
+    "local",
+    "nil",
+    "not",
+    "or",
+    "repeat",
+    "return",
+    "then",
+    "true",
+    "until",
+    "while"
+  ],
+  "types": [
+    "boolean",
+    "number",
+    "string",
+    "table",
+    "thread",
+    "userdata"
+  ],
+  "scope_start": [
+    "do",
+    "then",
+    "function"
+  ],
+  "scope_end": [
+    "end"
+  ],
+  "symbol_patterns": [
+    {
+      "pattern": "{NOTHING} local function {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} function {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} local {NAME} =",
+      "kind": "Variable"
+    }
+  ]
+}

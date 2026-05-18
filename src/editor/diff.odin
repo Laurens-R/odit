@@ -8,15 +8,27 @@ DiffRowKind :: enum u8 {
 	Equal,   // line present in both panes, same content
 	Delete,  // line present only in the left pane (pane 0)
 	Insert,  // line present only in the right pane (pane 1)
+	Change,  // line present in BOTH panes with different content — kept side-by-side
 }
 
 // One row in the aligned diff display. `left_line` / `right_line` are document
 // line indices; either may be -1 to indicate "no content on this side" (a gap
 // row that aligns its counterpart on the other side).
+//
+// For `Change` rows both indices are valid (>= 0). The `*_change_start` /
+// `*_change_end` fields are byte offsets within each side's line text that
+// bound the differing region — computed via longest-common-prefix /
+// longest-common-suffix at diff time so the renderer can paint an inline
+// highlight without re-fetching the other pane's line content per frame.
+// They're zero for non-Change rows.
 DiffRow :: struct {
-	kind:       DiffRowKind,
-	left_line:  i32,
-	right_line: i32,
+	kind:               DiffRowKind,
+	left_line:          i32,
+	right_line:         i32,
+	left_change_start:  i32,
+	left_change_end:    i32,
+	right_change_start: i32,
+	right_change_end:   i32,
 }
 
 // State shared by both panes while diff mode is active. Both panes scroll
@@ -106,12 +118,12 @@ diff_compute :: proc(diff_state: ^DiffState, left_document, right_document: ^doc
 	// Trivial cases — no need to run Myers for empty sides.
 	if left_line_count == 0 && right_line_count == 0 { return true }
 	if left_line_count == 0 {
-		for right_line_index in 0..<right_line_count { append(&diff_state.rows, DiffRow{.Insert, -1, i32(right_line_index)}) }
+		for right_line_index in 0..<right_line_count { append(&diff_state.rows, DiffRow{kind = .Insert, left_line = -1, right_line = i32(right_line_index)}) }
 		diff_build_line_maps(diff_state, left_line_count, right_line_count)
 		return true
 	}
 	if right_line_count == 0 {
-		for left_line_index in 0..<left_line_count { append(&diff_state.rows, DiffRow{.Delete, i32(left_line_index), -1}) }
+		for left_line_index in 0..<left_line_count { append(&diff_state.rows, DiffRow{kind = .Delete, left_line = i32(left_line_index), right_line = -1}) }
 		diff_build_line_maps(diff_state, left_line_count, right_line_count)
 		return true
 	}
@@ -188,16 +200,16 @@ diff_compute :: proc(diff_state: ^DiffState, left_document, right_document: ^doc
 		// Diagonal first — every matched line on the way back from
 		// (current_x, current_y) to the start of the previous step's snake.
 		for current_x > previous_x && current_y > previous_y {
-			append(&backtrack_rows, DiffRow{.Equal, i32(current_x-1), i32(current_y-1)})
+			append(&backtrack_rows, DiffRow{kind = .Equal, left_line = i32(current_x-1), right_line = i32(current_y-1)})
 			current_x -= 1
 			current_y -= 1
 		}
 
 		// The single non-diagonal step taken at this distance.
 		if current_x == previous_x {
-			append(&backtrack_rows, DiffRow{.Insert, -1, i32(current_y-1)})
+			append(&backtrack_rows, DiffRow{kind = .Insert, left_line = -1, right_line = i32(current_y-1)})
 		} else {
-			append(&backtrack_rows, DiffRow{.Delete, i32(current_x-1), -1})
+			append(&backtrack_rows, DiffRow{kind = .Delete, left_line = i32(current_x-1), right_line = -1})
 		}
 		current_x = previous_x
 		current_y = previous_y
@@ -205,7 +217,7 @@ diff_compute :: proc(diff_state: ^DiffState, left_document, right_document: ^doc
 
 	// Any remaining diagonal from the d=0 prefix.
 	for current_x > 0 && current_y > 0 {
-		append(&backtrack_rows, DiffRow{.Equal, i32(current_x-1), i32(current_y-1)})
+		append(&backtrack_rows, DiffRow{kind = .Equal, left_line = i32(current_x-1), right_line = i32(current_y-1)})
 		current_x -= 1
 		current_y -= 1
 	}
@@ -215,8 +227,125 @@ diff_compute :: proc(diff_state: ^DiffState, left_document, right_document: ^doc
 		append(&diff_state.rows, backtrack_rows[reverse_index])
 	}
 
+	// Post-process Delete/Insert runs into Change pairs so modified lines sit
+	// side-by-side instead of shoving everything below them down by one row.
+	diff_pair_changes(&diff_state.rows, left_line_texts, right_line_texts)
+
 	diff_build_line_maps(diff_state, left_line_count, right_line_count)
 	return true
+}
+
+// Walk the row list and turn each contiguous Delete+Insert run into a stream
+// of Change pairs (followed by any unmatched remainder as plain Delete /
+// Insert rows). The intent is to keep modified lines on the same row across
+// the two panes — the previous behavior pushed every change down by the size
+// of its counterpart block, which made it nearly impossible to compare
+// side-by-side.
+//
+// Pairing is by position: i-th delete in the block ↔ i-th insert. Remainders
+// stay as gap rows. For each Change row we precompute byte-level change
+// bounds via longest-common-prefix / longest-common-suffix so the renderer
+// can paint an inline highlight cheaply.
+@(private="file")
+diff_pair_changes :: proc(rows: ^[dynamic]DiffRow, left_line_texts, right_line_texts: []string) {
+	if len(rows^) == 0 { return }
+
+	rewritten_rows := make([dynamic]DiffRow, 0, len(rows^), context.allocator)
+
+	row_index := 0
+	for row_index < len(rows^) {
+		current_kind := rows[row_index].kind
+		if current_kind != .Delete && current_kind != .Insert {
+			append(&rewritten_rows, rows[row_index])
+			row_index += 1
+			continue
+		}
+
+		// Walk the full Delete/Insert block (mixed order is fine — Myers can
+		// emit them either way around the snake).
+		block_start := row_index
+		block_end   := row_index
+		for block_end < len(rows^) && (rows[block_end].kind == .Delete || rows[block_end].kind == .Insert) {
+			block_end += 1
+		}
+
+		// Collect each side in source order. Both arrays are already in
+		// ascending document-line order because Myers walks document order.
+		deletes_left_lines:  [dynamic]i32; deletes_left_lines.allocator  = context.temp_allocator
+		inserts_right_lines: [dynamic]i32; inserts_right_lines.allocator = context.temp_allocator
+		for collect_index := block_start; collect_index < block_end; collect_index += 1 {
+			#partial switch rows[collect_index].kind {
+			case .Delete: append(&deletes_left_lines,  rows[collect_index].left_line)
+			case .Insert: append(&inserts_right_lines, rows[collect_index].right_line)
+			}
+		}
+
+		pair_count := min(len(deletes_left_lines), len(inserts_right_lines))
+
+		// Change rows first, in matched index order.
+		for pair_index in 0..<pair_count {
+			left_doc_line  := deletes_left_lines[pair_index]
+			right_doc_line := inserts_right_lines[pair_index]
+
+			left_text  := left_line_texts[left_doc_line]
+			right_text := right_line_texts[right_doc_line]
+			left_start, left_end, right_start, right_end := compute_inline_change_bounds(left_text, right_text)
+
+			append(&rewritten_rows, DiffRow{
+				kind               = .Change,
+				left_line          = left_doc_line,
+				right_line         = right_doc_line,
+				left_change_start  = i32(left_start),
+				left_change_end    = i32(left_end),
+				right_change_start = i32(right_start),
+				right_change_end   = i32(right_end),
+			})
+		}
+		// Then the leftover Delete / Insert rows on their original side. Order
+		// these so unpaired deletes appear before unpaired inserts — the only
+		// time both leftovers coexist is the asymmetric case which is rare.
+		for leftover_index := pair_count; leftover_index < len(deletes_left_lines); leftover_index += 1 {
+			append(&rewritten_rows, DiffRow{kind = .Delete, left_line = deletes_left_lines[leftover_index], right_line = -1})
+		}
+		for leftover_index := pair_count; leftover_index < len(inserts_right_lines); leftover_index += 1 {
+			append(&rewritten_rows, DiffRow{kind = .Insert, left_line = -1, right_line = inserts_right_lines[leftover_index]})
+		}
+
+		row_index = block_end
+	}
+
+	delete(rows^)
+	rows^ = rewritten_rows
+}
+
+// Byte-level longest-common-prefix / longest-common-suffix bracket on the two
+// strings. Returns the byte half-open ranges [left_start, left_end) and
+// [right_start, right_end) that actually differ — collapsing to (len, len)
+// for identical strings (caller treats as "nothing to highlight"). Both
+// strings are assumed UTF-8; bytes that match across the boundary are by
+// definition on rune boundaries (the only way two valid UTF-8 byte sequences
+// can match for a stretch is if they encode the same code points).
+@(private="file")
+compute_inline_change_bounds :: proc(left_text, right_text: string) -> (left_start, left_end, right_start, right_end: int) {
+	prefix_length := 0
+	left_length   := len(left_text)
+	right_length  := len(right_text)
+	for prefix_length < left_length && prefix_length < right_length && left_text[prefix_length] == right_text[prefix_length] {
+		prefix_length += 1
+	}
+
+	suffix_length := 0
+	for prefix_length + suffix_length < left_length &&
+	    prefix_length + suffix_length < right_length &&
+	    left_text [left_length  - 1 - suffix_length] == right_text[right_length - 1 - suffix_length] {
+		suffix_length += 1
+	}
+
+	left_start  = prefix_length
+	left_end    = left_length  - suffix_length
+	right_start = prefix_length
+	right_end   = right_length - suffix_length
+	return
 }
 
 // Toggle diff mode. Requires both panes to be open and contain editor content;

@@ -61,6 +61,37 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 		terminal_close_confirm_handle_event(editor, event)
 		return
 	}
+	if editor.show_find_in_files {
+		find_in_files_handle_event(editor, event)
+		return
+	}
+	if editor.show_replace_in_files {
+		replace_in_files_handle_event(editor, event)
+		return
+	}
+	if editor.show_save_as {
+		save_as_dialog_handle_event(editor, event)
+		return
+	}
+	if editor.show_close_confirm {
+		close_confirm_dialog_handle_event(editor, event)
+		return
+	}
+	if editor.show_git_history {
+		git_history_dialog_handle_event(editor, event)
+		return
+	}
+
+	// Find mode intercepts text + key events but lets mouse wheel and mouse
+	// buttons fall through (so the user can still scroll, and a click outside
+	// the bar exits find while also placing the cursor — handled in mouse.odin).
+	if find_active(editor) {
+		if find_handle_event(editor, event) { return }
+	}
+	// Same contract for replace — it owns text/keys, scroll falls through.
+	if replace_active(editor) {
+		if replace_handle_event(editor, event) { return }
+	}
 
 	#partial switch event.type {
 	case .TEXT_INPUT:
@@ -92,6 +123,10 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 			browse_open(editor)
 			return
 		}
+		if pressed_key == sdl3.K_F3 {
+			git_history_dialog_open(editor)
+			return
+		}
 		if pressed_key == sdl3.K_F6 {
 			symbols_dialog_open(editor)
 			return
@@ -105,11 +140,58 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 			return
 		}
 		if ctrl_held && pressed_key == sdl3.K_TAB {
+			find_close(editor)
+			replace_close(editor, false)
 			editor_focus_other_pane(editor)
 			return
 		}
 		if ctrl_held && pressed_key == sdl3.K_W {
 			editor_toggle_wrap(editor)
+			return
+		}
+		if ctrl_held && pressed_key == sdl3.K_S {
+			shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
+			if shift_held {
+				editor_save_as_active_file(editor)
+			} else {
+				editor_save_active_file(editor)
+			}
+			return
+		}
+		if ctrl_held && pressed_key == sdl3.K_F4 {
+			editor_close_active_file(editor)
+			return
+		}
+		if ctrl_held && pressed_key == sdl3.K_F {
+			shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
+			if shift_held {
+				// Ctrl+Shift+F opens the find-in-files dialog.
+				find_in_files_open(editor)
+				return
+			}
+			// Toggle: a second Ctrl+F closes the bar. Otherwise open on the
+			// active pane (no-op when the active pane isn't an editor).
+			if find_active(editor) {
+				find_close(editor)
+			} else {
+				find_open(editor)
+			}
+			return
+		}
+		if ctrl_held && pressed_key == sdl3.K_R {
+			shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
+			if shift_held {
+				// Ctrl+Shift+R opens the replace-in-files dialog (mirrors the
+				// Ctrl+Shift+F find-in-files dialog).
+				replace_in_files_open(editor)
+				return
+			}
+			// Toggle replace bar. Cancels any in-progress preview if already open.
+			if replace_active(editor) {
+				replace_close(editor, false)
+			} else {
+				replace_open(editor)
+			}
 			return
 		}
 

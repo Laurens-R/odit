@@ -12,7 +12,7 @@ import "../ui"
 
 TAB_WIDTH :: 4
 
-@(private="file")
+@(private)
 build_line_display :: proc(line_text: string, allocator := context.temp_allocator) -> (display_text: string, byte_to_visual_column: []int) {
 	display_builder: strings.Builder
 	strings.builder_init(&display_builder, 0, len(line_text) + 4, allocator)
@@ -251,6 +251,29 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 		render_string(editor, renderer, status_text, editor.padding_x, status_bar_y + 2, editor.status_bar_foreground)
 	}
 
+	// Project root indicator — pinned to the right edge so it's always
+	// visible even when the per-pane status text on the left runs long.
+	// Drawn last so it paints over any overlap with the left-side text on
+	// very narrow windows.
+	if len(editor.project_root) > 0 {
+		project_label := fmt.tprintf("Project: %s", editor.project_root)
+		project_label_width: i32
+		ttf.GetStringSize(editor.font, strings.clone_to_cstring(project_label, context.temp_allocator), 0, &project_label_width, nil)
+		project_x := window_width - editor.padding_x - project_label_width
+		// Fill the project-label strip with the status background so the
+		// pinned text doesn't merge into the left-side hint when they overlap.
+		strip_padding: i32 = 6
+		strip_rectangle := sdl3.FRect{
+			f32(project_x - strip_padding),
+			f32(status_bar_y),
+			f32(project_label_width + strip_padding * 2),
+			f32(status_bar_height),
+		}
+		sdl3.SetRenderDrawColorFloat(renderer, editor.status_bar_background.r, editor.status_bar_background.g, editor.status_bar_background.b, editor.status_bar_background.a)
+		sdl3.RenderFillRect(renderer, &strip_rectangle)
+		render_string(editor, renderer, project_label, project_x, status_bar_y + 2, editor.status_bar_foreground)
+	}
+
 	// Modal overlays render on top of everything else.
 	if editor.show_browse {
 		browse_render(editor, renderer, window_width, window_height)
@@ -263,6 +286,21 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 	}
 	if editor.show_terminal_close_confirm {
 		terminal_close_confirm_render(editor, renderer, window_width, window_height)
+	}
+	if editor.show_find_in_files {
+		find_in_files_render(editor, renderer, window_width, window_height)
+	}
+	if editor.show_replace_in_files {
+		replace_in_files_render(editor, renderer, window_width, window_height)
+	}
+	if editor.show_save_as {
+		save_as_dialog_render(editor, renderer, window_width, window_height)
+	}
+	if editor.show_close_confirm {
+		close_confirm_dialog_render(editor, renderer, window_width, window_height)
+	}
+	if editor.show_git_history {
+		git_history_dialog_render(editor, renderer, window_width, window_height)
 	}
 }
 
@@ -281,8 +319,11 @@ render_editor_pane :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pan
 	title_bar_height := editor_title_bar_height(editor)
 	render_pane_title_bar(editor, renderer, editor_pane, view_x, view_y, view_width, title_bar_height, is_active)
 
+	bottom_bar_height := editor_bottom_bar_height_for_pane(editor, pane_index)
+
 	text_y      := view_y + title_bar_height
-	text_height := view_height - title_bar_height
+	text_height := view_height - title_bar_height - bottom_bar_height
+	if text_height < editor.line_height { text_height = editor.line_height }
 
 	editor_pane.visible_lines = u32(text_height / editor.line_height)
 	if editor_pane.visible_lines == 0 { editor_pane.visible_lines = 1 }
@@ -298,6 +339,8 @@ render_editor_pane :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pan
 	if editor.diff_state.active {
 		render_editor_pane_diff(editor, renderer, editor_pane, view_x, text_y, view_width, is_active, pane_index, gutter_character_count, gutter_width_pixels)
 	} else {
+		find_render_highlights(editor, renderer, editor_pane, view_x, text_y, gutter_width_pixels, pane_index)
+		replace_render_highlights(editor, renderer, editor_pane, view_x, text_y, gutter_width_pixels, pane_index)
 		render_editor_pane_normal(editor, renderer, editor_pane, view_x, text_y, is_active, gutter_character_count, gutter_width_pixels)
 	}
 
@@ -333,6 +376,16 @@ render_editor_pane :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pan
 		editor_pane.scrollbar.track_rectangle = track_rectangle
 		editor_pane.scrollbar.thumb_rectangle = thumb_rectangle
 	}
+
+	// Find / Replace bar — anchored to the pane bottom, painted after the
+	// scrollbar so the bar overlaps the scrollbar's lower edge instead of
+	// being clipped by it. Only one can be active at a time.
+	if find_active(editor) && editor.find.pane_index == pane_index {
+		find_render_bar(editor, renderer, pane)
+	}
+	if replace_active(editor) && editor.replace.pane_index == pane_index {
+		replace_render_bar(editor, renderer, pane)
+	}
 }
 
 // Tinted strip at the top of an editor pane showing the document's file name
@@ -341,7 +394,15 @@ render_editor_pane :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pan
 // muted so focus is unambiguous at a glance.
 @(private="file")
 render_pane_title_bar :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, editor_pane: ^EditorPane, x_position, y_position, width, height: i32, is_active: bool) {
-	display_name := editor_pane.file_path != "" ? filepath_base(editor_pane.file_path) : "untitled"
+	display_name: string
+	switch {
+	case len(editor_pane.display_title_override) > 0:
+		display_name = editor_pane.display_title_override
+	case editor_pane.file_path != "":
+		display_name = filepath_base(editor_pane.file_path)
+	case:
+		display_name = "untitled"
+	}
 	dirty_marker := document.document_is_dirty(&editor_pane.document) ? " *" : ""
 	full_label := fmt.tprintf("%s%s", display_name, dirty_marker)
 	render_pane_title_strip(editor, renderer, x_position, y_position, width, height, full_label, is_active)
@@ -451,6 +512,8 @@ render_editor_pane_diff :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, edito
 				row_background = &editor.diff_delete_background
 			case .Insert:
 				row_background = &editor.diff_gap_background
+			case .Change:
+				row_background = &editor.diff_change_background
 			}
 		} else {
 			doc_line_index = diff_row.right_line
@@ -460,6 +523,8 @@ render_editor_pane_diff :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, edito
 				row_background = &editor.diff_insert_background
 			case .Delete:
 				row_background = &editor.diff_gap_background
+			case .Change:
+				row_background = &editor.diff_change_background
 			}
 		}
 
@@ -475,7 +540,68 @@ render_editor_pane_diff :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, edito
 		is_cursor_row := is_active && doc_line_index == i32(editor_pane.cursor_line)
 		render_doc_line_into(editor, renderer, editor_pane, view_x, screen_y_position, gutter_character_count, gutter_width,
 			doc_line_index, false, 0, 0, is_active, is_cursor_row)
+
+		// On Change rows, paint a brighter alpha-blended highlight over the
+		// exact byte range that differs from the other pane. Drawn AFTER the
+		// glyphs so it tints both background and text the same way the
+		// find/replace highlight overlay does.
+		if diff_row.kind == .Change {
+			byte_start: i32
+			byte_end:   i32
+			if pane_index == 0 {
+				byte_start = diff_row.left_change_start
+				byte_end   = diff_row.left_change_end
+			} else {
+				byte_start = diff_row.right_change_start
+				byte_end   = diff_row.right_change_end
+			}
+			if byte_end > byte_start {
+				render_diff_change_inline_highlight(editor, renderer, editor_pane, view_x, screen_y_position, gutter_width,
+					u32(doc_line_index), int(byte_start), int(byte_end))
+			}
+		}
 	}
+}
+
+// Alpha-blended bracket over the [byte_start, byte_end) range of `line_index`,
+// laid out the way the doc-line renderer above did it (same tab expansion,
+// same horizontal scroll offset, same gutter inset). Used by Change rows in
+// diff mode to point at the actual differing characters within a line that
+// the user can now see side-by-side with its counterpart.
+@(private="file")
+render_diff_change_inline_highlight :: proc(
+	editor: ^Editor, renderer: ^sdl3.Renderer, editor_pane: ^EditorPane,
+	view_x, screen_y, gutter_width: i32,
+	line_index: u32, byte_start, byte_end: int,
+) {
+	line_text := document.document_get_line(&editor_pane.document, line_index, context.temp_allocator)
+	clamped_start := byte_start
+	clamped_end   := byte_end
+	if clamped_start < 0 { clamped_start = 0 }
+	if clamped_end > len(line_text) { clamped_end = len(line_text) }
+	if clamped_end <= clamped_start { return }
+
+	_, byte_to_visual_column := build_line_display(line_text)
+
+	start_visual_column := i32(byte_to_visual_column[clamped_start])
+	end_visual_column   := i32(byte_to_visual_column[clamped_end])
+	if end_visual_column <= start_visual_column { return }
+
+	// Diff mode disables horizontal scroll and wrap, so we don't need the
+	// scroll_x / wrap branches the regular highlight renderer carries.
+	text_origin_x := view_x + editor.padding_x + gutter_width
+	highlight_rectangle := sdl3.FRect{
+		f32(text_origin_x + start_visual_column * editor.character_width),
+		f32(screen_y),
+		f32((end_visual_column - start_visual_column) * editor.character_width),
+		f32(editor.line_height),
+	}
+
+	highlight_color := editor.diff_change_inline_highlight
+	sdl3.SetRenderDrawBlendMode(renderer, sdl3.BLENDMODE_BLEND)
+	sdl3.SetRenderDrawColorFloat(renderer, highlight_color.r, highlight_color.g, highlight_color.b, highlight_color.a)
+	sdl3.RenderFillRect(renderer, &highlight_rectangle)
+	sdl3.SetRenderDrawBlendMode(renderer, sdl3.BLENDMODE_NONE)
 }
 
 // Common path for laying out a single document line into a pane at the given

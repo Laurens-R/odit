@@ -6,7 +6,7 @@ package terminal
 PtyState :: struct {}
 
 @(private)
-pty_spawn    :: proc(terminal: ^Terminal, columns, rows: i32) -> bool { return false }
+pty_spawn    :: proc(terminal: ^Terminal, columns, rows: i32, working_directory: string = "") -> bool { return false }
 @(private)
 pty_close    :: proc(terminal: ^Terminal) {}
 @(private)

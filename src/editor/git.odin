@@ -30,7 +30,7 @@ git_available_state :: enum {
 @(private="file")
 git_availability: git_available_state = .Unchecked
 
-@(private="file")
+@(private)
 git_is_available :: proc() -> bool {
 	switch git_availability {
 	case .Available: return true

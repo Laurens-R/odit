@@ -114,7 +114,12 @@ Terminal :: struct {
 // the shell hasn't explicitly colored via SGR — pass the editor's palette so
 // plain shell output blends with the surrounding UI. The xterm 256-color
 // palette is still initialized and used for SGR-styled cells.
-terminal_new :: proc(initial_rows, initial_columns: i32, default_foreground: Color, default_background: Color) -> ^Terminal {
+//
+// `working_directory` is the cwd the shell should launch in. Pass "" to
+// inherit the parent process's cwd; otherwise it must be an absolute path
+// (no expansion is performed here). Used by the editor to anchor the shell
+// at the project root when one is set.
+terminal_new :: proc(initial_rows, initial_columns: i32, default_foreground: Color, default_background: Color, working_directory: string = "") -> ^Terminal {
 	resolved_rows := initial_rows;    if resolved_rows    < 4  { resolved_rows    = DEFAULT_ROW_COUNT }
 	resolved_columns := initial_columns; if resolved_columns < 10 { resolved_columns = DEFAULT_COLUMN_COUNT }
 
@@ -127,7 +132,7 @@ terminal_new :: proc(initial_rows, initial_columns: i32, default_foreground: Col
 	terminal.screen.default_background_color = default_background
 	screen_init(&terminal.screen, resolved_columns, resolved_rows)
 
-	if !pty_spawn(terminal, resolved_columns, resolved_rows) {
+	if !pty_spawn(terminal, resolved_columns, resolved_rows, working_directory) {
 		screen_destroy(&terminal.screen)
 		free(terminal)
 		return nil

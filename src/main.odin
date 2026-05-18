@@ -120,7 +120,9 @@ main :: proc() {
 			case .QUIT:
 				is_running = false
 			case .KEY_DOWN:
-				if sdl_event.key.key == sdl3.K_ESCAPE && !editor.editor_is_modal_open(&editor_state) {
+				key_modifiers := sdl_event.key.mod
+				ctrl_held := .LCTRL in key_modifiers || .RCTRL in key_modifiers
+				if ctrl_held && sdl_event.key.key == sdl3.K_Q {
 					is_running = false
 				} else {
 					editor.editor_handle_event(&editor_state, &sdl_event)

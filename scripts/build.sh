@@ -41,17 +41,34 @@ mkdir -p "$output_directory"
 echo "==> odin build src -target:$odin_target ${build_flags[*]} -out:$output_binary"
 odin build src "-target:$odin_target" "${build_flags[@]}" "-out:$output_binary"
 
+copy_if_changed() {
+    local source="$1"
+    local destination_directory="$2"
+    local destination="$destination_directory/$(basename "$source")"
+
+    if [ -f "$destination" ] && [ ! "$source" -nt "$destination" ]; then
+        local source_size destination_size
+        source_size=$(wc -c < "$source")
+        destination_size=$(wc -c < "$destination")
+        if [ "$source_size" = "$destination_size" ]; then
+            echo "    up-to-date: $(basename "$source")"
+            return
+        fi
+    fi
+
+    cp -f "$source" "$destination"
+    echo "    staged: $(basename "$source")"
+}
+
 vendor_platform_directory="vendor/$target"
 if [ -d "$vendor_platform_directory" ]; then
     while IFS= read -r -d '' vendor_file; do
-        cp -f "$vendor_file" "$output_directory/"
-        echo "    staged: $(basename "$vendor_file")"
+        copy_if_changed "$vendor_file" "$output_directory"
     done < <(find "$vendor_platform_directory" -maxdepth 1 -type f ! -name 'README.md' -print0)
 fi
 
 if [ -f vendor/font.ttf ]; then
-    cp -f vendor/font.ttf "$output_directory/"
-    echo "    staged: font.ttf"
+    copy_if_changed "vendor/font.ttf" "$output_directory"
 fi
 
 echo "==> build complete: $output_binary"

@@ -30,6 +30,9 @@ editing_items := [?]HelpItem{
 	{"Delete",        "Forward delete / selection"},
 	{"Tab",           "Insert four spaces"},
 	{"Enter",         "Insert newline"},
+	{"Ctrl+S",        "Save (prompts for path if untitled)"},
+	{"Ctrl+Shift+S",  "Save As (always prompts)"},
+	{"Ctrl+F4",       "Close current file (prompts if unsaved)"},
 }
 
 @(private="file")
@@ -55,11 +58,28 @@ view_items := [?]HelpItem{
 }
 
 @(private="file")
+find_items := [?]HelpItem{
+	{"Ctrl+F",        "Open find bar (wildcards * and ? supported)"},
+	{"Up / Down",     "In find: previous / next match"},
+	{"Enter",         "In find: next match (Shift+Enter: previous)"},
+	{"Esc",           "In find: close the bar"},
+	{"Ctrl+Shift+F",  "Find in files (recursive search dialog)"},
+	{"Ctrl+R",        "Open find-and-replace (live preview)"},
+	{"Ctrl+Shift+R",  "Replace in files (recursive, on-disk)"},
+	{"Tab",           "In replace: swap between Find and Replace inputs"},
+	{"Enter",         "In replace: commit the replacement"},
+	{"Esc",           "In replace: cancel and revert"},
+	{"Ctrl+Z",        "Undo a committed replace in one step"},
+}
+
+@(private="file")
 other_items := [?]HelpItem{
 	{"F1",            "Toggle this help"},
 	{"F2",            "Open file browser"},
+	{"F3",            "Open git history for the active file"},
 	{"F3",            "In file browser: toggle flat (recursive) view"},
 	{"F6",            "Open symbol picker (jump to function / type / etc.)"},
+	{"Ctrl+P",        "In file browser: set current directory as project root"},
 	{"Ctrl+R",        "In file browser: rename the highlighted entry"},
 	{"Ctrl+N",        "In file browser: create a new empty file"},
 	{"Ctrl+Z",        "In file browser: undo the last rename / create"},
@@ -67,7 +87,8 @@ other_items := [?]HelpItem{
 	{"Shift+Enter",   "In file browser: open file in second pane (split)"},
 	{"Ctrl+Tab",      "Swap focus between split panes"},
 	{"Mouse click",   "Click in a pane to focus it"},
-	{"Esc",           "Close dialog / quit when no dialog open"},
+	{"Esc",           "Close dialog / find bar"},
+	{"Ctrl+Q",        "Quit"},
 }
 
 @(private="file")
@@ -76,6 +97,7 @@ help_sections := [?]HelpSection{
 	{title = "NAVIGATION", items = navigation_items[:]},
 	{title = "SELECTION",  items = selection_items[:]},
 	{title = "VIEW",       items = view_items[:]},
+	{title = "FIND",       items = find_items[:]},
 	{title = "OTHER",      items = other_items[:]},
 }
 

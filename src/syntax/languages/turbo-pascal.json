@@ -1,0 +1,244 @@
+{
+  "name": "Turbo Pascal",
+  "extensions": [
+    "tp",
+    "tpu"
+  ],
+  "line_comment": "",
+  "block_comment_start": "{",
+  "block_comment_end": "}",
+  "preprocessor_prefix": "",
+  "keywords": [
+    "and",
+    "array",
+    "asm",
+    "begin",
+    "case",
+    "const",
+    "constructor",
+    "destructor",
+    "div",
+    "do",
+    "downto",
+    "else",
+    "end",
+    "file",
+    "for",
+    "function",
+    "goto",
+    "if",
+    "implementation",
+    "in",
+    "inline",
+    "interface",
+    "label",
+    "mod",
+    "nil",
+    "not",
+    "object",
+    "of",
+    "or",
+    "packed",
+    "private",
+    "procedure",
+    "program",
+    "public",
+    "record",
+    "repeat",
+    "set",
+    "shl",
+    "shr",
+    "string",
+    "then",
+    "to",
+    "type",
+    "unit",
+    "until",
+    "uses",
+    "var",
+    "virtual",
+    "while",
+    "with",
+    "xor",
+    "absolute",
+    "external",
+    "forward",
+    "interrupt",
+    "near",
+    "far",
+    "assembler",
+    "true",
+    "false",
+    "And",
+    "Array",
+    "Asm",
+    "Begin",
+    "Case",
+    "Const",
+    "Constructor",
+    "Destructor",
+    "Div",
+    "Do",
+    "Downto",
+    "Else",
+    "End",
+    "File",
+    "For",
+    "Function",
+    "Goto",
+    "If",
+    "Implementation",
+    "In",
+    "Inline",
+    "Interface",
+    "Label",
+    "Mod",
+    "Nil",
+    "Not",
+    "Object",
+    "Of",
+    "Or",
+    "Packed",
+    "Private",
+    "Procedure",
+    "Program",
+    "Public",
+    "Record",
+    "Repeat",
+    "Set",
+    "Shl",
+    "Shr",
+    "String",
+    "Then",
+    "To",
+    "Type",
+    "Unit",
+    "Until",
+    "Uses",
+    "Var",
+    "Virtual",
+    "While",
+    "With",
+    "Xor",
+    "True",
+    "False"
+  ],
+  "types": [
+    "Integer",
+    "ShortInt",
+    "LongInt",
+    "Byte",
+    "Word",
+    "Real",
+    "Single",
+    "Double",
+    "Extended",
+    "Comp",
+    "Boolean",
+    "Char",
+    "String",
+    "Pointer",
+    "Text",
+    "PChar",
+    "integer",
+    "shortint",
+    "longint",
+    "byte",
+    "word",
+    "real",
+    "single",
+    "double",
+    "extended",
+    "comp",
+    "boolean",
+    "char",
+    "pointer",
+    "text"
+  ],
+  "scope_start": [
+    "begin",
+    "record",
+    "object",
+    "case",
+    "asm",
+    "Begin",
+    "Record",
+    "Object",
+    "Case",
+    "Asm"
+  ],
+  "scope_end": [
+    "end",
+    "End"
+  ],
+  "symbol_patterns": [
+    {
+      "pattern": "{NOTHING} procedure {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} function {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} constructor {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} destructor {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} Procedure {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} Function {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} Constructor {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} Destructor {NAME}",
+      "kind": "Function"
+    },
+    {
+      "pattern": "{NOTHING} {NAME} = record",
+      "kind": "Type"
+    },
+    {
+      "pattern": "{NOTHING} {NAME} = object",
+      "kind": "Type"
+    },
+    {
+      "pattern": "{NOTHING} {NAME} = packed",
+      "kind": "Type"
+    },
+    {
+      "pattern": "{NOTHING} {NAME} = Record",
+      "kind": "Type"
+    },
+    {
+      "pattern": "{NOTHING} {NAME} = Object",
+      "kind": "Type"
+    },
+    {
+      "pattern": "{NOTHING} unit {NAME}",
+      "kind": "Module"
+    },
+    {
+      "pattern": "{NOTHING} Unit {NAME}",
+      "kind": "Module"
+    },
+    {
+      "pattern": "{NOTHING} program {NAME}",
+      "kind": "Module"
+    },
+    {
+      "pattern": "{NOTHING} Program {NAME}",
+      "kind": "Module"
+    }
+  ]
+}

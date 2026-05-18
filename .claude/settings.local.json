@@ -14,7 +14,14 @@
       "PowerShell(Test-Path D:\\\\odit\\\\odit_new.exe; \\(Get-Item D:\\\\odit\\\\odit_new.exe -ErrorAction SilentlyContinue\\).Length)",
       "PowerShell(Get-ChildItem D:\\\\odit -Force | Where-Object { $_.Name -in '.vscode','vendor','out','SDL3.dll','SDL3_ttf.dll','ols.json','font.ttf','odit.exe','odit.pdb','src.exe','test2.txt','src','.git','.gitignore' } | Select-Object Name,@{N='Type';E={if\\($_.PSIsContainer\\){'dir'}else{'file'}}},@{N='Size';E={$_.Length}})",
       "PowerShell(Move-Item *)",
-      "PowerShell(powershell -NoProfile -ExecutionPolicy Bypass -File D:\\\\odit\\\\scripts\\\\build.ps1 -Target windows -Config debug 2>&1; \"EXIT=$LASTEXITCODE\")"
+      "PowerShell(powershell -NoProfile -ExecutionPolicy Bypass -File D:\\\\odit\\\\scripts\\\\build.ps1 -Target windows -Config debug 2>&1; \"EXIT=$LASTEXITCODE\")",
+      "Bash(pwsh -NoProfile -File scripts/build.ps1 -Target windows -Config debug)",
+      "Bash(Select-Object -Last 60)",
+      "PowerShell(& \"scripts/build.ps1\" -Target windows -Config debug 2>&1 | Select-Object -Last 80)",
+      "PowerShell(& \"scripts/build.ps1\" -Target windows -Config debug 2>&1 | Select-Object -Last 20)",
+      "PowerShell(& \"scripts/build.ps1\" -Target windows -Config debug 2>&1 | Select-Object -Last 60)",
+      "PowerShell(& \"scripts/build.ps1\" -Target windows -Config debug 2>&1 | Select-Object -Last 30)",
+      "Bash(where odin *)"
     ]
   }
 }

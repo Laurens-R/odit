@@ -20,14 +20,16 @@ DocumentBuffer :: struct {
 EditKind :: enum {
 	Insert,
 	Delete,
+	Compound, // children form an atomic group — undo/redo replays them as one
 }
 
 EditOperation :: struct {
-	kind:   EditKind,
-	offset: u32,
-	length: u32,    // length of the inserted or deleted text
-	text:   string, // for Delete: the deleted text (needed to redo insert on undo)
-	                // for Insert: the inserted text (needed to redo delete on undo)
+	kind:     EditKind,
+	offset:   u32,
+	length:   u32,    // length of the inserted or deleted text
+	text:     string, // for Delete: the deleted text (needed to redo insert on undo)
+	                  // for Insert: the inserted text (needed to redo delete on undo)
+	children: []EditOperation, // populated only for Compound; nil otherwise
 }
 
 UndoStack :: struct {
@@ -77,13 +79,27 @@ document_init :: proc(document: ^Document, initial_text: string) {
 
 document_destroy :: proc(document: ^Document) {
 	piecetree_destroy(&document.piece_tree)
-	// Free stored text in edit operations
 	for &edit_operation in document.undo_stack.operations {
-		if len(edit_operation.text) > 0 {
-			delete(edit_operation.text)
-		}
+		edit_operation_destroy(&edit_operation)
 	}
 	delete(document.undo_stack.operations)
+}
+
+// Recursively free an EditOperation's owned memory (the `text` string and any
+// Compound `children`). Safe to call on a zero-value EditOperation.
+@(private="file")
+edit_operation_destroy :: proc(edit_operation: ^EditOperation) {
+	if len(edit_operation.text) > 0 {
+		delete(edit_operation.text)
+		edit_operation.text = ""
+	}
+	if edit_operation.children != nil {
+		for &child in edit_operation.children {
+			edit_operation_destroy(&child)
+		}
+		delete(edit_operation.children)
+		edit_operation.children = nil
+	}
 }
 
 // --- Document editing API ---
@@ -147,18 +163,7 @@ document_undo :: proc(document: ^Document) -> (cursor_offset: u32, success: bool
 
 	document.undo_stack.current_position -= 1
 	edit_operation := &document.undo_stack.operations[document.undo_stack.current_position]
-
-	switch edit_operation.kind {
-	case .Insert:
-		// Undo an insert = delete the inserted text
-		piecetree_delete(&document.piece_tree, edit_operation.offset, edit_operation.length)
-		cursor_offset = edit_operation.offset
-	case .Delete:
-		// Undo a delete = re-insert the deleted text
-		piecetree_insert(&document.piece_tree, edit_operation.offset, edit_operation.text)
-		cursor_offset = edit_operation.offset + edit_operation.length
-	}
-
+	cursor_offset = apply_undo_operation(document, edit_operation)
 	document.has_unsaved_changes = true
 	success = true
 	return
@@ -173,21 +178,106 @@ document_redo :: proc(document: ^Document) -> (cursor_offset: u32, success: bool
 
 	edit_operation := &document.undo_stack.operations[document.undo_stack.current_position]
 	document.undo_stack.current_position += 1
-
-	switch edit_operation.kind {
-	case .Insert:
-		// Redo an insert = insert again
-		piecetree_insert(&document.piece_tree, edit_operation.offset, edit_operation.text)
-		cursor_offset = edit_operation.offset + edit_operation.length
-	case .Delete:
-		// Redo a delete = delete again
-		piecetree_delete(&document.piece_tree, edit_operation.offset, edit_operation.length)
-		cursor_offset = edit_operation.offset
-	}
-
+	cursor_offset = apply_redo_operation(document, edit_operation)
 	document.has_unsaved_changes = true
 	success = true
 	return
+}
+
+// Replay `edit_operation` in reverse so the doc returns to its pre-op state.
+// Compound entries recurse into their children in reverse order so the partial
+// piecetree state seen at each step matches the order edits were originally
+// applied (last child first).
+@(private="file")
+apply_undo_operation :: proc(document: ^Document, edit_operation: ^EditOperation) -> (cursor_offset: u32) {
+	switch edit_operation.kind {
+	case .Insert:
+		piecetree_delete(&document.piece_tree, edit_operation.offset, edit_operation.length)
+		cursor_offset = edit_operation.offset
+	case .Delete:
+		piecetree_insert(&document.piece_tree, edit_operation.offset, edit_operation.text)
+		cursor_offset = edit_operation.offset + edit_operation.length
+	case .Compound:
+		for child_index := len(edit_operation.children) - 1; child_index >= 0; child_index -= 1 {
+			cursor_offset = apply_undo_operation(document, &edit_operation.children[child_index])
+		}
+	}
+	return
+}
+
+@(private="file")
+apply_redo_operation :: proc(document: ^Document, edit_operation: ^EditOperation) -> (cursor_offset: u32) {
+	switch edit_operation.kind {
+	case .Insert:
+		piecetree_insert(&document.piece_tree, edit_operation.offset, edit_operation.text)
+		cursor_offset = edit_operation.offset + edit_operation.length
+	case .Delete:
+		piecetree_delete(&document.piece_tree, edit_operation.offset, edit_operation.length)
+		cursor_offset = edit_operation.offset
+	case .Compound:
+		for child_index in 0..<len(edit_operation.children) {
+			cursor_offset = apply_redo_operation(document, &edit_operation.children[child_index])
+		}
+	}
+	return
+}
+
+// --- Compound edits (transactions) ----------------------------------------
+
+// Snapshot the current undo position. Pair with `document_end_compound` to
+// collapse every Insert/Delete recorded between the two calls into a single
+// Compound undo entry, so the user's Ctrl+Z reverts the whole transaction at
+// once. The interactive Replace bar uses this for its live-preview flow.
+document_begin_compound :: proc(document: ^Document) -> (snapshot_position: int) {
+	return document.undo_stack.current_position
+}
+
+// Coalesce all entries recorded between `snapshot_position` and the current
+// position into one Compound EditOperation. Caller is responsible for not
+// rewinding `current_position` (via undo) between begin/end — that would leave
+// the snapshot pointing inside live entries.
+document_end_compound :: proc(document: ^Document, snapshot_position: int) {
+	current_position := document.undo_stack.current_position
+	if snapshot_position < 0 || snapshot_position >= current_position { return }
+	operation_count := current_position - snapshot_position
+	if operation_count == 0 { return }
+	if operation_count == 1 {
+		// Single op — wrapping it in a Compound would just add memory churn
+		// for no behavior change. Leave the stack alone.
+		return
+	}
+
+	// Move the existing entries into a `children` slice owned by the new
+	// Compound entry. Their `text` allocations move with them; we must not
+	// double-free, so we resize down before pushing the Compound.
+	children := make([]EditOperation, operation_count)
+	for child_index in 0..<operation_count {
+		children[child_index] = document.undo_stack.operations[snapshot_position + child_index]
+	}
+	resize(&document.undo_stack.operations, snapshot_position)
+
+	compound := EditOperation{
+		kind     = .Compound,
+		children = children,
+	}
+	append(&document.undo_stack.operations, compound)
+	document.undo_stack.current_position = snapshot_position + 1
+}
+
+// Rewind the doc back to `target_position` AND drop the rolled-back entries
+// from the stack (so they can't be redone). Used by the Replace bar's cancel
+// path to throw away the in-progress preview.
+document_pop_to_position :: proc(document: ^Document, target_position: int) {
+	if target_position < 0 { return }
+	for document.undo_stack.current_position > target_position {
+		document.undo_stack.current_position -= 1
+		edit_operation := &document.undo_stack.operations[document.undo_stack.current_position]
+		_ = apply_undo_operation(document, edit_operation)
+	}
+	for operation_index := target_position; operation_index < len(document.undo_stack.operations); operation_index += 1 {
+		edit_operation_destroy(&document.undo_stack.operations[operation_index])
+	}
+	resize(&document.undo_stack.operations, target_position)
 }
 
 // --- Document query API (delegates to PieceTree) ---
@@ -241,13 +331,9 @@ document_is_dirty :: proc(document: ^Document) -> bool {
 
 @(private="file")
 undo_truncate_redo :: proc(document: ^Document) {
-	// If we're not at the end, discard all operations after current position
 	current_position := document.undo_stack.current_position
 	for operation_index := current_position; operation_index < len(document.undo_stack.operations); operation_index += 1 {
-		edit_operation := &document.undo_stack.operations[operation_index]
-		if len(edit_operation.text) > 0 {
-			delete(edit_operation.text)
-		}
+		edit_operation_destroy(&document.undo_stack.operations[operation_index])
 	}
 	resize(&document.undo_stack.operations, current_position)
 }

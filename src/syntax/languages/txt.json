@@ -1,0 +1,15 @@
+{
+  "name": "Plain Text",
+  "extensions": [
+    "txt",
+    "text",
+    "log"
+  ],
+  "line_comment": "",
+  "block_comment_start": "",
+  "block_comment_end": "",
+  "preprocessor_prefix": "",
+  "keywords": [],
+  "types": [],
+  "symbol_patterns": []
+}

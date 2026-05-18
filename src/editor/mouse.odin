@@ -96,6 +96,25 @@ editor_mouse_down :: proc(editor: ^Editor, mouse_x: f32, mouse_y: f32, shift_hel
 		return
 	}
 
+	// Find bar swallows clicks that land on it (so the user can poke at it
+	// without dismissing find). A click anywhere else closes find and falls
+	// through to normal click handling so the cursor still lands where they
+	// clicked.
+	if find_active(editor) {
+		if ui.point_in_rect(editor.find.bar_rectangle, mouse_x, mouse_y) { return }
+		find_close(editor)
+	}
+	// Replace bar: a click inside the bar focuses whichever input field was
+	// hit. A click outside cancels the in-progress preview and falls through
+	// to normal cursor placement.
+	if replace_active(editor) {
+		if ui.point_in_rect(editor.replace.bar_rectangle, mouse_x, mouse_y) {
+			replace_handle_bar_click(editor, mouse_x, mouse_y)
+			return
+		}
+		replace_close(editor, false)
+	}
+
 	pane_hit_index := editor_pane_at(editor, mouse_x, mouse_y)
 	if pane_hit_index < 0 { return }
 	editor.active_pane_index = pane_hit_index
