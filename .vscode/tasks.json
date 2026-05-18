@@ -2,53 +2,261 @@
 	"version": "2.0.0",
 	"tasks": [
 		{
-			"label": "odin: build (debug)",
-			"type": "process",
-			"command": "odin",
-			"args": [
-				"build",
-				"src",
-				"-debug",
-				"-out:odit.exe"
-			],
-			"options": {
-				"cwd": "${workspaceFolder}"
+			"label": "Build: Windows (debug)",
+			"type": "shell",
+			"windows": {
+				"command": "powershell",
+				"args": [
+					"-NoProfile",
+					"-ExecutionPolicy", "Bypass",
+					"-File", "scripts/build.ps1",
+					"-Target", "windows",
+					"-Config", "debug"
+				]
 			},
-			"group": {
-				"kind": "build",
-				"isDefault": true
+			"linux": {
+				"command": "bash",
+				"args": ["scripts/build.sh", "windows", "debug"]
 			},
+			"osx": {
+				"command": "bash",
+				"args": ["scripts/build.sh", "windows", "debug"]
+			},
+			"options": { "cwd": "${workspaceFolder}" },
+			"group": { "kind": "build", "isDefault": true },
 			"problemMatcher": [
 				{
 					"owner": "odin",
-					"fileLocation": [
-						"relative",
-						"${workspaceFolder}"
-					],
+					"fileLocation": ["relative", "${workspaceFolder}"],
 					"pattern": {
 						"regexp": "^(.*?)\\((\\d+):(\\d+)\\)\\s+(Error|Warning|Syntax Error):\\s+(.*)$",
-						"file": 1,
-						"line": 2,
-						"column": 3,
-						"severity": 4,
-						"message": 5
+						"file": 1, "line": 2, "column": 3, "severity": 4, "message": 5
 					}
 				}
 			]
 		},
 		{
-			"label": "odin: run",
-			"type": "process",
-			"command": "odin",
-			"args": [
-				"run",
-				"src",
-				"-debug",
-				"-out:odit.exe"
-			],
-			"options": {
-				"cwd": "${workspaceFolder}"
+			"label": "Build: Windows (release)",
+			"type": "shell",
+			"windows": {
+				"command": "powershell",
+				"args": [
+					"-NoProfile",
+					"-ExecutionPolicy", "Bypass",
+					"-File", "scripts/build.ps1",
+					"-Target", "windows",
+					"-Config", "release"
+				]
 			},
+			"linux": {
+				"command": "bash",
+				"args": ["scripts/build.sh", "windows", "release"]
+			},
+			"osx": {
+				"command": "bash",
+				"args": ["scripts/build.sh", "windows", "release"]
+			},
+			"options": { "cwd": "${workspaceFolder}" },
+			"group": "build",
+			"problemMatcher": [
+				{
+					"owner": "odin",
+					"fileLocation": ["relative", "${workspaceFolder}"],
+					"pattern": {
+						"regexp": "^(.*?)\\((\\d+):(\\d+)\\)\\s+(Error|Warning|Syntax Error):\\s+(.*)$",
+						"file": 1, "line": 2, "column": 3, "severity": 4, "message": 5
+					}
+				}
+			]
+		},
+		{
+			"label": "Build: Linux (debug)",
+			"type": "shell",
+			"windows": {
+				"command": "powershell",
+				"args": [
+					"-NoProfile",
+					"-ExecutionPolicy", "Bypass",
+					"-File", "scripts/build.ps1",
+					"-Target", "linux",
+					"-Config", "debug"
+				]
+			},
+			"linux": {
+				"command": "bash",
+				"args": ["scripts/build.sh", "linux", "debug"]
+			},
+			"osx": {
+				"command": "bash",
+				"args": ["scripts/build.sh", "linux", "debug"]
+			},
+			"options": { "cwd": "${workspaceFolder}" },
+			"group": "build",
+			"problemMatcher": [
+				{
+					"owner": "odin",
+					"fileLocation": ["relative", "${workspaceFolder}"],
+					"pattern": {
+						"regexp": "^(.*?)\\((\\d+):(\\d+)\\)\\s+(Error|Warning|Syntax Error):\\s+(.*)$",
+						"file": 1, "line": 2, "column": 3, "severity": 4, "message": 5
+					}
+				}
+			]
+		},
+		{
+			"label": "Build: Linux (release)",
+			"type": "shell",
+			"windows": {
+				"command": "powershell",
+				"args": [
+					"-NoProfile",
+					"-ExecutionPolicy", "Bypass",
+					"-File", "scripts/build.ps1",
+					"-Target", "linux",
+					"-Config", "release"
+				]
+			},
+			"linux": {
+				"command": "bash",
+				"args": ["scripts/build.sh", "linux", "release"]
+			},
+			"osx": {
+				"command": "bash",
+				"args": ["scripts/build.sh", "linux", "release"]
+			},
+			"options": { "cwd": "${workspaceFolder}" },
+			"group": "build",
+			"problemMatcher": [
+				{
+					"owner": "odin",
+					"fileLocation": ["relative", "${workspaceFolder}"],
+					"pattern": {
+						"regexp": "^(.*?)\\((\\d+):(\\d+)\\)\\s+(Error|Warning|Syntax Error):\\s+(.*)$",
+						"file": 1, "line": 2, "column": 3, "severity": 4, "message": 5
+					}
+				}
+			]
+		},
+		{
+			"label": "Build: macOS (debug)",
+			"type": "shell",
+			"windows": {
+				"command": "powershell",
+				"args": [
+					"-NoProfile",
+					"-ExecutionPolicy", "Bypass",
+					"-File", "scripts/build.ps1",
+					"-Target", "macos",
+					"-Config", "debug"
+				]
+			},
+			"linux": {
+				"command": "bash",
+				"args": ["scripts/build.sh", "macos", "debug"]
+			},
+			"osx": {
+				"command": "bash",
+				"args": ["scripts/build.sh", "macos", "debug"]
+			},
+			"options": { "cwd": "${workspaceFolder}" },
+			"group": "build",
+			"problemMatcher": [
+				{
+					"owner": "odin",
+					"fileLocation": ["relative", "${workspaceFolder}"],
+					"pattern": {
+						"regexp": "^(.*?)\\((\\d+):(\\d+)\\)\\s+(Error|Warning|Syntax Error):\\s+(.*)$",
+						"file": 1, "line": 2, "column": 3, "severity": 4, "message": 5
+					}
+				}
+			]
+		},
+		{
+			"label": "Build: macOS (release)",
+			"type": "shell",
+			"windows": {
+				"command": "powershell",
+				"args": [
+					"-NoProfile",
+					"-ExecutionPolicy", "Bypass",
+					"-File", "scripts/build.ps1",
+					"-Target", "macos",
+					"-Config", "release"
+				]
+			},
+			"linux": {
+				"command": "bash",
+				"args": ["scripts/build.sh", "macos", "release"]
+			},
+			"osx": {
+				"command": "bash",
+				"args": ["scripts/build.sh", "macos", "release"]
+			},
+			"options": { "cwd": "${workspaceFolder}" },
+			"group": "build",
+			"problemMatcher": [
+				{
+					"owner": "odin",
+					"fileLocation": ["relative", "${workspaceFolder}"],
+					"pattern": {
+						"regexp": "^(.*?)\\((\\d+):(\\d+)\\)\\s+(Error|Warning|Syntax Error):\\s+(.*)$",
+						"file": 1, "line": 2, "column": 3, "severity": 4, "message": 5
+					}
+				}
+			]
+		},
+		{
+			"label": "Run: Windows (debug)",
+			"type": "shell",
+			"windows": {
+				"command": "${workspaceFolder}\\out\\windows\\debug\\odit.exe"
+			},
+			"linux": {
+				"command": "${workspaceFolder}/out/windows/debug/odit.exe"
+			},
+			"osx": {
+				"command": "${workspaceFolder}/out/windows/debug/odit.exe"
+			},
+			"options": { "cwd": "${workspaceFolder}/out/windows/debug" },
+			"dependsOn": ["Build: Windows (debug)"],
+			"problemMatcher": []
+		},
+		{
+			"label": "Run: Windows (release)",
+			"type": "shell",
+			"windows": {
+				"command": "${workspaceFolder}\\out\\windows\\release\\odit.exe"
+			},
+			"linux": {
+				"command": "${workspaceFolder}/out/windows/release/odit.exe"
+			},
+			"osx": {
+				"command": "${workspaceFolder}/out/windows/release/odit.exe"
+			},
+			"options": { "cwd": "${workspaceFolder}/out/windows/release" },
+			"dependsOn": ["Build: Windows (release)"],
+			"problemMatcher": []
+		},
+		{
+			"label": "Clean",
+			"type": "shell",
+			"windows": {
+				"command": "powershell",
+				"args": [
+					"-NoProfile",
+					"-Command",
+					"Remove-Item -Recurse -Force -ErrorAction SilentlyContinue out"
+				]
+			},
+			"linux": {
+				"command": "rm",
+				"args": ["-rf", "out"]
+			},
+			"osx": {
+				"command": "rm",
+				"args": ["-rf", "out"]
+			},
+			"options": { "cwd": "${workspaceFolder}" },
 			"problemMatcher": []
 		}
 	]

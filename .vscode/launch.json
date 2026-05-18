@@ -5,11 +5,21 @@
 			"name": "Debug odit (Windows)",
 			"type": "lldb",
 			"request": "launch",
-			"program": "${workspaceFolder}\\odit.exe",
+			"program": "${workspaceFolder}\\out\\windows\\debug\\odit.exe",
 			"args": [],
-			"cwd": "${workspaceFolder}",
+			"cwd": "${workspaceFolder}\\out\\windows\\debug",
 			"console": "integratedTerminal",
-			"preLaunchTask": "odin: build (debug)"
+			"preLaunchTask": "Build: Windows (debug)"
+		},
+		{
+			"name": "Run odit (Windows release)",
+			"type": "lldb",
+			"request": "launch",
+			"program": "${workspaceFolder}\\out\\windows\\release\\odit.exe",
+			"args": [],
+			"cwd": "${workspaceFolder}\\out\\windows\\release",
+			"console": "integratedTerminal",
+			"preLaunchTask": "Build: Windows (release)"
 		}
 	]
 }
