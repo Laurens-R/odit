@@ -59,6 +59,7 @@ LANGUAGE_BLOBS := [?]string{
 	#load("languages/asm-att.json",      string),
 	#load("languages/delphi.json",       string),
 	#load("languages/turbo-pascal.json", string),
+	#load("languages/markdown.json",     string),
 	#load("languages/txt.json",          string),
 }
 

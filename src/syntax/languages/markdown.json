@@ -1,0 +1,17 @@
+{
+  "name": "Markdown",
+  "extensions": [
+    "md",
+    "markdown",
+    "mdown",
+    "mkd",
+    "mkdn"
+  ],
+  "line_comment": "",
+  "block_comment_start": "<!--",
+  "block_comment_end": "-->",
+  "preprocessor_prefix": "#",
+  "keywords": [],
+  "types": [],
+  "symbol_patterns": []
+}
