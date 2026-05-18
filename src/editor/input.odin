@@ -127,6 +127,10 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 			git_history_dialog_open(editor)
 			return
 		}
+		if pressed_key == sdl3.K_F5 {
+			markdown_preview_open(editor)
+			return
+		}
 		if pressed_key == sdl3.K_F6 {
 			symbols_dialog_open(editor)
 			return
@@ -203,6 +207,8 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 			if content_value.terminal != nil {
 				terminal.terminal_handle_event(content_value.terminal, event)
 			}
+		case MarkdownPreviewPane:
+			markdown_preview_handle_key(editor, &content_value, event)
 		}
 
 	case .MOUSE_WHEEL:
@@ -223,6 +229,8 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 				} else {
 					editor_scroll(editor, -i32(event.wheel.y * 3))
 				}
+			case MarkdownPreviewPane:
+				markdown_preview_pane_scroll(editor, &content_value, -i32(event.wheel.y * 3))
 			}
 		}
 

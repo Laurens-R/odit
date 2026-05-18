@@ -78,6 +78,7 @@ other_items := [?]HelpItem{
 	{"F2",            "Open file browser"},
 	{"F3",            "Open git history for the active file"},
 	{"F3",            "In file browser: toggle flat (recursive) view"},
+	{"F5",            "Render markdown preview in the opposite pane"},
 	{"F6",            "Open symbol picker (jump to function / type / etc.)"},
 	{"Ctrl+P",        "In file browser: set current directory as project root"},
 	{"Ctrl+R",        "In file browser: rename the highlighted entry"},

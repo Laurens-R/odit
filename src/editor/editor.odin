@@ -104,6 +104,7 @@ TerminalPane :: struct {
 PaneContent :: union {
 	EditorPane,
 	TerminalPane,
+	MarkdownPreviewPane,
 }
 
 // A pane is a generic container that owns a screen rectangle and one piece of
@@ -266,6 +267,11 @@ Editor :: struct {
 	show_git_history:           bool,
 	git_history_dialog:         GitHistoryDialog,
 
+	// Fonts loaded lazily for the markdown preview pane. Proportional (Arial-
+	// like) for body / headings; monospace for inline code and code blocks.
+	// Loaded on the first F5 press, freed in `editor_destroy`.
+	markdown_fonts:             MarkdownFonts,
+
 	// Project root, set by Ctrl+P in the file browser. Owned absolute path;
 	// "" when unset. When set:
 	//   - The F2 browser defaults to it on next open if the cached cwd has
@@ -373,6 +379,7 @@ editor_destroy :: proc(editor: ^Editor) {
 	replace_in_files_destroy(&editor.replace_in_files)
 	save_as_dialog_destroy(&editor.save_as_dialog)
 	git_history_dialog_destroy(&editor.git_history_dialog)
+	markdown_fonts_destroy(&editor.markdown_fonts)
 	if len(editor.project_root) > 0 {
 		delete(editor.project_root)
 		editor.project_root = ""
@@ -417,6 +424,8 @@ pane_content_destroy :: proc(pane_content: ^PaneContent) {
 			terminal.terminal_destroy(content_value.terminal)
 			content_value.terminal = nil
 		}
+	case MarkdownPreviewPane:
+		markdown_preview_pane_destroy(&content_value)
 	}
 }
 

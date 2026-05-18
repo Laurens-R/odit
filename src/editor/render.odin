@@ -99,6 +99,8 @@ editor_update :: proc(editor: ^Editor, delta_time: f64) {
 						editor_mark_dirty(editor)
 					}
 				}
+			case MarkdownPreviewPane:
+				markdown_preview_pane_update(editor, &content_value, delta_time)
 			}
 		}
 	}
@@ -213,6 +215,8 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 				terminal.terminal_set_geometry(content_value.terminal, terminal_body_rectangle, editor.character_width, editor.line_height)
 				terminal.terminal_render(content_value.terminal, renderer, editor.font, editor.text_engine, &editor.text_cache)
 			}
+		case MarkdownPreviewPane:
+			markdown_preview_pane_render(editor, renderer, pane, &content_value, pane_is_active)
 		}
 	}
 
