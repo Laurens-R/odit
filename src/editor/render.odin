@@ -304,6 +304,8 @@ render_editor_pane :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pane, v
 	sdl3.SetRenderClipRect(renderer, nil)
 
 	// Scrollbar — content range and scroll value differ between modes.
+	// Width widens on hover / drag so it's actually grabbable; track + thumb
+	// rects come back from the painter so input handlers can hit-test them.
 	{
 		ui_ctx := ui.Context{
 			renderer    = renderer,
@@ -313,7 +315,6 @@ render_editor_pane :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pane, v
 			line_height = ed.line_height,
 		}
 		theme := ui.default_theme()
-		sb_x := view_x + view_w - 8
 
 		content_h, scroll_v: f32
 		if ed.diff_state.active {
@@ -323,7 +324,14 @@ render_editor_pane :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pane, v
 			content_h = f32(line_count) * f32(ed.line_height)
 			scroll_v  = v.scroll_y
 		}
-		ui.draw_scrollbar(&ui_ctx, sb_x, text_y, text_h, content_h, f32(text_h), scroll_v, theme)
+
+		sb_width: i32 = 6
+		if v.scrollbar.hovered || v.scrollbar.dragging { sb_width = 14 }
+		sb_x := view_x + view_w - sb_width - 2
+
+		track, thumb := ui.draw_scrollbar(&ui_ctx, sb_x, text_y, text_h, content_h, f32(text_h), scroll_v, sb_width, theme)
+		v.scrollbar.track_rect = track
+		v.scrollbar.thumb_rect = thumb
 	}
 }
 
@@ -486,7 +494,7 @@ render_doc_line_into :: proc(
 	is_active: bool, cursor_on_this_line: bool,
 ) {
 	line_idx := u32(doc_line)
-	line_text := document.document_get_line(&v.doc, line_idx)
+	line_text := document.document_get_line(&v.doc, line_idx, context.temp_allocator)
 	display, byte_to_col := build_line_display(line_text)
 
 	scroll_x_px := i32(v.scroll_x)
@@ -596,7 +604,7 @@ render_wrapped_doc_line :: proc(
 	is_active: bool, cursor_on_this_line: bool,
 ) -> i32 {
 	line_idx := u32(doc_line)
-	line_text := document.document_get_line(&v.doc, line_idx)
+	line_text := document.document_get_line(&v.doc, line_idx, context.temp_allocator)
 	display, byte_to_col := build_line_display(line_text)
 	display_cols := i32(len(display))
 	if display_cols == 0 { display_cols = 1 } // empty line still occupies one visual row

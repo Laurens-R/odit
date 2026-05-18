@@ -158,6 +158,13 @@ main :: proc() {
 			editor.editor_mark_clean(&ed)
 		}
 
+		// Release every per-frame temp_allocator alloc — line displays,
+		// syntax token buffers, scratch strings, etc. — before sleeping.
+		// Without this, the scratch arena keeps growing every frame the
+		// editor renders or the terminal drains output, eventually
+		// spilling into the heap as a permanent leak.
+		free_all(context.temp_allocator)
+
 		// Cap at ~60fps to avoid burning CPU
 		sdl3.Delay(16)
 	}

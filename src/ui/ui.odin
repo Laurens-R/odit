@@ -142,8 +142,8 @@ scroll_view_end :: proc(view: ScrollView, theme: Theme) {
 	sdl3.SetRenderClipRect(view.ctx.renderer, nil)
 
 	sb_x := i32(view.viewport.x + view.viewport.w) + 2
-	draw_scrollbar(view.ctx, sb_x, i32(view.viewport.y), i32(view.viewport.h),
-		f32(view.content_height), f32(view.viewport.h), f32(view.scroll_value), theme)
+	_, _ = draw_scrollbar(view.ctx, sb_x, i32(view.viewport.y), i32(view.viewport.h),
+		f32(view.content_height), f32(view.viewport.h), f32(view.scroll_value), 6, theme)
 }
 
 // Draw a vertical scrollbar (track + thumb) on the right edge of a content
@@ -151,18 +151,20 @@ scroll_view_end :: proc(view: ScrollView, theme: Theme) {
 // `track_h` is its height. `content_h` is the total scrollable content size;
 // `viewport_h` is the visible portion; `scroll` is the current scroll offset
 // from the top of the content. No-op if the content fits in the viewport.
-draw_scrollbar :: proc(ctx: ^Context, track_x, track_y, track_h: i32, content_h, viewport_h, scroll: f32, theme: Theme) {
+// Draw a vertical scrollbar inside `track_h` pixels starting at (track_x,
+// track_y). Returns the painted track and thumb rects so callers can use
+// them for hit-testing. Caller controls `width` so it can widen on hover.
+// Returns zero-rects (both width/height = 0) when the content fits in the
+// viewport — interactive code should treat that as "no scrollbar".
+draw_scrollbar :: proc(ctx: ^Context, track_x, track_y, track_h: i32, content_h, viewport_h, scroll: f32, width: i32, theme: Theme) -> (track_rect: sdl3.FRect, thumb_rect: sdl3.FRect) {
 	if content_h <= viewport_h { return }
 
-	width: i32 = 6
 	r := ctx.renderer
 
-	// Track
-	track := sdl3.FRect{f32(track_x), f32(track_y), f32(width), f32(track_h)}
+	track_rect = sdl3.FRect{f32(track_x), f32(track_y), f32(width), f32(track_h)}
 	sdl3.SetRenderDrawColorFloat(r, theme.title_bg.r, theme.title_bg.g, theme.title_bg.b, theme.title_bg.a)
-	sdl3.RenderFillRect(r, &track)
+	sdl3.RenderFillRect(r, &track_rect)
 
-	// Thumb
 	thumb_h := max(f32(20), f32(track_h) * viewport_h / content_h)
 	max_scroll := content_h - viewport_h
 	frac := scroll / max_scroll
@@ -170,9 +172,10 @@ draw_scrollbar :: proc(ctx: ^Context, track_x, track_y, track_h: i32, content_h,
 	if frac > 1 { frac = 1 }
 	thumb_y := f32(track_y) + (f32(track_h) - thumb_h) * frac
 
-	thumb := sdl3.FRect{f32(track_x) + 1, thumb_y, f32(width) - 2, thumb_h}
+	thumb_rect = sdl3.FRect{f32(track_x) + 1, thumb_y, f32(width) - 2, thumb_h}
 	sdl3.SetRenderDrawColorFloat(r, theme.accent_fg.r, theme.accent_fg.g, theme.accent_fg.b, theme.accent_fg.a)
-	sdl3.RenderFillRect(r, &thumb)
+	sdl3.RenderFillRect(r, &thumb_rect)
+	return
 }
 
 // Draw a single horizontal rule inside a content area — useful for separating

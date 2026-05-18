@@ -52,6 +52,13 @@ EditorPane :: struct {
 	// with scroll_x. Toggled by Ctrl+W.
 	wrap_mode:       bool,
 
+	// Interactive scrollbar state. The renderer writes the current
+	// `track_rect` / `thumb_rect` here every frame; mouse handlers in
+	// `mouse.odin` read those rects to hit-test hover and drag. `hovered`
+	// widens the next paint; `dragging` locks scroll updates onto the
+	// thumb under the cursor.
+	scrollbar:       ScrollbarState,
+
 	// Selection
 	sel_active:      bool,
 	sel_anchor:      u32, // byte offset of selection anchor (other end is cursor_offset)
@@ -65,6 +72,17 @@ EditorPane :: struct {
 	// auto-reanalyze pass in `editor_update`.
 	symbols_dirty:        bool,
 	last_analysis_time:   f64,
+}
+
+// Per-pane scrollbar interaction state. Track + thumb rects are rewritten
+// every frame by the renderer; the rest persists between frames so hover /
+// drag survive across event ticks.
+ScrollbarState :: struct {
+	track_rect: sdl3.FRect,
+	thumb_rect: sdl3.FRect,
+	hovered:    bool,
+	dragging:   bool,
+	drag_dy:    f32, // y-offset within the thumb at drag start
 }
 
 // A pane that hosts an embedded terminal emulator instead of a document.

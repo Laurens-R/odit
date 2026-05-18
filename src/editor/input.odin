@@ -158,6 +158,7 @@ editor_handle_event :: proc(ed: ^Editor, event: ^sdl3.Event) {
 
 	case .MOUSE_MOTION:
 		editor_update_cursor(ed, event.motion.x, event.motion.y)
+		editor_scrollbar_update_hover(ed, event.motion.x, event.motion.y)
 		editor_mouse_drag(ed, event.motion.x, event.motion.y)
 	}
 }
@@ -296,7 +297,7 @@ editor_handle_key :: proc(ed: ^Editor, event: ^sdl3.Event) {
 			v.cursor_offset = document.document_length(&v.doc)
 		} else {
 			line_start := document.document_line_start(&v.doc, v.cursor_line)
-			line_text := document.document_get_line(&v.doc, v.cursor_line)
+			line_text := document.document_get_line(&v.doc, v.cursor_line, context.temp_allocator)
 			v.cursor_offset = line_start + u32(len(line_text))
 		}
 		sync_cursor_from_offset(ed)

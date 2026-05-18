@@ -3,6 +3,7 @@ package editor
 import "vendor:sdl3"
 
 import "../document"
+import "../ui"
 
 // Set the OS cursor to `c` if it's not already the active one. Centralised so
 // hover, drag, and release paths don't fight each other over the cursor.
@@ -101,7 +102,83 @@ editor_mouse_down :: proc(editor: ^Editor, x: f32, y: f32, shift: bool) {
 	pane := &editor.panes[hit]
 	#partial switch &c in pane.content {
 	case EditorPane:
+		// Scrollbar takes priority over text selection — clicking the thumb
+		// (or anywhere on the track) latches a drag instead of moving the
+		// cursor. Track-but-not-thumb is a page-jump for now (sets target
+		// scroll, smooth animator handles the rest).
+		if scrollbar_thumb_hit(&c, x, y) {
+			c.scrollbar.dragging = true
+			c.scrollbar.drag_dy  = y - c.scrollbar.thumb_rect.y
+			return
+		}
+		if ui.point_in_rect(c.scrollbar.track_rect, x, y) {
+			scrollbar_jump_to(editor, &c, y)
+			c.scrollbar.dragging = true
+			// Center the thumb under the cursor for the rest of the drag.
+			c.scrollbar.drag_dy = c.scrollbar.thumb_rect.h / 2
+			return
+		}
 		editor_pane_mouse_down(editor, pane, &c, x, y, shift)
+	}
+}
+
+// Hit-test the scrollbar thumb. We pad the thumb a couple of pixels
+// horizontally so a hover near the edge still latches the drag.
+@(private="file")
+scrollbar_thumb_hit :: proc(ep: ^EditorPane, x, y: f32) -> bool {
+	t := ep.scrollbar.thumb_rect
+	if t.w <= 0 || t.h <= 0 { return false }
+	pad: f32 = 2
+	return x >= t.x - pad && x < t.x + t.w + pad &&
+	       y >= t.y       && y < t.y + t.h
+}
+
+// Translate a mouse-y on the track into a scroll value and apply it. Used
+// both by drag-motion and by track-click-to-jump.
+@(private="file")
+scrollbar_jump_to :: proc(ed: ^Editor, ep: ^EditorPane, mouse_y: f32) {
+	tr := ep.scrollbar.track_rect
+	th := ep.scrollbar.thumb_rect
+	if tr.h <= 0 || th.h <= 0 || ed.line_height == 0 { return }
+
+	travel := tr.h - th.h
+	target_thumb_y := clamp(mouse_y - ep.scrollbar.drag_dy, tr.y, tr.y + travel)
+	frac := f32(0)
+	if travel > 0 { frac = (target_thumb_y - tr.y) / travel }
+
+	line_count := f32(document.document_line_count(&ep.doc))
+
+	if ed.diff_state.active {
+		rows := f32(len(ed.diff_state.rows))
+		content_h  := rows * f32(ed.line_height)
+		viewport_h := f32(ep.visible_lines) * f32(ed.line_height)
+		max_scroll := max(f32(0), content_h - viewport_h)
+		ed.diff_state.scroll_y        = frac * max_scroll
+		ed.diff_state.scroll_y_target = ed.diff_state.scroll_y
+		return
+	}
+
+	content_h  := line_count * f32(ed.line_height)
+	viewport_h := f32(ep.visible_lines) * f32(ed.line_height)
+	max_scroll := max(f32(0), content_h - viewport_h)
+	ep.scroll_y        = frac * max_scroll
+	ep.scroll_y_target = ep.scroll_y
+	if ed.line_height > 0 { ep.scroll_line = u32(ep.scroll_y / f32(ed.line_height)) }
+}
+
+// Update the per-pane scrollbar hover flag from the current mouse position.
+// Called on every MOUSE_MOTION so the next frame paints a widened scrollbar
+// while the cursor is over it.
+@(private)
+editor_scrollbar_update_hover :: proc(ed: ^Editor, x, y: f32) {
+	for i in 0..<editor_visible_pane_count(ed) {
+		if ep := pane_as_editor(&ed.panes[i]); ep != nil {
+			over := ui.point_in_rect(ep.scrollbar.track_rect, x, y)
+			if over != ep.scrollbar.hovered {
+				ep.scrollbar.hovered = over
+				editor_mark_dirty(ed)
+			}
+		}
 	}
 }
 
@@ -145,6 +222,17 @@ editor_pane_mouse_down :: proc(editor: ^Editor, pane: ^Pane, editor_pane: ^Edito
 
 @(private)
 editor_mouse_drag :: proc(editor: ^Editor, x: f32, y: f32) {
+	// Scrollbar drag takes top priority — once latched, every motion event
+	// just maps to a new scroll position until the user releases the
+	// button.
+	for i in 0..<editor_visible_pane_count(editor) {
+		if ep := pane_as_editor(&editor.panes[i]); ep != nil && ep.scrollbar.dragging {
+			scrollbar_jump_to(editor, ep, y)
+			editor_mark_dirty(editor)
+			return
+		}
+	}
+
 	// Divider drag takes priority — once it's grabbed, the cursor owns the
 	// split position until release. Update `split_ratio` from the current
 	// mouse x; render's clamp keeps both panes above the usable minimum.
@@ -193,7 +281,8 @@ editor_mouse_up :: proc(ed: ^Editor, x, y: f32) {
 	for i in 0..<len(ed.panes) {
 		#partial switch &c in ed.panes[i].content {
 		case EditorPane:
-			c.mouse_dragging = false
+			c.mouse_dragging      = false
+			c.scrollbar.dragging  = false
 		}
 	}
 	// Update cursor based on the release position so it snaps back to the
@@ -224,7 +313,7 @@ screen_to_offset :: proc(ed: ^Editor, pane: ^Pane, v: ^EditorPane, x: f32, y: f3
 		col = (rel_x + ed.char_width / 2) / ed.char_width
 	}
 	line_start := document.document_line_start(&v.doc, target_line)
-	line_text := document.document_get_line(&v.doc, target_line)
+	line_text := document.document_get_line(&v.doc, target_line, context.temp_allocator)
 	line_len := i32(len(line_text))
 	if col > line_len { col = line_len }
 	if col < 0 { col = 0 }

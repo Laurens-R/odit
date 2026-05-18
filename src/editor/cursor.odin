@@ -97,7 +97,7 @@ move_cursor_vertical :: proc(ed: ^Editor, delta: i32) {
 
 	target_line := u32(new_line)
 	line_start := document.document_line_start(&v.doc, target_line)
-	line_text := document.document_get_line(&v.doc, target_line)
+	line_text := document.document_get_line(&v.doc, target_line, context.temp_allocator)
 	line_len := u32(len(line_text))
 
 	col := min(v.cursor_col, line_len)
