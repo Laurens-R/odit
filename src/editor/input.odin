@@ -5,6 +5,7 @@ import "vendor:sdl3/ttf"
 
 import "../document"
 import "../terminal"
+import "../ui"
 
 editor_handle_event :: proc(ed: ^Editor, event: ^sdl3.Event) {
 	// Stamp the "last keystroke" clock on any key activity so the
@@ -15,6 +16,10 @@ editor_handle_event :: proc(ed: ^Editor, event: ^sdl3.Event) {
 	case .KEY_DOWN, .KEY_UP, .TEXT_INPUT:
 		ed.last_keystroke_time = ed.clock
 	}
+
+	// Any user input is reason enough to repaint next frame. Cheap and
+	// covers all the keyboard / mouse / wheel paths in one place.
+	editor_mark_dirty(ed)
 
 	// Modal dialogs intercept input.
 	if ed.show_help {
@@ -103,6 +108,10 @@ editor_handle_event :: proc(ed: ^Editor, event: ^sdl3.Event) {
 			editor_focus_other_pane(ed)
 			return
 		}
+		if ctrl && key == sdl3.K_W {
+			editor_toggle_wrap(ed)
+			return
+		}
 
 		// Route remaining keys to the active pane.
 		#partial switch &c in editor_active_pane(ed).content {
@@ -116,17 +125,22 @@ editor_handle_event :: proc(ed: ^Editor, event: ^sdl3.Event) {
 
 	case .MOUSE_WHEEL:
 		mod := sdl3.GetModState()
-		ctrl := .LCTRL in mod || .RCTRL in mod
+		ctrl  := .LCTRL  in mod || .RCTRL  in mod
+		shift := .LSHIFT in mod || .RSHIFT in mod
 		if ctrl {
 			editor_zoom(ed, event.wheel.y)
 		} else {
 			hit := editor_pane_at(ed, event.wheel.mouse_x, event.wheel.mouse_y)
 			if hit >= 0 { ed.active = hit }
 			// Each pane content type can scroll its own way. For editor panes,
-			// editor_scroll handles it.
+			// `shift` flips the wheel to horizontal scroll when wrap is off.
 			#partial switch &c in editor_active_pane(ed).content {
 			case EditorPane:
-				editor_scroll(ed, -i32(event.wheel.y * 3))
+				if shift && !c.wrap_mode {
+					editor_scroll_horizontal(ed, -i32(event.wheel.y * 3))
+				} else {
+					editor_scroll(ed, -i32(event.wheel.y * 3))
+				}
 			}
 		}
 
@@ -326,4 +340,8 @@ editor_zoom :: proc(ed: ^Editor, direction: f32) {
 	w: i32
 	ttf.GetStringSize(ed.font, "M", 1, &w, nil)
 	ed.char_width = w
+
+	// Invalidate the text cache so previously-shaped runs don't render at
+	// the old size on the next frame.
+	ui.text_cache_clear(&ed.text_cache)
 }

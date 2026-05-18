@@ -76,6 +76,7 @@ editor_update :: proc(ed: ^Editor, dt: f64) {
 			if abs(ed.diff_state.scroll_y_target - ed.diff_state.scroll_y) < 0.5 {
 				ed.diff_state.scroll_y = ed.diff_state.scroll_y_target
 			}
+			editor_mark_dirty(ed)
 		}
 	} else {
 		// Per-pane content updates (smooth-scroll for editor panes, byte
@@ -94,7 +95,9 @@ editor_update :: proc(ed: ^Editor, dt: f64) {
 						ed.panes[i].rect.h - title_h,
 					}
 					terminal.terminal_set_geometry(c.term, body, ed.char_width, ed.line_height)
-					terminal.terminal_update(c.term, dt)
+					if terminal.terminal_update(c.term, dt) {
+						editor_mark_dirty(ed)
+					}
 				}
 			}
 		}
@@ -104,6 +107,7 @@ editor_update :: proc(ed: ^Editor, dt: f64) {
 	if ed.cursor_timer >= CURSOR_BLINK_RATE {
 		ed.cursor_timer -= CURSOR_BLINK_RATE
 		ed.cursor_visible = !ed.cursor_visible
+		editor_mark_dirty(ed)
 	}
 
 	// Auto-reanalyze symbols once the user has paused. All three gates must
@@ -129,16 +133,30 @@ editor_update :: proc(ed: ^Editor, dt: f64) {
 
 @(private="file")
 editor_pane_update :: proc(ed: ^Editor, v: ^EditorPane, dt: f64) {
-	if v.scroll_y == v.scroll_y_target { return }
+	animating := false
 	factor := f32(dt * SCROLL_SMOOTHNESS)
 	if factor > 1.0 { factor = 1.0 }
-	v.scroll_y += (v.scroll_y_target - v.scroll_y) * factor
-	if abs(v.scroll_y_target - v.scroll_y) < 0.5 {
-		v.scroll_y = v.scroll_y_target
+
+	if v.scroll_y != v.scroll_y_target {
+		v.scroll_y += (v.scroll_y_target - v.scroll_y) * factor
+		if abs(v.scroll_y_target - v.scroll_y) < 0.5 {
+			v.scroll_y = v.scroll_y_target
+		}
+		if ed.line_height > 0 {
+			v.scroll_line = u32(v.scroll_y / f32(ed.line_height))
+		}
+		animating = true
 	}
-	if ed.line_height > 0 {
-		v.scroll_line = u32(v.scroll_y / f32(ed.line_height))
+
+	if v.scroll_x != v.scroll_x_target {
+		v.scroll_x += (v.scroll_x_target - v.scroll_x) * factor
+		if abs(v.scroll_x_target - v.scroll_x) < 0.5 {
+			v.scroll_x = v.scroll_x_target
+		}
+		animating = true
 	}
+
+	if animating { editor_mark_dirty(ed) }
 }
 
 editor_render :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, width: i32, height: i32) {
@@ -193,7 +211,7 @@ editor_render :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, width: i32, height:
 					pane.rect.h - title_h,
 				}
 				terminal.terminal_set_geometry(c.term, body, ed.char_width, ed.line_height)
-				terminal.terminal_render(c.term, renderer, ed.font, ed.engine)
+				terminal.terminal_render(c.term, renderer, ed.font, ed.engine, &ed.text_cache)
 			}
 		}
 	}
@@ -362,14 +380,36 @@ filepath_base :: proc(path: string) -> string {
 render_editor_pane_normal :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, v: ^EditorPane, view_x, view_y: i32, is_active: bool, gutter_chars: u32, gutter_width: i32) {
 	line_count := document.document_line_count(&v.doc)
 
-	end_line := min(v.scroll_line + v.visible_lines + 2, line_count)
 	sel_lo, sel_hi, has_sel := editor_pane_selection_range(v)
 	scroll_y_px := i32(v.scroll_y)
 
-	for line_idx := v.scroll_line; line_idx < end_line; line_idx += 1 {
-		screen_y := view_y + ed.padding_y + i32(line_idx) * ed.line_height - scroll_y_px
-		render_doc_line_into(ed, renderer, v, view_x, screen_y, gutter_chars, gutter_width,
-			i32(line_idx), has_sel, sel_lo, sel_hi, is_active, i32(line_idx) == i32(v.cursor_line))
+	if !v.wrap_mode {
+		end_line := min(v.scroll_line + v.visible_lines + 2, line_count)
+		for line_idx := v.scroll_line; line_idx < end_line; line_idx += 1 {
+			screen_y := view_y + ed.padding_y + i32(line_idx) * ed.line_height - scroll_y_px
+			render_doc_line_into(ed, renderer, v, view_x, screen_y, gutter_chars, gutter_width,
+				i32(line_idx), has_sel, sel_lo, sel_hi, is_active, i32(line_idx) == i32(v.cursor_line))
+		}
+		return
+	}
+
+	// --- wrap mode ---------------------------------------------------
+	// Walk source lines in document order; each one occupies one or more
+	// visual rows. We stop once we've passed the bottom of the pane.
+	pane := &ed.panes[get_pane_idx(ed, v)]
+	view_h     := pane.rect.h
+	bottom_y   := view_y + view_h
+	text_w     := pane.rect.w - ed.padding_x - gutter_width - ed.padding_x
+	cols_per_row := text_w / ed.char_width
+	if cols_per_row < 1 { cols_per_row = 1 }
+
+	y := view_y + ed.padding_y - scroll_y_px % ed.line_height
+	for line_idx := v.scroll_line; line_idx < line_count && y < bottom_y; line_idx += 1 {
+		consumed := render_wrapped_doc_line(ed, renderer, v, view_x, y,
+			gutter_chars, gutter_width, cols_per_row,
+			i32(line_idx), has_sel, sel_lo, sel_hi, is_active,
+			i32(line_idx) == i32(v.cursor_line))
+		y += consumed * ed.line_height
 	}
 }
 
@@ -432,6 +472,10 @@ render_editor_pane_diff :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, v: ^Edito
 
 // Common path for laying out a single document line into a pane at the given
 // screen_y. Used by both the normal and diff renderers.
+//
+// In non-wrap mode we apply `v.scroll_x` to the text so long lines pan
+// horizontally; the gutter background is then painted last (over the text)
+// to mask any glyph that bled left into the gutter area.
 @(private="file")
 render_doc_line_into :: proc(
 	ed: ^Editor, renderer: ^sdl3.Renderer, v: ^EditorPane,
@@ -442,13 +486,13 @@ render_doc_line_into :: proc(
 	is_active: bool, cursor_on_this_line: bool,
 ) {
 	line_idx := u32(doc_line)
-	line_num_str := fmt.tprintf("%*d", gutter_chars, line_idx + 1)
-	render_string(ed, renderer, line_num_str, view_x + ed.padding_x, screen_y, ed.line_num_color)
-
 	line_text := document.document_get_line(&v.doc, line_idx)
-	text_x := view_x + ed.padding_x + gutter_width
-
 	display, byte_to_col := build_line_display(line_text)
+
+	scroll_x_px := i32(v.scroll_x)
+	if v.wrap_mode { scroll_x_px = 0 }
+
+	text_x := view_x + ed.padding_x + gutter_width - scroll_x_px
 
 	if has_sel {
 		line_byte_start := document.document_line_start(&v.doc, line_idx)
@@ -510,6 +554,124 @@ render_doc_line_into :: proc(
 			}
 		}
 	}
+
+	// Gutter painted last so glyphs panned by horizontal scroll don't bleed
+	// into the line-number column. Only needed when actually scrolled — the
+	// extra fill is otherwise a wasted draw.
+	if scroll_x_px > 0 {
+		gut := sdl3.FRect{ f32(view_x), f32(screen_y), f32(ed.padding_x + gutter_width), f32(ed.line_height) }
+		sdl3.SetRenderDrawColorFloat(renderer, ed.bg_color.r, ed.bg_color.g, ed.bg_color.b, ed.bg_color.a)
+		sdl3.RenderFillRect(renderer, &gut)
+	}
+	line_num_str := fmt.tprintf("%*d", gutter_chars, line_idx + 1)
+	render_string(ed, renderer, line_num_str, view_x + ed.padding_x, screen_y, ed.line_num_color)
+}
+
+// Index of the Pane that contains `v` (so we can read its rect during the
+// wrap-mode layout pass). Returns 0 as a sensible default when the pane
+// can't be found — should never happen in practice.
+@(private="file")
+get_pane_idx :: proc(ed: ^Editor, v: ^EditorPane) -> int {
+	for i in 0..<len(ed.panes) {
+		if pane_as_editor(&ed.panes[i]) == v { return i }
+	}
+	return 0
+}
+
+// Render a single source line in wrap mode at `screen_y`, breaking it into
+// visual rows that each hold at most `cols_per_row` characters. Returns the
+// number of visual rows the line consumed so the caller can advance y.
+//
+// MVP: wrap at column count, no per-row selection rectangle (selection only
+// paints under the first visual row), cursor placed on the visual row that
+// contains it.
+@(private="file")
+render_wrapped_doc_line :: proc(
+	ed: ^Editor, renderer: ^sdl3.Renderer, v: ^EditorPane,
+	view_x, screen_y: i32,
+	gutter_chars: u32, gutter_width: i32,
+	cols_per_row: i32,
+	doc_line: i32,
+	has_sel: bool, sel_lo, sel_hi: u32,
+	is_active: bool, cursor_on_this_line: bool,
+) -> i32 {
+	line_idx := u32(doc_line)
+	line_text := document.document_get_line(&v.doc, line_idx)
+	display, byte_to_col := build_line_display(line_text)
+	display_cols := i32(len(display))
+	if display_cols == 0 { display_cols = 1 } // empty line still occupies one visual row
+
+	rows := (display_cols + cols_per_row - 1) / cols_per_row
+	if rows < 1 { rows = 1 }
+
+	text_x := view_x + ed.padding_x + gutter_width
+
+	// Selection rectangle on the FIRST visual row only (MVP).
+	if has_sel {
+		line_byte_start := document.document_line_start(&v.doc, line_idx)
+		line_byte_end := line_byte_start + u32(len(line_text))
+		if sel_hi > line_byte_start && sel_lo <= line_byte_end {
+			lo_byte := sel_lo > line_byte_start ? int(sel_lo - line_byte_start) : 0
+			lo_col := i32(byte_to_col[lo_byte])
+			hi_col: i32
+			if sel_hi > line_byte_end {
+				hi_col = i32(byte_to_col[len(line_text)]) + 1
+			} else {
+				hi_byte := int(sel_hi - line_byte_start)
+				hi_col = i32(byte_to_col[hi_byte])
+			}
+			lo_row := lo_col / cols_per_row
+			hi_row := hi_col / cols_per_row
+			for r in lo_row..=hi_row {
+				row_start_col := r * cols_per_row
+				row_end_col   := row_start_col + cols_per_row
+				seg_lo := max(lo_col, row_start_col)
+				seg_hi := min(hi_col, row_end_col)
+				if seg_hi > seg_lo {
+					rect := sdl3.FRect{
+						f32(text_x + (seg_lo - row_start_col) * ed.char_width),
+						f32(screen_y + r * ed.line_height),
+						f32((seg_hi - seg_lo) * ed.char_width),
+						f32(ed.line_height),
+					}
+					sdl3.SetRenderDrawColorFloat(renderer, ed.sel_color.r, ed.sel_color.g, ed.sel_color.b, ed.sel_color.a)
+					sdl3.RenderFillRect(renderer, &rect)
+				}
+			}
+		}
+	}
+
+	// Render each visual row's slice of `display`.
+	for r in 0..<rows {
+		row_y := screen_y + r * ed.line_height
+		slice_start := int(r * cols_per_row)
+		slice_end   := min(int((r+1)*cols_per_row), len(display))
+		if slice_end > slice_start {
+			render_line_with_syntax(ed, renderer, v, display[slice_start:slice_end], text_x, row_y)
+		}
+	}
+
+	// Cursor on the visual row it actually falls on.
+	if is_active && cursor_on_this_line && ed.cursor_visible {
+		cursor_col_byte := int(v.cursor_col)
+		cursor_visual_col := i32(byte_to_col[clamp(cursor_col_byte, 0, len(line_text))])
+		cur_row := cursor_visual_col / cols_per_row
+		cur_col := cursor_visual_col - cur_row * cols_per_row
+		cursor_x := text_x + cur_col * ed.char_width
+		cursor_y := screen_y + cur_row * ed.line_height
+		cursor_rect := sdl3.FRect{
+			f32(cursor_x), f32(cursor_y),
+			f32(ed.char_width), f32(ed.line_height),
+		}
+		sdl3.SetRenderDrawColorFloat(renderer, ed.cursor_color.r, ed.cursor_color.g, ed.cursor_color.b, 1.0)
+		sdl3.RenderFillRect(renderer, &cursor_rect)
+	}
+
+	// Line number on the first visual row only.
+	line_num_str := fmt.tprintf("%*d", gutter_chars, line_idx + 1)
+	render_string(ed, renderer, line_num_str, view_x + ed.padding_x, screen_y, ed.line_num_color)
+
+	return rows
 }
 
 // Render one display-line, optionally colored by `language`'s tokenizer.
@@ -555,13 +717,8 @@ syntax_color_for :: proc(ed: ^Editor, kind: syntax.TokenKind) -> sdl3.FColor {
 @(private="file")
 render_string :: proc(ed: ^Editor, renderer: ^sdl3.Renderer, str: string, x: i32, y: i32, color: sdl3.FColor) {
 	if len(str) == 0 { return }
-
-	cstr := strings.clone_to_cstring(str, context.temp_allocator)
-
-	text_obj := ttf.CreateText(ed.engine, ed.font, cstr, 0)
+	text_obj := ui.text_cache_get(&ed.text_cache, str)
 	if text_obj == nil { return }
-	defer ttf.DestroyText(text_obj)
-
 	_ = ttf.SetTextColorFloat(text_obj, color.r, color.g, color.b, color.a)
 	_ = ttf.DrawRendererText(text_obj, f32(x), f32(y))
 }

@@ -184,15 +184,21 @@ terminal_set_geometry :: proc(t: ^Terminal, rect: sdl3.Rect, char_width, line_he
 }
 
 // Drain pending bytes from the read thread and feed them through the parser.
-// Also advances the cursor-blink timer using the editor-supplied dt.
-terminal_update :: proc(t: ^Terminal, dt: f64) {
-	if t == nil { return }
+// Also advances the cursor-blink timer using the editor-supplied dt. Returns
+// true when anything visible changed this tick — either the cursor blinked
+// or bytes were drained — so the editor's main loop can flip its dirty flag
+// without polling our internals.
+terminal_update :: proc(t: ^Terminal, dt: f64) -> bool {
+	if t == nil { return false }
+
+	changed := false
 
 	// Cursor blink.
 	t.cursor_timer += dt
 	if t.cursor_timer >= 0.5 {
 		t.cursor_timer -= 0.5
 		t.cursor_visible = !t.cursor_visible
+		changed = true
 	}
 
 	// Drain shell output.
@@ -215,7 +221,10 @@ terminal_update :: proc(t: ^Terminal, dt: f64) {
 
 	if count > 0 {
 		parser_feed(t, bytes[:count])
+		changed = true
 	}
+
+	return changed
 }
 
 // Background thread entry: read from the PTY's output pipe in a tight loop,

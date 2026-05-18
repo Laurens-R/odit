@@ -7,6 +7,7 @@ import "vendor:sdl3/ttf"
 import "../document"
 import "../syntax"
 import "../terminal"
+import "../ui"
 
 // --- Pane types -----------------------------------------------------------
 //
@@ -38,6 +39,18 @@ EditorPane :: struct {
 	visible_lines:   u32, // how many lines fully fit on screen
 	scroll_y:        f32, // current vertical scroll, in pixels (animated)
 	scroll_y_target: f32, // target vertical scroll, in pixels
+
+	// Horizontal scroll, in pixels. Used only when `wrap_mode == false`;
+	// flipping to wrap clears `scroll_x_target` to 0. Animated identically
+	// to scroll_y for parity.
+	scroll_x:        f32,
+	scroll_x_target: f32,
+
+	// When true, lines that exceed the pane's available text width are
+	// broken into multiple visual rows that fit the pane. When false,
+	// long lines remain on a single row and the user pans horizontally
+	// with scroll_x. Toggled by Ctrl+W.
+	wrap_mode:       bool,
 
 	// Selection
 	sel_active:      bool,
@@ -110,6 +123,19 @@ Editor :: struct {
 	cursor_default:   ^sdl3.Cursor,
 	cursor_resize_ew: ^sdl3.Cursor,
 	current_cursor:   ^sdl3.Cursor,
+
+	// Per-render TTF text cache. The editor renders many short strings
+	// (one per syntax token) every frame, most of which repeat from one
+	// frame to the next; caching avoids the GPU-texture churn that comes
+	// from `ttf.CreateText` + `ttf.DestroyText` round-trips.
+	text_cache: ui.TextCache,
+
+	// Frame-skip flag. The main loop calls `editor_render` + `RenderPresent`
+	// only when this is set, then clears it via `editor_mark_clean`. Setters
+	// are scattered: every input handler, the cursor-blink toggle, terminal
+	// output drains, smooth-scroll animation, window resize. When nothing's
+	// happening, the entire render path is skipped and we just `Sleep(16)`.
+	dirty: bool,
 
 	// Rendering (shared between panes)
 	font:            ^ttf.Font,
@@ -209,6 +235,12 @@ editor_init :: proc(ed: ^Editor, engine: ^ttf.TextEngine, font: ^ttf.Font, font_
 	ed.current_cursor   = ed.cursor_default
 	if ed.cursor_default != nil { _ = sdl3.SetCursor(ed.cursor_default) }
 
+	ui.text_cache_init(&ed.text_cache, engine, font, 1024)
+
+	// Force an initial render so the first frame paints, then keep the
+	// flag accurate via the various setters below.
+	ed.dirty = true
+
 	ed.font = font
 	ed.engine = engine
 	ed.font_size = font_size
@@ -264,6 +296,7 @@ editor_destroy :: proc(ed: ^Editor) {
 	syntax.destroy()
 	if ed.cursor_default   != nil { sdl3.DestroyCursor(ed.cursor_default)   }
 	if ed.cursor_resize_ew != nil { sdl3.DestroyCursor(ed.cursor_resize_ew) }
+	ui.text_cache_destroy(&ed.text_cache)
 }
 
 // Per-content cleanup. Add cases here as new content types are introduced.
@@ -486,6 +519,26 @@ editor_open_string_in_pane :: proc(ed: ^Editor, pane_idx: int, content: string, 
 			pane_rebuild_symbols(v)
 		}
 	}
+}
+
+// Mark the editor as needing a fresh render. Cheap; safe to call from any
+// path that mutates visible state. Setters that flip user-visible bits
+// (key/text/mouse events, cursor blink, scroll animation, terminal output)
+// all funnel through here so the main loop can skip render+present on
+// frames where nothing has actually changed.
+editor_mark_dirty :: proc(ed: ^Editor) {
+	ed.dirty = true
+}
+
+// Drop the dirty flag — called by the main loop right after `editor_render`.
+editor_mark_clean :: proc(ed: ^Editor) {
+	ed.dirty = false
+}
+
+// True when this frame must be drawn. Wraps the flag so the main loop never
+// reads internal state directly.
+editor_needs_render :: proc(ed: ^Editor) -> bool {
+	return ed.dirty
 }
 
 // True when a modal dialog (help, browse, future popups) currently owns input.

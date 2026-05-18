@@ -135,22 +135,28 @@ main :: proc() {
 				editor.editor_handle_event(&ed, &event)
 			case .MOUSE_MOTION:
 				editor.editor_handle_event(&ed, &event)
+			case .WINDOW_RESIZED, .WINDOW_PIXEL_SIZE_CHANGED, .WINDOW_EXPOSED:
+				editor.editor_mark_dirty(&ed)
 			}
 		}
 
-		// Update
+		// Update — animations / blink / terminal drain all live here. The
+		// editor flips its own `dirty` flag when anything visible changes,
+		// so the render path below is free to skip work on idle frames.
 		editor.editor_update(&ed, dt)
 
-		// Render
-		w, h: i32
-		sdl3.GetWindowSize(window, &w, &h)
+		if editor.editor_needs_render(&ed) {
+			w, h: i32
+			sdl3.GetWindowSize(window, &w, &h)
 
-		sdl3.SetRenderDrawColorFloat(renderer, 0.11, 0.11, 0.14, 1.0)
-		sdl3.RenderClear(renderer)
+			sdl3.SetRenderDrawColorFloat(renderer, 0.11, 0.11, 0.14, 1.0)
+			sdl3.RenderClear(renderer)
 
-		editor.editor_render(&ed, renderer, w, h)
+			editor.editor_render(&ed, renderer, w, h)
 
-		sdl3.RenderPresent(renderer)
+			sdl3.RenderPresent(renderer)
+			editor.editor_mark_clean(&ed)
+		}
 
 		// Cap at ~60fps to avoid burning CPU
 		sdl3.Delay(16)

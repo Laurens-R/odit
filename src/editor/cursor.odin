@@ -108,7 +108,7 @@ move_cursor_vertical :: proc(ed: ^Editor, delta: i32) {
 	ensure_cursor_visible(ed)
 }
 
-@(private="file")
+@(private)
 ensure_cursor_visible :: proc(ed: ^Editor) {
 	v := editor_active_editor_pane(ed); if v == nil { return }
 	if v.visible_lines == 0 { return }
@@ -152,6 +152,27 @@ ensure_cursor_visible :: proc(ed: ^Editor) {
 		v.scroll_line = new_scroll_line
 		v.scroll_y = f32(new_scroll_line) * f32(ed.line_height)
 		v.scroll_y_target = v.scroll_y
+	}
+
+	// Horizontal scroll only matters when wrap is off — otherwise every
+	// column is by definition on screen.
+	if !v.wrap_mode && ed.char_width > 0 {
+		pane := &ed.panes[ed.active]
+		cursor_x_px := f32(v.cursor_col) * f32(ed.char_width)
+		text_w      := f32(pane.rect.w - ed.padding_x - v.gutter_width)
+		if text_w < f32(ed.char_width) { text_w = f32(ed.char_width) }
+
+		// A small slop column so the cursor isn't pasted against the very
+		// edge of the pane after a horizontal jump.
+		slop := f32(ed.char_width * 2)
+
+		if cursor_x_px < v.scroll_x_target + slop {
+			v.scroll_x_target = max(f32(0), cursor_x_px - slop)
+			v.scroll_x        = v.scroll_x_target
+		} else if cursor_x_px + f32(ed.char_width) > v.scroll_x_target + text_w - slop {
+			v.scroll_x_target = cursor_x_px + f32(ed.char_width) - text_w + slop
+			v.scroll_x        = v.scroll_x_target
+		}
 	}
 }
 

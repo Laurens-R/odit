@@ -25,6 +25,38 @@ editor_update_cursor :: proc(ed: ^Editor, x, y: f32) {
 	}
 }
 
+// Pan the active pane horizontally by `delta_chars` columns. No-op when the
+// pane is in wrap mode (the model says wrap and horizontal scroll are
+// mutually exclusive — Ctrl+W toggles between them) or when there's no
+// editor pane focused.
+@(private)
+editor_scroll_horizontal :: proc(ed: ^Editor, delta_chars: i32) {
+	if delta_chars == 0 || ed.char_width == 0 { return }
+	v := editor_active_editor_pane(ed); if v == nil { return }
+	if v.wrap_mode { return }
+	step    := f32(delta_chars * ed.char_width)
+	new_tgt := v.scroll_x_target + step
+	if new_tgt < 0 { new_tgt = 0 }
+	v.scroll_x_target = new_tgt
+}
+
+// Flip wrap-mode for the active pane. Horizontal scroll resets to zero on
+// entering wrap (since the pane is now obligated to fit lines within the
+// width). Cursor visibility is re-evaluated so the cursor stays on screen
+// either way.
+@(private)
+editor_toggle_wrap :: proc(ed: ^Editor) {
+	v := editor_active_editor_pane(ed); if v == nil { return }
+	v.wrap_mode = !v.wrap_mode
+	if v.wrap_mode {
+		v.scroll_x        = 0
+		v.scroll_x_target = 0
+	}
+	ensure_cursor_visible(ed)
+	ed.cursor_visible = true
+	ed.cursor_timer   = 0
+}
+
 // Scroll the active pane (if it's an editor pane) by `delta_lines`. In diff
 // mode the shared diff-state scroll is moved instead so both panes stay in
 // lockstep.

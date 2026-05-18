@@ -5,11 +5,17 @@ import "core:unicode/utf8"
 import "vendor:sdl3"
 import "vendor:sdl3/ttf"
 
+import "../ui"
+
 // Paint the terminal into its rect: fill background, draw a background-colored
 // rectangle for each non-default cell, then draw a single text run per row so
 // SDL_ttf doesn't pay the per-glyph submission cost for every cell. Finally
 // draw a block cursor on top.
-terminal_render :: proc(t: ^Terminal, renderer: ^sdl3.Renderer, font: ^ttf.Font, engine: ^ttf.TextEngine) {
+//
+// `cache` is the editor's shared `ui.TextCache`. Going through it instead of
+// `ttf.CreateText` / `ttf.DestroyText` cuts per-frame GPU texture churn
+// dramatically — most rows repeat unchanged frame-to-frame.
+terminal_render :: proc(t: ^Terminal, renderer: ^sdl3.Renderer, font: ^ttf.Font, engine: ^ttf.TextEngine, cache: ^ui.TextCache) {
 	if t == nil { return }
 	s := &t.screen
 	if t.char_width <= 0 || t.line_height <= 0 { return }
@@ -65,7 +71,7 @@ terminal_render :: proc(t: ^Terminal, renderer: ^sdl3.Renderer, font: ^ttf.Font,
 				run_fg  = cf
 				strings.builder_reset(&sb)
 			} else if !color_equal(cf, run_fg) {
-				draw_run(renderer, font, engine, &sb, t.rect.x + run_col*cw, y, run_fg)
+				draw_run(renderer, cache, &sb, t.rect.x + run_col*cw, y, run_fg)
 				run_col = col
 				run_fg  = cf
 				run_len = 0
@@ -81,7 +87,7 @@ terminal_render :: proc(t: ^Terminal, renderer: ^sdl3.Renderer, font: ^ttf.Font,
 			run_len += 1
 		}
 		if run_len > 0 {
-			draw_run(renderer, font, engine, &sb, t.rect.x + run_col*cw, y, run_fg)
+			draw_run(renderer, cache, &sb, t.rect.x + run_col*cw, y, run_fg)
 		}
 	}
 
@@ -101,7 +107,7 @@ terminal_render :: proc(t: ^Terminal, renderer: ^sdl3.Renderer, font: ^ttf.Font,
 			strings.builder_init(&sb, 0, 4, context.temp_allocator)
 			bytes, sz := utf8.encode_rune(cell.ch)
 			for k in 0..<sz { strings.write_byte(&sb, bytes[k]) }
-			draw_run(renderer, font, engine, &sb, cx, cy, s.default_bg)
+			draw_run(renderer, cache, &sb, cx, cy, s.default_bg)
 		}
 	}
 }
@@ -117,13 +123,11 @@ fill_run :: proc(renderer: ^sdl3.Renderer, ox, oy, start_col, end_col, cw, lh: i
 }
 
 @(private="file")
-draw_run :: proc(renderer: ^sdl3.Renderer, font: ^ttf.Font, engine: ^ttf.TextEngine, sb: ^strings.Builder, x, y: i32, color: Color) {
+draw_run :: proc(renderer: ^sdl3.Renderer, cache: ^ui.TextCache, sb: ^strings.Builder, x, y: i32, color: Color) {
 	s := strings.to_string(sb^)
 	if len(s) == 0 { return }
-	cstr := strings.clone_to_cstring(s, context.temp_allocator)
-	text_obj := ttf.CreateText(engine, font, cstr, 0)
+	text_obj := ui.text_cache_get(cache, s)
 	if text_obj == nil { return }
-	defer ttf.DestroyText(text_obj)
 	_ = ttf.SetTextColorFloat(text_obj, color.r, color.g, color.b, color.a)
 	_ = ttf.DrawRendererText(text_obj, f32(x), f32(y))
 }
