@@ -8,7 +8,7 @@ editor_insert_text :: proc(editor: ^Editor, text_to_insert: string) {
 	delete_selection(editor)
 	document.document_insert(&editor_pane.document, editor_pane.cursor_offset, text_to_insert)
 	editor_pane.cursor_offset += u32(len(text_to_insert))
-	pane_mark_document_modified(editor_pane)
+	pane_mark_document_modified(editor, editor_pane)
 	sync_cursor_from_offset(editor)
 }
 
@@ -36,7 +36,7 @@ editor_outdent_line :: proc(editor: ^Editor) {
 	if bytes_to_remove == 0 { return }
 
 	document.document_delete(&editor_pane.document, line_start_offset, bytes_to_remove)
-	pane_mark_document_modified(editor_pane)
+	pane_mark_document_modified(editor, editor_pane)
 
 	if editor_pane.cursor_offset >= line_start_offset + bytes_to_remove {
 		editor_pane.cursor_offset -= bytes_to_remove

@@ -5,6 +5,7 @@ import "vendor:sdl3"
 import "vendor:sdl3/ttf"
 
 import "../document"
+import "../lsp"
 import "../syntax"
 import "../terminal"
 import "../ui"
@@ -82,6 +83,15 @@ EditorPane :: struct {
 	// auto-refresh. Set on every document mutation; cleared once the preview
 	// re-parses the source (or eagerly when no preview is open).
 	markdown_dirty:       bool,
+
+	// LSP sync bookkeeping. `lsp_did_open_sent` flips true once a didOpen
+	// notification has been issued for the pane's current file path; the
+	// close path uses it to know whether a matching didClose is required.
+	// `lsp_dirty` + `lsp_last_edit_time` debounce didChange so the editor
+	// doesn't spam the server on every keystroke.
+	lsp_did_open_sent:    bool,
+	lsp_dirty:            bool,
+	lsp_last_edit_time:   f64,
 }
 
 // Per-pane scrollbar interaction state. Track + thumb rects are rewritten
@@ -105,7 +115,8 @@ ScrollbarState :: struct {
 // editor owns the terminal lifetime; the pane just holds a borrowed
 // pointer for rendering/input dispatch.
 TerminalPane :: struct {
-	terminal: ^terminal.Terminal,
+	terminal:  ^terminal.Terminal,
+	scrollbar: ScrollbarState,
 }
 
 // One entry in the editor's multi-terminal list. `display_number` is a
@@ -329,6 +340,28 @@ Editor :: struct {
 	// Ctrl+Q-in-main-loop path without needing the menu to reach into SDL.
 	quit_requested:              bool,
 
+	// User config loaded from settings.json at init. Currently holds the
+	// per-language LSP command lookup; expected to grow.
+	settings:                    EditorSettings,
+
+	// Running LSP clients, keyed by lowercase language id ("odin"). Lazily
+	// spawned the first time a file with that language is opened; torn
+	// down on editor_destroy. Pointers are owned by this map.
+	lsp_clients:                 map[string]^lsp.Client,
+
+	// Hover popup state. Set by Ctrl+K → editor sends the LSP hover
+	// request → next frame's poll surfaces a result → we copy it here for
+	// rendering. Cleared on Esc / next keystroke / cursor move.
+	hover_popup:                 HoverPopup,
+	hover_popup_request_pending: bool,
+
+	// Completion popup state — see `completion.odin` for the lifecycle.
+	completion_popup:            CompletionPopup,
+
+	// Signature-help popup — fires on `(`, refreshes on `,` while inside
+	// the same argument list, auto-closes on `)` / Esc / cursor row change.
+	signature_popup:             SignaturePopup,
+
 	// Project root, set by Ctrl+P in the file browser. Owned absolute path;
 	// "" when unset. When set:
 	//   - The F2 browser defaults to it on next open if the cached cwd has
@@ -383,6 +416,7 @@ editor_init :: proc(editor: ^Editor, text_engine: ^ttf.TextEngine, font: ^ttf.Fo
 	editor.padding_y = 4
 
 	menu_bar_init(&editor.menu_bar)
+	editor_settings_init(&editor.settings)
 
 	// Measure monospace character dimensions
 	editor.line_height = i32(ttf.GetFontLineSkip(font))
@@ -440,6 +474,11 @@ editor_destroy :: proc(editor: ^Editor) {
 	git_history_dialog_destroy(&editor.git_history_dialog)
 	open_docs_dialog_destroy(&editor.open_docs_dialog)
 	terminal_picker_destroy(&editor.terminal_picker)
+	hover_popup_destroy(&editor.hover_popup)
+	completion_popup_destroy(&editor.completion_popup)
+	signature_popup_destroy(&editor.signature_popup)
+	editor_lsp_destroy_all(editor)
+	editor_settings_destroy(&editor.settings)
 	for background_index in 0..<len(editor.background_documents) {
 		editor_pane_destroy_in_place(&editor.background_documents[background_index])
 	}
@@ -551,11 +590,14 @@ editor_active_pane :: proc(editor: ^Editor) -> ^Pane {
 // Single sink for "this pane's document just changed". Flips every dirty flag
 // that gates an idle/debounced rebuild so future flags (next time we add
 // another debounced consumer) get picked up by every existing mutation site
-// for free.
+// for free. Stamps `editor.clock` on the LSP edit timer so the didChange
+// debounce in `editor_lsp_update` measures from the latest edit.
 @(private)
-pane_mark_document_modified :: proc(editor_pane: ^EditorPane) {
-	editor_pane.symbols_dirty  = true
-	editor_pane.markdown_dirty = true
+pane_mark_document_modified :: proc(editor: ^Editor, editor_pane: ^EditorPane) {
+	editor_pane.symbols_dirty       = true
+	editor_pane.markdown_dirty      = true
+	editor_pane.lsp_dirty           = true
+	editor_pane.lsp_last_edit_time  = editor.clock
 }
 
 // Returns the active pane's `EditorPane`, or nil if the active pane is not an
@@ -859,6 +901,13 @@ editor_open_string_in_pane :: proc(editor: ^Editor, pane_index: int, content_tex
 			pane_rebuild_symbols(editor_pane)
 		}
 	}
+
+	// Notify the LSP layer that a new document is open in this pane (if its
+	// language has an LSP entry configured). Safe to call when no LSP is
+	// available — the proc short-circuits.
+	if editor_pane := pane_as_editor(&editor.panes[pane_index]); editor_pane != nil {
+		editor_lsp_pane_opened(editor, editor_pane)
+	}
 }
 
 // Drop a fresh untitled EditorPane into the given pane, destroying whatever
@@ -867,6 +916,9 @@ editor_open_string_in_pane :: proc(editor: ^Editor, pane_index: int, content_tex
 @(private)
 editor_replace_pane_with_empty_editor :: proc(editor: ^Editor, pane_index: int) {
 	if pane_index < 0 || pane_index >= len(editor.panes) { return }
+	if editor_pane := pane_as_editor(&editor.panes[pane_index]); editor_pane != nil {
+		editor_lsp_pane_closing(editor, editor_pane)
+	}
 	pane_destroy(&editor.panes[pane_index])
 
 	new_editor_pane: EditorPane

@@ -3,6 +3,7 @@ package editor
 import "vendor:sdl3"
 
 import "../document"
+import "../terminal"
 import "../ui"
 
 // Set the OS cursor to `target_cursor` if it's not already the active one.
@@ -87,7 +88,12 @@ editor_scroll :: proc(editor: ^Editor, line_delta: i32) {
 }
 
 @(private)
-editor_mouse_down :: proc(editor: ^Editor, mouse_x: f32, mouse_y: f32, shift_held: bool) {
+editor_mouse_down :: proc(editor: ^Editor, mouse_x: f32, mouse_y: f32, shift_held: bool, click_count: i32 = 1) {
+	// Any click in the editor dismisses the LSP hover popup — it's
+	// anchored to a specific symbol, so clicking elsewhere counts as
+	// "the user moved on".
+	if editor.hover_popup.is_visible { hover_popup_close(editor) }
+
 	// Grab the divider first when both panes are showing — the hit zone is
 	// generous (a few pixels either side of the 2-px line) because the line
 	// itself is hard to hit precisely.
@@ -126,7 +132,7 @@ editor_mouse_down :: proc(editor: ^Editor, mouse_x: f32, mouse_y: f32, shift_hel
 		// (or anywhere on the track) latches a drag instead of moving the
 		// cursor. Track-but-not-thumb is a page-jump for now (sets target
 		// scroll, smooth animator handles the rest).
-		if scrollbar_thumb_hit(&content_value, mouse_x, mouse_y) {
+		if scrollbar_thumb_hit(&content_value.scrollbar, mouse_x, mouse_y) {
 			content_value.scrollbar.is_dragging  = true
 			content_value.scrollbar.drag_delta_y = mouse_y - content_value.scrollbar.thumb_rectangle.y
 			return
@@ -138,19 +144,99 @@ editor_mouse_down :: proc(editor: ^Editor, mouse_x: f32, mouse_y: f32, shift_hel
 			content_value.scrollbar.drag_delta_y = content_value.scrollbar.thumb_rectangle.h / 2
 			return
 		}
-		editor_pane_mouse_down(editor, pane, &content_value, mouse_x, mouse_y, shift_held)
+		editor_pane_mouse_down(editor, pane, &content_value, mouse_x, mouse_y, shift_held, click_count)
+
+	case TerminalPane:
+		if content_value.terminal == nil { return }
+		// Scrollbar wins over selection. Clicking the thumb latches a drag;
+		// clicking the track jumps to that position and then drags.
+		if scrollbar_thumb_hit(&content_value.scrollbar, mouse_x, mouse_y) {
+			content_value.scrollbar.is_dragging  = true
+			content_value.scrollbar.drag_delta_y = mouse_y - content_value.scrollbar.thumb_rectangle.y
+			return
+		}
+		if ui.point_in_rect(content_value.scrollbar.track_rectangle, mouse_x, mouse_y) {
+			content_value.scrollbar.is_dragging  = true
+			content_value.scrollbar.drag_delta_y = content_value.scrollbar.thumb_rectangle.h / 2
+			scrollbar_apply_to_terminal(&content_value, mouse_y)
+			return
+		}
+		// Mouse-down inside the body begins a text selection. The title
+		// strip is skipped so clicking the title bar doesn't start a
+		// selection at row 0.
+		title_bar_height := editor_title_bar_height(editor)
+		if mouse_y < f32(pane.rectangle.y + title_bar_height) { return }
+		terminal.terminal_mouse_down(content_value.terminal, mouse_x, mouse_y)
+
+	case MarkdownPreviewPane:
+		if scrollbar_thumb_hit(&content_value.scrollbar, mouse_x, mouse_y) {
+			content_value.scrollbar.is_dragging  = true
+			content_value.scrollbar.drag_delta_y = mouse_y - content_value.scrollbar.thumb_rectangle.y
+			return
+		}
+		if ui.point_in_rect(content_value.scrollbar.track_rectangle, mouse_x, mouse_y) {
+			content_value.scrollbar.is_dragging  = true
+			content_value.scrollbar.drag_delta_y = content_value.scrollbar.thumb_rectangle.h / 2
+			scrollbar_apply_to_markdown(&content_value, mouse_y)
+			return
+		}
 	}
 }
 
 // Hit-test the scrollbar thumb. We pad the thumb a couple of pixels
-// horizontally so a hover near the edge still latches the drag.
+// horizontally so a hover near the edge still latches the drag. Generic
+// over the pane content type — every kind shares the same ScrollbarState.
 @(private="file")
-scrollbar_thumb_hit :: proc(editor_pane: ^EditorPane, mouse_x, mouse_y: f32) -> bool {
-	thumb_rectangle := editor_pane.scrollbar.thumb_rectangle
+scrollbar_thumb_hit :: proc(scrollbar: ^ScrollbarState, mouse_x, mouse_y: f32) -> bool {
+	thumb_rectangle := scrollbar.thumb_rectangle
 	if thumb_rectangle.w <= 0 || thumb_rectangle.h <= 0 { return false }
 	horizontal_padding: f32 = 2
 	return mouse_x >= thumb_rectangle.x - horizontal_padding && mouse_x < thumb_rectangle.x + thumb_rectangle.w + horizontal_padding &&
 	       mouse_y >= thumb_rectangle.y                      && mouse_y < thumb_rectangle.y + thumb_rectangle.h
+}
+
+// Common travel-fraction math: given the current mouse_y and a saved
+// drag_delta_y (mouse-y offset within the thumb at drag start), return how
+// far along the track we are in [0, 1]. Returns -1 when there's no track to
+// drag against (degenerate scrollbar).
+@(private="file")
+scrollbar_travel_fraction :: proc(scrollbar: ^ScrollbarState, mouse_y: f32) -> f32 {
+	track_rectangle := scrollbar.track_rectangle
+	thumb_rectangle := scrollbar.thumb_rectangle
+	if track_rectangle.h <= 0 || thumb_rectangle.h <= 0 { return -1 }
+	travel_distance := track_rectangle.h - thumb_rectangle.h
+	if travel_distance <= 0 { return 0 }
+	target_thumb_y := clamp(mouse_y - scrollbar.drag_delta_y, track_rectangle.y, track_rectangle.y + travel_distance)
+	return (target_thumb_y - track_rectangle.y) / travel_distance
+}
+
+// Apply a drag position to a terminal pane's scroll_offset. fraction = 0
+// scrolls to the top of scrollback; fraction = 1 snaps to the live bottom.
+@(private="file")
+scrollbar_apply_to_terminal :: proc(terminal_pane: ^TerminalPane, mouse_y: f32) {
+	if terminal_pane.terminal == nil { return }
+	fraction := scrollbar_travel_fraction(&terminal_pane.scrollbar, mouse_y)
+	if fraction < 0 { return }
+	scrollback_count := i32(len(terminal_pane.terminal.screen.scrollback_rows))
+	// fraction == 0 means viewport-top = 0 = max scrollback => scroll_offset = scrollback_count.
+	// fraction == 1 means viewport at live bottom => scroll_offset = 0.
+	new_offset := i32(f32(scrollback_count) * (1.0 - fraction) + 0.5)
+	if new_offset < 0                 { new_offset = 0 }
+	if new_offset > scrollback_count  { new_offset = scrollback_count }
+	terminal_pane.terminal.scroll_offset = new_offset
+}
+
+// Apply a drag position to a markdown preview pane's scroll_y_target. The
+// renderer stashes `last_max_scroll_pixels` each frame so we can map the
+// travel fraction to the actual clamp range without re-laying-out blocks.
+@(private="file")
+scrollbar_apply_to_markdown :: proc(preview_pane: ^MarkdownPreviewPane, mouse_y: f32) {
+	fraction := scrollbar_travel_fraction(&preview_pane.scrollbar, mouse_y)
+	if fraction < 0 { return }
+	max_scroll_pixels := preview_pane.last_max_scroll_pixels
+	if max_scroll_pixels <= 0 { return }
+	preview_pane.scroll_y_target = fraction * max_scroll_pixels
+	preview_pane.scroll_y        = preview_pane.scroll_y_target
 }
 
 // Translate a mouse-y on the track into a scroll value and apply it. Used
@@ -188,17 +274,28 @@ scrollbar_jump_to :: proc(editor: ^Editor, editor_pane: ^EditorPane, mouse_y: f3
 
 // Update the per-pane scrollbar hover flag from the current mouse position.
 // Called on every MOUSE_MOTION so the next frame paints a widened scrollbar
-// while the cursor is over it.
+// while the cursor is over it. Walks all pane content kinds that own a
+// `scrollbar: ScrollbarState`.
 @(private)
 editor_scrollbar_update_hover :: proc(editor: ^Editor, mouse_x, mouse_y: f32) {
 	for pane_index in 0..<editor_visible_pane_count(editor) {
-		if editor_pane := pane_as_editor(&editor.panes[pane_index]); editor_pane != nil {
-			is_over_track := ui.point_in_rect(editor_pane.scrollbar.track_rectangle, mouse_x, mouse_y)
-			if is_over_track != editor_pane.scrollbar.is_hovered {
-				editor_pane.scrollbar.is_hovered = is_over_track
-				editor_mark_dirty(editor)
-			}
+		#partial switch &content_value in editor.panes[pane_index].content {
+		case EditorPane:
+			scrollbar_set_hover(editor, &content_value.scrollbar, mouse_x, mouse_y)
+		case TerminalPane:
+			scrollbar_set_hover(editor, &content_value.scrollbar, mouse_x, mouse_y)
+		case MarkdownPreviewPane:
+			scrollbar_set_hover(editor, &content_value.scrollbar, mouse_x, mouse_y)
 		}
+	}
+}
+
+@(private="file")
+scrollbar_set_hover :: proc(editor: ^Editor, scrollbar: ^ScrollbarState, mouse_x, mouse_y: f32) {
+	is_over_track := ui.point_in_rect(scrollbar.track_rectangle, mouse_x, mouse_y)
+	if is_over_track != scrollbar.is_hovered {
+		scrollbar.is_hovered = is_over_track
+		editor_mark_dirty(editor)
 	}
 }
 
@@ -222,7 +319,7 @@ divider_hit_test :: proc(editor: ^Editor, mouse_x, mouse_y: f32) -> bool {
 }
 
 @(private="file")
-editor_pane_mouse_down :: proc(editor: ^Editor, pane: ^Pane, editor_pane: ^EditorPane, mouse_x: f32, mouse_y: f32, shift_held: bool) {
+editor_pane_mouse_down :: proc(editor: ^Editor, pane: ^Pane, editor_pane: ^EditorPane, mouse_x: f32, mouse_y: f32, shift_held: bool, click_count: i32) {
 	clicked_offset := screen_to_offset(editor, pane, editor_pane, mouse_x, mouse_y)
 
 	if shift_held {
@@ -239,18 +336,65 @@ editor_pane_mouse_down :: proc(editor: ^Editor, pane: ^Pane, editor_pane: ^Edito
 	editor.cursor_visible = true
 	editor.cursor_timer = 0
 	sync_cursor_from_offset(editor)
+
+	// Double-click expands the click point to a word (identifier run) so the
+	// usual "select word, copy / replace / search" flow doesn't need a manual
+	// drag. Skipped on shift-click because that's an explicit extend-selection
+	// gesture from the user.
+	if click_count >= 2 && !shift_held {
+		line_text     := document.document_get_line(&editor_pane.document, editor_pane.cursor_line, context.temp_allocator)
+		cursor_column := int(editor_pane.cursor_column)
+		word_start := cursor_column
+		word_end   := cursor_column
+		for word_start > 0           && is_word_byte(line_text[word_start - 1]) { word_start -= 1 }
+		for word_end   < len(line_text) && is_word_byte(line_text[word_end])    { word_end   += 1 }
+		if word_end > word_start {
+			start_offset := clicked_offset - u32(cursor_column - word_start)
+			end_offset   := clicked_offset + u32(word_end - cursor_column)
+			editor_pane.selection_anchor = start_offset
+			editor_pane.cursor_offset    = end_offset
+			editor_pane.selection_active = true
+			sync_cursor_from_offset(editor)
+		}
+	}
+}
+
+// Word-boundary predicate for double-click selection. Matches the identifier
+// class used by completion / hover so a double-click selects exactly what the
+// surrounding code already treats as one symbol.
+@(private="file")
+is_word_byte :: proc(byte_value: u8) -> bool {
+	return (byte_value >= 'a' && byte_value <= 'z') ||
+	       (byte_value >= 'A' && byte_value <= 'Z') ||
+	       (byte_value >= '0' && byte_value <= '9') ||
+	       byte_value == '_'
 }
 
 @(private)
 editor_mouse_drag :: proc(editor: ^Editor, mouse_x: f32, mouse_y: f32) {
 	// Scrollbar drag takes top priority — once latched, every motion event
 	// just maps to a new scroll position until the user releases the
-	// button.
+	// button. Each pane content type stores its own scrollbar state.
 	for pane_index in 0..<editor_visible_pane_count(editor) {
-		if editor_pane := pane_as_editor(&editor.panes[pane_index]); editor_pane != nil && editor_pane.scrollbar.is_dragging {
-			scrollbar_jump_to(editor, editor_pane, mouse_y)
-			editor_mark_dirty(editor)
-			return
+		#partial switch &content_value in editor.panes[pane_index].content {
+		case EditorPane:
+			if content_value.scrollbar.is_dragging {
+				scrollbar_jump_to(editor, &content_value, mouse_y)
+				editor_mark_dirty(editor)
+				return
+			}
+		case TerminalPane:
+			if content_value.scrollbar.is_dragging {
+				scrollbar_apply_to_terminal(&content_value, mouse_y)
+				editor_mark_dirty(editor)
+				return
+			}
+		case MarkdownPreviewPane:
+			if content_value.scrollbar.is_dragging {
+				scrollbar_apply_to_markdown(&content_value, mouse_y)
+				editor_mark_dirty(editor)
+				return
+			}
 		}
 	}
 
@@ -281,6 +425,13 @@ editor_mouse_drag :: proc(editor: ^Editor, mouse_x: f32, mouse_y: f32) {
 				editor_pane_mouse_drag(editor, pane, &content_value, mouse_x, mouse_y)
 				return
 			}
+		case TerminalPane:
+			if content_value.terminal != nil && content_value.terminal.selection.is_dragging {
+				editor.active_pane_index = pane_index
+				terminal.terminal_mouse_drag(content_value.terminal, mouse_x, mouse_y)
+				editor_mark_dirty(editor)
+				return
+			}
 		}
 	}
 }
@@ -303,6 +454,13 @@ editor_mouse_up :: proc(editor: ^Editor, mouse_x, mouse_y: f32) {
 		#partial switch &content_value in editor.panes[pane_index].content {
 		case EditorPane:
 			content_value.mouse_dragging         = false
+			content_value.scrollbar.is_dragging  = false
+		case TerminalPane:
+			content_value.scrollbar.is_dragging  = false
+			if content_value.terminal != nil {
+				terminal.terminal_mouse_up(content_value.terminal, mouse_x, mouse_y)
+			}
+		case MarkdownPreviewPane:
 			content_value.scrollbar.is_dragging  = false
 		}
 	}
@@ -327,17 +485,47 @@ screen_to_offset :: proc(editor: ^Editor, pane: ^Pane, editor_pane: ^EditorPane,
 	}
 	if target_line >= total_line_count { target_line = total_line_count - 1 }
 
-	// X → byte column within the line, measured from the pane's text origin.
-	relative_x := i32(mouse_x) - pane.rectangle.x - editor.padding_x - editor_pane.gutter_width
-	column_index: i32 = 0
+	// X → visual column, then visual column → byte column via the same
+	// tab-expansion / multi-byte-rune mapping the renderer uses. Without
+	// this inverse, clicking past a tab lands several bytes too far right
+	// because the click math would treat each visual cell as one byte.
+	scroll_x_pixels := i32(editor_pane.scroll_x)
+	if editor_pane.wrap_mode { scroll_x_pixels = 0 }
+	relative_x := i32(mouse_x) - pane.rectangle.x - editor.padding_x - editor_pane.gutter_width + scroll_x_pixels
+	visual_column: i32 = 0
 	if relative_x > 0 && editor.character_width > 0 {
-		column_index = (relative_x + editor.character_width / 2) / editor.character_width
+		visual_column = (relative_x + editor.character_width / 2) / editor.character_width
 	}
-	line_start_offset := document.document_line_start(&editor_pane.document, target_line)
-	target_line_text := document.document_get_line(&editor_pane.document, target_line, context.temp_allocator)
-	line_length := i32(len(target_line_text))
-	if column_index > line_length { column_index = line_length }
-	if column_index < 0 { column_index = 0 }
 
-	return line_start_offset + u32(column_index)
+	line_start_offset := document.document_line_start(&editor_pane.document, target_line)
+	target_line_text  := document.document_get_line(&editor_pane.document, target_line, context.temp_allocator)
+	byte_column       := visual_to_byte_column(target_line_text, visual_column)
+
+	return line_start_offset + u32(byte_column)
+}
+
+// Walk the byte-to-visual table produced by `build_line_display` and return
+// the byte index whose visual column is closest to `target_visual_column`.
+// Ties prefer the LATER byte so clicking on the right half of a tab lands
+// the cursor after it, matching how most editors handle the gesture.
+@(private="file")
+visual_to_byte_column :: proc(line_text: string, target_visual_column: i32) -> i32 {
+	_, byte_to_visual_column := build_line_display(line_text)
+	if target_visual_column <= 0 { return 0 }
+
+	best_byte_index: i32 = 0
+	best_distance:   i32 = max(i32)
+	for byte_index in 0..=len(line_text) {
+		visual_at := i32(byte_to_visual_column[byte_index])
+		distance  := visual_at - target_visual_column
+		if distance < 0 { distance = -distance }
+		if distance <= best_distance {
+			best_distance   = distance
+			best_byte_index = i32(byte_index)
+		}
+		// Once we've passed the target with no chance of getting closer,
+		// we can stop early. visual_at only ever grows along the line.
+		if visual_at - target_visual_column > best_distance { break }
+	}
+	return best_byte_index
 }

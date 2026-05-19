@@ -41,34 +41,58 @@ mkdir -p "$output_directory"
 echo "==> odin build src -target:$odin_target ${build_flags[*]} -out:$output_binary"
 odin build src "-target:$odin_target" "${build_flags[@]}" "-out:$output_binary"
 
-copy_if_changed() {
+copy_file_if_changed() {
     local source="$1"
-    local destination_directory="$2"
-    local destination="$destination_directory/$(basename "$source")"
+    local destination="$2"
+    local display_name="$3"
 
     if [ -f "$destination" ] && [ ! "$source" -nt "$destination" ]; then
         local source_size destination_size
         source_size=$(wc -c < "$source")
         destination_size=$(wc -c < "$destination")
         if [ "$source_size" = "$destination_size" ]; then
-            echo "    up-to-date: $(basename "$source")"
+            echo "    up-to-date: $display_name"
             return
         fi
     fi
 
+    mkdir -p "$(dirname "$destination")"
     cp -f "$source" "$destination"
-    echo "    staged: $(basename "$source")"
+    echo "    staged: $display_name"
 }
 
-vendor_platform_directory="vendor/$target"
-if [ -d "$vendor_platform_directory" ]; then
-    while IFS= read -r -d '' vendor_file; do
-        copy_if_changed "$vendor_file" "$output_directory"
-    done < <(find "$vendor_platform_directory" -maxdepth 1 -type f ! -name 'README.md' -print0)
-fi
+# Two-pass copy from vendor/:
+#   Pass 1 — every file under vendor/ that isn't inside a platform-specific
+#            subdir (linux/, macos/, windows/) gets staged. Preserves any
+#            nested directory layout so vendor/shared/foo/bar.txt lands at
+#            out/<target>/<config>/shared/foo/bar.txt.
+#   Pass 2 — files under vendor/<target>/ are then staged on TOP of pass 1,
+#            with the platform dir itself stripped from the destination
+#            path. vendor/linux/lsp/ols → out/linux/debug/lsp/ols.
+# README.md files at any depth are docs and skipped.
 
-if [ -f vendor/font.ttf ]; then
-    copy_if_changed "vendor/font.ttf" "$output_directory"
+platform_subdirectory_names=(linux macos windows)
+
+if [ -d vendor ]; then
+    while IFS= read -r -d '' vendor_file; do
+        relative_path="${vendor_file#vendor/}"
+        skip_file=false
+        for platform_name in "${platform_subdirectory_names[@]}"; do
+            case "$relative_path" in
+                "$platform_name"/*) skip_file=true; break ;;
+            esac
+        done
+        if [ "$skip_file" = true ]; then continue; fi
+        copy_file_if_changed "$vendor_file" "$output_directory/$relative_path" "$relative_path"
+    done < <(find vendor -type f ! -name 'README.md' -print0)
+
+    vendor_platform_directory="vendor/$target"
+    if [ -d "$vendor_platform_directory" ]; then
+        while IFS= read -r -d '' vendor_file; do
+            relative_path="${vendor_file#$vendor_platform_directory/}"
+            copy_file_if_changed "$vendor_file" "$output_directory/$relative_path" "$relative_path"
+        done < <(find "$vendor_platform_directory" -type f ! -name 'README.md' -print0)
+    fi
 fi
 
 echo "==> build complete: $output_binary"

@@ -4,6 +4,7 @@ import "core:strings"
 import "vendor:sdl3"
 import "vendor:sdl3/ttf"
 
+import "../terminal"
 import "../ui"
 
 // --- Action vocabulary -----------------------------------------------------
@@ -32,6 +33,7 @@ MenuActionKind :: enum {
 	EditReplace,
 	EditFindInFiles,
 	EditReplaceInFiles,
+	EditCompletion,
 
 	ViewToggleWrap,
 	ViewToggleDiff,
@@ -40,6 +42,7 @@ MenuActionKind :: enum {
 
 	NavSymbolJump,
 	NavGitHistory,
+	NavLspHover,
 
 	TerminalShowHide,
 	TerminalNew,
@@ -96,6 +99,8 @@ EDIT_ITEMS := [?]MenuItemDef{
 	{label = "Replace",          shortcut = "Ctrl+R",       action = .EditReplace},
 	{label = "Find in Files",    shortcut = "Ctrl+Shift+F", action = .EditFindInFiles},
 	{label = "Replace in Files", shortcut = "Ctrl+Shift+R", action = .EditReplaceInFiles},
+	{},
+	{label = "Complete",         shortcut = "Ctrl+Space",   action = .EditCompletion},
 }
 
 @(private="file")
@@ -124,7 +129,8 @@ TERMINAL_ITEMS := [?]MenuItemDef{
 
 @(private="file")
 HELP_ITEMS := [?]MenuItemDef{
-	{label = "Help...", shortcut = "F1", action = .HelpToggle},
+	{label = "Help...",         shortcut = "F1",     action = .HelpToggle},
+	{label = "Hover Info",      shortcut = "Ctrl+K", action = .NavLspHover},
 }
 
 @(private)
@@ -151,6 +157,13 @@ MenuBarState :: struct {
 	// dirty exactly once on each press/release rather than every frame.
 	alt_held:           bool,
 
+	// Flipped true when a menu action executes; cleared on the next Alt
+	// PRESS transition. Implements "after picking an item the menu hides
+	// even if Alt is still held — user must release Alt and press again
+	// to bring the menu back". Without this the bar would pop right back
+	// up while Alt is held, which is jarring.
+	alt_press_consumed: bool,
+
 	// Rewritten by the renderer every frame so the input handler can do hit
 	// tests against the same rectangles the user sees.
 	title_rectangles: [16]sdl3.FRect,
@@ -160,6 +173,18 @@ MenuBarState :: struct {
 	dropdown_x:       i32,
 	dropdown_y:       i32,
 	dropdown_width:   i32,
+}
+
+// Final composed visibility rule. The bar is shown when either:
+//   * Alt is currently held AND the user hasn't already used Alt to pick
+//     something this press cycle, OR
+//   * A dropdown is open right now (a click on a title with no Alt at all
+//     is enough to surface the bar; releasing Alt while a menu is open
+//     also keeps it visible).
+@(private)
+menu_bar_is_visible :: proc(menu_bar: ^MenuBarState) -> bool {
+	if menu_bar.open_menu_index >= 0 { return true }
+	return menu_bar.alt_held && !menu_bar.alt_press_consumed
 }
 
 @(private)
@@ -172,11 +197,20 @@ menu_bar_init :: proc(menu_bar: ^MenuBarState) {
 // `editor_handle_event` (the main loop drops them), so we can't track Alt
 // release via the event stream — query the live modifier mask instead.
 // Marking dirty only on transitions keeps idle frames from repainting.
+//
+// Also drives the visibility lifecycle:
+//   * Alt PRESS  → clear `alt_press_consumed` so the bar can show again
+//                  after a previous action execution.
+//   * Alt RELEASE → no special action; visibility derives from the
+//                   composed rule in `menu_bar_is_visible`.
 @(private)
 menu_bar_poll_alt_state :: proc(editor: ^Editor) {
 	current_modifiers := sdl3.GetModState()
 	alt_currently_held := .LALT in current_modifiers || .RALT in current_modifiers
 	if alt_currently_held != editor.menu_bar.alt_held {
+		if alt_currently_held && !editor.menu_bar.alt_held {
+			editor.menu_bar.alt_press_consumed = false
+		}
 		editor.menu_bar.alt_held = alt_currently_held
 		editor_mark_dirty(editor)
 	}
@@ -198,10 +232,22 @@ mnemonic_index_in_title :: proc(title: string, mnemonic_letter: u8) -> int {
 
 // --- Layout ----------------------------------------------------------------
 
-// Pixel height of the menu strip. Matches the status bar so the framing top
-// and bottom feel symmetrical.
+// Pixel height of the menu strip when visible. Matches the status bar so
+// the framing top and bottom feel symmetrical. Returns 0 when the bar is
+// hidden so panes get the full window height — the bar overlays whatever's
+// below it the instant Alt is pressed, then yields the space back when it
+// disappears, avoiding a pane reflow on each show/hide.
 @(private)
 editor_menu_bar_height :: proc(editor: ^Editor) -> i32 {
+	if !menu_bar_is_visible(&editor.menu_bar) { return 0 }
+	return editor.line_height + 8
+}
+
+// Always-positive height for the actual menu paint — even when the bar is
+// "logically hidden" (no layout space reserved), the renderer needs the
+// real height to draw the strip and lay out the dropdowns.
+@(private="file")
+editor_menu_bar_paint_height :: proc(editor: ^Editor) -> i32 {
 	return editor.line_height + 8
 }
 
@@ -397,7 +443,13 @@ menu_bar_navigate_item :: proc(editor: ^Editor, direction: int) {
 @(private)
 menu_bar_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i32) {
 	menu_bar := &editor.menu_bar
-	bar_height := editor_menu_bar_height(editor)
+	// Hidden — don't paint the strip and don't update any title rects so
+	// the input path can't accidentally hit-test against stale geometry.
+	if !menu_bar_is_visible(menu_bar) {
+		menu_bar.title_count = 0
+		return
+	}
+	bar_height := editor_menu_bar_paint_height(editor)
 
 	// Background strip.
 	bar_rectangle := sdl3.FRect{0, 0, f32(window_width), f32(bar_height)}
@@ -470,7 +522,10 @@ menu_bar_render_dropdown :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, wind
 	menu_bar := &editor.menu_bar
 	if menu_bar.open_menu_index < 0 || menu_bar.open_menu_index >= len(MENUS) { return }
 
-	bar_height := editor_menu_bar_height(editor)
+	// Dropdown anchors below the strip — even though the strip's layout
+	// height is 0 when "hidden", the paint height is always the visible
+	// pixel height we want to anchor against.
+	bar_height := editor_menu_bar_paint_height(editor)
 	menu_def   := MENUS[menu_bar.open_menu_index]
 	items      := menu_def.items
 
@@ -578,6 +633,11 @@ menu_bar_render_dropdown :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, wind
 
 @(private)
 menu_execute_action :: proc(editor: ^Editor, action: MenuActionKind) {
+	if action == .None { return }
+	// Forces the bar to hide on the next visibility check, even if Alt is
+	// still held. User has to release + re-press Alt to bring it back —
+	// matches the platform-standard "menu disappears after selection".
+	editor.menu_bar.alt_press_consumed = true
 	switch action {
 	case .None: return
 
@@ -590,12 +650,13 @@ menu_execute_action :: proc(editor: ^Editor, action: MenuActionKind) {
 
 	case .EditUndo:            editor_undo_active(editor)
 	case .EditRedo:            editor_redo_active(editor)
-	case .EditCopy:            clipboard_copy(editor)
-	case .EditPaste:           if !editor.diff_state.active { clipboard_paste(editor) }
+	case .EditCopy:            menu_copy_in_active_pane(editor)
+	case .EditPaste:           menu_paste_in_active_pane(editor)
 	case .EditFind:            menu_toggle_find(editor)
 	case .EditReplace:         menu_toggle_replace(editor)
 	case .EditFindInFiles:     find_in_files_open(editor)
 	case .EditReplaceInFiles:  replace_in_files_open(editor)
+	case .EditCompletion:      completion_popup_trigger_at_cursor(editor)
 
 	case .ViewToggleWrap:      editor_toggle_wrap(editor)
 	case .ViewToggleDiff:      diff_toggle(editor)
@@ -604,6 +665,7 @@ menu_execute_action :: proc(editor: ^Editor, action: MenuActionKind) {
 
 	case .NavSymbolJump:       symbols_dialog_open(editor)
 	case .NavGitHistory:       git_history_dialog_open(editor)
+	case .NavLspHover:         hover_popup_request_at_cursor(editor)
 
 	case .TerminalShowHide:    editor_toggle_terminal(editor)
 	case .TerminalNew:         editor_terminal_create_new(editor)
@@ -624,6 +686,30 @@ menu_toggle_find :: proc(editor: ^Editor) {
 @(private="file")
 menu_toggle_replace :: proc(editor: ^Editor) {
 	if replace_active(editor) { replace_close(editor, false) } else { replace_open(editor) }
+}
+
+// Copy/Paste dispatch based on the active pane's content type. In a terminal
+// pane these route to the shell's copy/paste (selection-to-clipboard, paste-
+// from-clipboard with bracketed-paste); elsewhere they hit the editor's
+// document clipboard procs.
+@(private="file")
+menu_copy_in_active_pane :: proc(editor: ^Editor) {
+	#partial switch &content_value in editor_active_pane(editor).content {
+	case TerminalPane:
+		if content_value.terminal != nil { terminal.terminal_copy_selection_to_clipboard(content_value.terminal) }
+	case EditorPane:
+		clipboard_copy(editor)
+	}
+}
+
+@(private="file")
+menu_paste_in_active_pane :: proc(editor: ^Editor) {
+	#partial switch &content_value in editor_active_pane(editor).content {
+	case TerminalPane:
+		if content_value.terminal != nil { terminal.terminal_paste_from_clipboard(content_value.terminal) }
+	case EditorPane:
+		if !editor.diff_state.active { clipboard_paste(editor) }
+	}
 }
 
 // `ttf.GetStringSize` wants a cstring; the small allocations land in

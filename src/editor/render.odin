@@ -6,6 +6,7 @@ import "vendor:sdl3"
 import "vendor:sdl3/ttf"
 
 import "../document"
+import "../lsp"
 import "../syntax"
 import "../terminal"
 import "../ui"
@@ -70,6 +71,9 @@ editor_update :: proc(editor: ^Editor, delta_time: f64) {
 	// Alt-key state is polled here because SDL3 KEY_UP events don't reach
 	// the editor — the menu bar uses this to toggle mnemonic underlines.
 	menu_bar_poll_alt_state(editor)
+
+	// Drain LSP inbound messages + fire debounced didChange notifications.
+	editor_lsp_update(editor)
 
 	if editor.diff_state.active {
 		// Animate the shared diff scroll.
@@ -243,6 +247,7 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 				}
 				terminal.terminal_set_geometry(content_value.terminal, terminal_body_rectangle, editor.character_width, editor.line_height)
 				terminal.terminal_render(content_value.terminal, renderer, editor.font, editor.text_engine, &editor.text_cache)
+				render_terminal_scrollbar(editor, renderer, pane, &content_value)
 			}
 		case MarkdownPreviewPane:
 			markdown_preview_pane_render(editor, renderer, pane, &content_value, pane_is_active)
@@ -270,10 +275,27 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 		pane_tag := editor.split_active ? fmt.tprintf("[Pane %d] ", editor.active_pane_index + 1) : ""
 		diff_tag := editor.diff_state.active ? "[DIFF] " : ""
 		hint_text := editor.diff_state.active ? "(F8 exit diff, F1 help)" : "(F1 help, F2 browse, Ctrl+Tab swap panes, F8 diff)"
-		status_text = fmt.tprintf("%s%s%sLn %d, Col %d | %d lines | %d bytes  %s",
+
+		// LSP diagnostic counts — only shown when at least one issue exists
+		// for the active doc, otherwise the status line gets noisy.
+		lsp_indicator: string
+		if diagnostics := editor_lsp_diagnostics_for_pane(editor, &content_value); len(diagnostics) > 0 {
+			error_count, warning_count := 0, 0
+			for diagnostic in diagnostics {
+				switch diagnostic.severity {
+				case .Error:       error_count   += 1
+				case .Warning:     warning_count += 1
+				case .Information, .Hint:
+				}
+			}
+			lsp_indicator = fmt.tprintf("LSP: %dE %dW | ", error_count, warning_count)
+		}
+
+		status_text = fmt.tprintf("%s%s%s%sLn %d, Col %d | %d lines | %d bytes  %s",
 			diff_tag,
 			pane_tag,
 			dirty_indicator,
+			lsp_indicator,
 			content_value.cursor_line + 1,
 			content_value.cursor_column + 1,
 			document.document_line_count(&content_value.document),
@@ -340,6 +362,12 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 		terminal_picker_render(editor, renderer, window_width, window_height)
 	}
 
+	// LSP hover + completion + signature popups float above pane content
+	// but under modal overlays.
+	hover_popup_render(editor, renderer, window_width, window_height)
+	completion_popup_render(editor, renderer, window_width, window_height)
+	signature_popup_render(editor, renderer, window_width, window_height)
+
 	// Menu bar paints last so it sits above pane content, and the dropdown
 	// overlays whatever's underneath. Modal overlays earlier still draw on
 	// top of any subsequently-opened dialog — those close the menu before
@@ -386,6 +414,10 @@ render_editor_pane :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pan
 		find_render_highlights(editor, renderer, editor_pane, view_x, text_y, gutter_width_pixels, pane_index)
 		replace_render_highlights(editor, renderer, editor_pane, view_x, text_y, gutter_width_pixels, pane_index)
 		render_editor_pane_normal(editor, renderer, editor_pane, view_x, text_y, is_active, gutter_character_count, gutter_width_pixels)
+
+		// LSP diagnostic squiggles overlay the text — same clip rect, so they
+		// pan with horizontal scroll and clip at the gutter / pane edge.
+		render_lsp_diagnostics(editor, renderer, editor_pane, view_x, text_y, gutter_width_pixels)
 	}
 
 	sdl3.SetRenderClipRect(renderer, nil)
@@ -430,6 +462,156 @@ render_editor_pane :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pan
 	if replace_active(editor) && editor.replace.pane_index == pane_index {
 		replace_render_bar(editor, renderer, pane)
 	}
+}
+
+// Paint LSP diagnostic squiggles over the visible lines of the active editor
+// pane. One zigzag per diagnostic; color depends on severity. Coordinates
+// from the diagnostic are 0-based byte offsets — we look up the line text
+// and convert byte columns to visual columns so tabs / wide chars line up
+// with what's rendered.
+@(private="file")
+render_lsp_diagnostics :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, editor_pane: ^EditorPane, view_x, text_y, gutter_width: i32) {
+	diagnostics := editor_lsp_diagnostics_for_pane(editor, editor_pane)
+	if len(diagnostics) == 0 { return }
+
+	scroll_y_pixels := i32(editor_pane.scroll_y)
+	scroll_x_pixels := i32(editor_pane.scroll_x); if editor_pane.wrap_mode { scroll_x_pixels = 0 }
+	text_origin_x   := view_x + editor.padding_x + gutter_width - scroll_x_pixels
+
+	visible_line_count := editor_pane.visible_lines
+	if visible_line_count == 0 { visible_line_count = 1 }
+	first_visible_line := editor_pane.scroll_line
+	last_visible_line  := first_visible_line + visible_line_count + 1
+
+	total_line_count := document.document_line_count(&editor_pane.document)
+
+	for diagnostic in diagnostics {
+		// One squiggle per affected line. For multi-line diagnostics we
+		// underline each row from start to end column (full-width on rows
+		// strictly between start and end).
+		start_line := u32(max(i32(0), diagnostic.start_line))
+		end_line   := u32(max(i32(0), diagnostic.end_line))
+		if end_line < start_line { end_line = start_line }
+		if start_line >= total_line_count { continue }
+		if end_line   >= total_line_count { end_line = total_line_count - 1 }
+
+		severity_color := diagnostic_severity_color(editor, diagnostic.severity)
+
+		for line_index in start_line..=end_line {
+			if line_index < first_visible_line || line_index > last_visible_line { continue }
+			line_text := document.document_get_line(&editor_pane.document, line_index, context.temp_allocator)
+			_, byte_to_visual_column := build_line_display(line_text)
+
+			byte_start: int = 0
+			byte_end:   int = len(line_text)
+			if line_index == start_line { byte_start = clamp_int(int(diagnostic.start_column), 0, len(line_text)) }
+			if line_index == end_line   { byte_end   = clamp_int(int(diagnostic.end_column),   0, len(line_text)) }
+			if byte_end <= byte_start    { byte_end = byte_start + 1 } // empty range — show one cell
+
+			visual_start := i32(byte_to_visual_column[clamp_int(byte_start, 0, len(line_text))])
+			visual_end   := i32(byte_to_visual_column[clamp_int(byte_end,   0, len(line_text))])
+			if visual_end <= visual_start { visual_end = visual_start + 1 }
+
+			squiggle_x_start := text_origin_x + visual_start * editor.character_width
+			squiggle_x_end   := text_origin_x + visual_end   * editor.character_width
+			squiggle_y       := text_y + editor.padding_y + i32(line_index) * editor.line_height - scroll_y_pixels + editor.line_height - 2
+
+			draw_squiggle(renderer, squiggle_x_start, squiggle_y, squiggle_x_end - squiggle_x_start, severity_color)
+		}
+	}
+}
+
+@(private="file")
+draw_squiggle :: proc(renderer: ^sdl3.Renderer, x_start, y_baseline, width: i32, color: sdl3.FColor) {
+	if width <= 0 { return }
+	sdl3.SetRenderDrawColorFloat(renderer, color.r, color.g, color.b, color.a)
+	// Triangle wave with 2-px amplitude and 4-px period. Render as a tight
+	// run of line segments so SDL antialiases the zigzag at the GPU level.
+	previous_x := f32(x_start)
+	previous_y := f32(y_baseline)
+	for offset in 1..=int(width) {
+		// Phase 0..3 in the period; y oscillates between baseline and baseline+1.
+		phase := offset % 4
+		current_y := f32(y_baseline)
+		switch phase {
+		case 0, 2: current_y = f32(y_baseline)
+		case 1:    current_y = f32(y_baseline + 1)
+		case 3:    current_y = f32(y_baseline - 1)
+		}
+		current_x := f32(x_start + i32(offset))
+		sdl3.RenderLine(renderer, previous_x, previous_y, current_x, current_y)
+		previous_x = current_x
+		previous_y = current_y
+	}
+}
+
+@(private="file")
+diagnostic_severity_color :: proc(editor: ^Editor, severity: lsp.DiagnosticSeverity) -> sdl3.FColor {
+	switch severity {
+	case .Error:       return sdl3.FColor{0.95, 0.42, 0.42, 1.0} // red
+	case .Warning:     return sdl3.FColor{0.95, 0.78, 0.42, 1.0} // amber
+	case .Information: return sdl3.FColor{0.50, 0.78, 0.95, 1.0} // light blue
+	case .Hint:        return sdl3.FColor{0.55, 0.70, 0.95, 0.7} // soft blue
+	}
+	return sdl3.FColor{0.95, 0.42, 0.42, 1.0}
+}
+
+@(private="file")
+clamp_int :: #force_inline proc(value, low, high: int) -> int {
+	if value < low  { return low }
+	if value > high { return high }
+	return value
+}
+
+// Vertical scrollbar for a terminal pane. Mirrors the editor pane's
+// scrollbar: 6 px wide normally, widens to 14 px on hover/drag, stored
+// track + thumb rectangles for mouse hit-testing. Content height is
+// (scrollback + live) * line_height; scroll value is measured from the top
+// of that virtual buffer so the thumb sits at the bottom when the user is
+// looking at the live shell.
+@(private="file")
+render_terminal_scrollbar :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pane, terminal_pane: ^TerminalPane) {
+	terminal_pointer := terminal_pane.terminal
+	if terminal_pointer == nil { return }
+	line_height := editor.line_height
+	if line_height <= 0 { return }
+
+	title_bar_height := editor_title_bar_height(editor)
+	track_area_top    := pane.rectangle.y + title_bar_height
+	track_area_height := pane.rectangle.h - title_bar_height
+	if track_area_height <= 0 { return }
+
+	screen := &terminal_pointer.screen
+	scrollback_count := i32(len(screen.scrollback_rows))
+	total_row_count  := scrollback_count + screen.rows
+	content_height   := f32(total_row_count) * f32(line_height)
+	viewport_height  := f32(screen.rows) * f32(line_height)
+	if content_height <= viewport_height {
+		terminal_pane.scrollbar.track_rectangle = sdl3.FRect{}
+		terminal_pane.scrollbar.thumb_rectangle = sdl3.FRect{}
+		return
+	}
+
+	scrollbar_width: i32 = 6
+	if terminal_pane.scrollbar.is_hovered || terminal_pane.scrollbar.is_dragging { scrollbar_width = 14 }
+	scrollbar_x := pane.rectangle.x + pane.rectangle.w - scrollbar_width - 2
+
+	// Scroll value = distance from the top of the virtual buffer to the
+	// top of the viewport. `scroll_offset` is measured in rows *up* from
+	// the live bottom; convert.
+	scroll_value := f32(scrollback_count - terminal_pointer.scroll_offset) * f32(line_height)
+
+	ui_context := ui.Context{
+		renderer        = renderer,
+		font            = editor.font,
+		engine          = editor.text_engine,
+		character_width = editor.character_width,
+		line_height     = editor.line_height,
+	}
+	theme := ui.default_theme()
+	track_rectangle, thumb_rectangle := ui.draw_scrollbar(&ui_context, scrollbar_x, track_area_top, track_area_height, content_height, viewport_height, scroll_value, scrollbar_width, theme)
+	terminal_pane.scrollbar.track_rectangle = track_rectangle
+	terminal_pane.scrollbar.thumb_rectangle = thumb_rectangle
 }
 
 // Tinted strip at the top of an editor pane showing the document's file name

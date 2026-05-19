@@ -27,21 +27,57 @@ terminal_render :: proc(terminal: ^Terminal, renderer: ^sdl3.Renderer, font: ^tt
 		f32(terminal.rectangle.x), f32(terminal.rectangle.y), f32(terminal.rectangle.w), f32(terminal.rectangle.h),
 	})
 
+	character_width := terminal.character_width
+	line_height     := terminal.line_height
+
+	// Virtual row space: indices 0..len(scrollback) are scrollback rows;
+	// indices [len(scrollback), len(scrollback)+screen.rows) are the live
+	// grid. The viewport covers screen.rows rows ending at virtual index
+	// (total_virtual_rows - 1 - scroll_offset).
+	scrollback_count   := i32(len(screen.scrollback_rows))
+	total_virtual_rows := scrollback_count + screen.rows
+	viewport_top_virtual_row := total_virtual_rows - screen.rows - terminal.scroll_offset
+	if viewport_top_virtual_row < 0 { viewport_top_virtual_row = 0 }
+
+	// Pre-compute selection range (normalized so start <= end in virtual
+	// row-major coordinates). Used by the per-row passes to highlight cells.
+	selection_active := terminal.selection.is_active
+	selection_start_row, selection_start_column, selection_end_row, selection_end_column: i32
+	if selection_active {
+		selection_start_row, selection_start_column, selection_end_row, selection_end_column = selection_normalized_range(&terminal.selection)
+	}
+
 	// Per-row pass: contiguous runs of cells that share fg/bg/attrs render
 	// together as one text-call. This keeps per-frame work tied to the
 	// number of *spans* on screen, not to columns*rows.
-	character_width := terminal.character_width
-	line_height     := terminal.line_height
-	for row_index in 0..<screen.rows {
-		row_y_position := i32(terminal.rectangle.y) + row_index * line_height
+	for visible_row_index in 0..<screen.rows {
+		virtual_row := viewport_top_virtual_row + visible_row_index
+		row_y_position := i32(terminal.rectangle.y) + visible_row_index * line_height
+
+		// Resolve the row's cells + column count from either scrollback or
+		// the live grid. Scrollback rows can have a different column count
+		// than the current grid (no re-flow on resize); the per-row pass
+		// just clamps below.
+		row_cells:    []Cell
+		row_columns:  i32
+		if virtual_row < scrollback_count {
+			scrollback_row := screen.scrollback_rows[virtual_row]
+			row_cells   = scrollback_row
+			row_columns = i32(len(scrollback_row))
+		} else {
+			live_row_index := virtual_row - scrollback_count
+			if live_row_index < 0 || live_row_index >= screen.rows { continue }
+			row_cells   = screen.cells[live_row_index*screen.columns : (live_row_index+1)*screen.columns]
+			row_columns = screen.columns
+		}
 
 		// First pass: paint background rectangles for any cell whose bg
 		// differs from the screen default. Coalesce adjacent equal-bg
 		// cells into one rect.
 		background_run_start := i32(-1)
 		background_run_color := background_color
-		for column_index in 0..<screen.columns {
-			cell := screen.cells[row_index*screen.columns + column_index]
+		for column_index in 0..<row_columns {
+			cell := row_cells[column_index]
 			effective_cell_background := effective_background(cell)
 			if !colors_are_equal(effective_cell_background, background_color) {
 				if background_run_start < 0 || !colors_are_equal(effective_cell_background, background_run_color) {
@@ -54,18 +90,40 @@ terminal_render :: proc(terminal: ^Terminal, renderer: ^sdl3.Renderer, font: ^tt
 				background_run_start = -1
 			}
 		}
-		if background_run_start >= 0 { fill_background_run(renderer, terminal.rectangle.x, row_y_position, background_run_start, screen.columns, character_width, line_height, background_run_color) }
+		if background_run_start >= 0 { fill_background_run(renderer, terminal.rectangle.x, row_y_position, background_run_start, row_columns, character_width, line_height, background_run_color) }
+
+		// Selection highlight — painted *over* per-cell backgrounds but
+		// *under* glyphs so the selected text stays readable.
+		if selection_active && virtual_row >= selection_start_row && virtual_row <= selection_end_row {
+			row_select_start: i32 = 0
+			row_select_end:   i32 = screen.columns
+			if virtual_row == selection_start_row { row_select_start = selection_start_column }
+			if virtual_row == selection_end_row   { row_select_end   = selection_end_column   }
+			if row_select_end > row_select_start {
+				selection_rectangle := sdl3.FRect{
+					f32(terminal.rectangle.x + row_select_start*character_width),
+					f32(row_y_position),
+					f32((row_select_end - row_select_start) * character_width),
+					f32(line_height),
+				}
+				selection_color := screen.default_foreground_color
+				sdl3.SetRenderDrawBlendMode(renderer, sdl3.BLENDMODE_BLEND)
+				sdl3.SetRenderDrawColorFloat(renderer, selection_color.red, selection_color.green, selection_color.blue, 0.35)
+				sdl3.RenderFillRect(renderer, &selection_rectangle)
+				sdl3.SetRenderDrawBlendMode(renderer, sdl3.BLENDMODE_NONE)
+			}
+		}
 
 		// Second pass: glyphs. Build runes per fg-run and submit each run
 		// as one CreateText/Draw pair.
 		text_run_builder: strings.Builder
-		strings.builder_init(&text_run_builder, 0, int(screen.columns)*4, context.temp_allocator)
+		strings.builder_init(&text_run_builder, 0, int(row_columns)*4, context.temp_allocator)
 
 		text_run_start_column := i32(0)
 		text_run_color        := screen.default_foreground_color
 		text_run_length       := 0
-		for column_index in 0..<screen.columns {
-			cell := screen.cells[row_index*screen.columns + column_index]
+		for column_index in 0..<row_columns {
+			cell := row_cells[column_index]
 			effective_cell_foreground := effective_foreground(cell)
 			if text_run_length == 0 {
 				text_run_start_column = column_index
@@ -92,8 +150,9 @@ terminal_render :: proc(terminal: ^Terminal, renderer: ^sdl3.Renderer, font: ^tt
 		}
 	}
 
-	// Block cursor (filled rectangle over the cell at the cursor position).
-	if screen.cursor_visible && terminal.cursor_visible {
+	// Block cursor — drawn only when the viewport is at the live bottom
+	// (scrolled back into history, the cursor is off-screen anyway).
+	if terminal.scroll_offset == 0 && screen.cursor_visible && terminal.cursor_visible {
 		cursor_pixel_x := i32(terminal.rectangle.x) + screen.cursor_column * character_width
 		cursor_pixel_y := i32(terminal.rectangle.y) + screen.cursor_row * line_height
 		cursor_foreground_color := screen.default_foreground_color

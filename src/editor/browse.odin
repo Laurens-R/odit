@@ -518,7 +518,7 @@ browse_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewport_width,
 
 	// Dialog rect
 	desired_columns: i32 = 100
-	desired_rows: i32 = 60
+	desired_rows: i32 = 40
 	dialog_width  := min(desired_columns * editor.character_width + 32, viewport_width  - 40)
 	dialog_height := min(desired_rows * editor.line_height + 40, viewport_height - 40)
 	if dialog_width  < 240 { dialog_width  = min(viewport_width  - 16, 240) }

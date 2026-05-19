@@ -43,6 +43,14 @@ Screen :: struct {
 	scroll_region_top:           i32, // inclusive
 	scroll_region_bottom:        i32, // inclusive
 	cursor_visible:              bool,
+
+	// Scrollback: rows pushed off the top of the active region by full-
+	// screen scrolls. Each entry is an owned slice of `Cell` at the column
+	// count active at push time — we don't re-flow on resize, the renderer
+	// just clamps. Capped at SCROLLBACK_MAX_ROWS so a runaway shell can't
+	// grow the heap unboundedly.
+	scrollback_rows:             [dynamic][]Cell,
+
 	// Bookkeeping so wide-char / wrap edge cases can be added later without
 	// schema changes. For now this is a simple grid.
 }
@@ -75,6 +83,12 @@ DEFAULT_ROW_COUNT    :: i32(24)
 // shell can't stall the UI. Excess stays in the queue for the next tick.
 DRAIN_BUDGET_PER_FRAME :: 64 * 1024
 
+// Maximum scrollback retained in memory. Each row is roughly columns *
+// sizeof(Cell) bytes — at ~38 bytes/cell × 200 columns × 5000 rows that's
+// about 38 MB worst case, which is the right order of magnitude for an
+// embedded terminal. Older rows are evicted FIFO when this is exceeded.
+SCROLLBACK_MAX_ROWS :: 5000
+
 Terminal :: struct {
 	screen: Screen,
 	parser: Parser,
@@ -102,6 +116,31 @@ Terminal :: struct {
 	// Palette (xterm 256-color). palette[0..15] are the SGR 30-37 / 40-47
 	// base colors; the rest of the indices are the standard xterm cube.
 	palette: [256]Color,
+
+	// Number of rows the viewport is scrolled up from the live screen. 0
+	// means "showing the bottom" (the live cells). Bumped by the mouse
+	// wheel; snapped back to 0 on any user keystroke so typing always
+	// follows the prompt.
+	scroll_offset: i32,
+
+	// Text selection state — coordinates are in *virtual* row space:
+	//   virtual_row in [0, len(scrollback_rows))            => scrollback row
+	//   virtual_row in [len(scrollback_rows), +screen.rows) => live cells
+	// Coordinates survive scrolling so a long drag through scrollback stays
+	// anchored to the same source rows even as the viewport moves.
+	selection: TerminalSelection,
+}
+
+// Stream selection: a contiguous span from `anchor` (inclusive) to `current`
+// (exclusive of the cell beyond the last character). Wraps across rows. When
+// `is_active` is false, no selection is rendered or copied.
+TerminalSelection :: struct {
+	is_active:      bool,
+	is_dragging:    bool, // true between mouse-down and mouse-up; updates current on motion
+	anchor_row:     i32,  // virtual row index
+	anchor_column:  i32,
+	current_row:    i32,
+	current_column: i32,
 }
 
 // --- Public API ----------------------------------------------------------
@@ -252,10 +291,34 @@ read_thread_proc :: proc(thread_argument: rawptr) {
 // Write `data` to the shell's stdin (typed user input or synthesized escape
 // sequences for special keys). Returns the number of bytes that made it
 // through; partial writes are unusual on Windows pipes but we surface them
-// anyway.
+// anyway. Also snaps the viewport back to the live bottom — typing always
+// follows the prompt, mirroring xterm / Windows Terminal behavior.
 terminal_write :: proc(terminal: ^Terminal, data: []u8) -> int {
 	if terminal == nil || len(data) == 0 { return 0 }
+	terminal.scroll_offset = 0
 	return pty_write(terminal, data)
+}
+
+// Scroll the viewport by `line_delta` rows. Positive = scroll up (older
+// content), negative = scroll down (back toward the live screen). Clamped
+// to the available scrollback. Returns true when scroll_offset actually
+// moved so the caller can mark its frame dirty.
+terminal_scroll :: proc(terminal: ^Terminal, line_delta: i32) -> bool {
+	if terminal == nil || line_delta == 0 { return false }
+	max_scroll_offset := i32(len(terminal.screen.scrollback_rows))
+	new_offset := terminal.scroll_offset + line_delta
+	if new_offset < 0                 { new_offset = 0 }
+	if new_offset > max_scroll_offset { new_offset = max_scroll_offset }
+	if new_offset == terminal.scroll_offset { return false }
+	terminal.scroll_offset = new_offset
+	return true
+}
+
+// Force the viewport back to the live screen. Used by the input path so
+// any keystroke that ends up in the shell pops the user out of scrollback.
+terminal_snap_to_bottom :: proc(terminal: ^Terminal) {
+	if terminal == nil { return }
+	terminal.scroll_offset = 0
 }
 
 // Convenience for callers that want to push a literal string.

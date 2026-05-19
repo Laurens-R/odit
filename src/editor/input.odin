@@ -106,12 +106,29 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 	#partial switch event.type {
 	case .TEXT_INPUT:
 		if editor.diff_state.active { return }
+		// SDL fires TEXT_INPUT for some Ctrl combos (e.g. Ctrl+Space inserts
+		// a literal " "). Those need to stay out of the document — KEY_DOWN
+		// has already routed the combo as a hotkey.
+		{
+			modifiers_now := sdl3.GetModState()
+			if .LCTRL in modifiers_now || .RCTRL in modifiers_now { return }
+		}
 		// Route TEXT_INPUT to the active pane's content type.
 		#partial switch &content_value in editor_active_pane(editor).content {
 		case EditorPane:
 			input_text := string(event.text.text)
 			if len(input_text) > 0 {
+				// Typing in the document dismisses the hover popup — it
+				// only makes sense as long as the cursor sits on the
+				// symbol it was anchored to.
+				if editor.hover_popup.is_visible { hover_popup_close(editor) }
+				// Mirror keystrokes into the completion popup filter when it's open.
+				_ = completion_popup_consume_text(editor, input_text)
 				editor_insert_text(editor, input_text)
+				// Fire completion automatically on LSP trigger characters
+				// (`.`, `"` inside `import`). Has to run AFTER the insert
+				// so the LSP sees the just-typed character in its content.
+				editor_lsp_maybe_trigger_completion(editor, input_text)
 			}
 		case TerminalPane:
 			if content_value.terminal != nil {
@@ -178,6 +195,29 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 			editor_toggle_wrap(editor)
 			return
 		}
+		if ctrl_held && pressed_key == sdl3.K_K {
+			hover_popup_request_at_cursor(editor)
+			return
+		}
+		if ctrl_held && pressed_key == sdl3.K_SPACE {
+			completion_popup_trigger_at_cursor(editor)
+			return
+		}
+		if pressed_key == sdl3.K_ESCAPE && editor.hover_popup.is_visible {
+			hover_popup_close(editor)
+			return
+		}
+		if pressed_key == sdl3.K_ESCAPE && editor.signature_popup.is_visible {
+			signature_popup_close(editor)
+			return
+		}
+
+		// Completion popup intercepts navigation + Enter/Tab while open. It
+		// passes text-input events through so the user can keep typing —
+		// the filter is updated via the consume_text hook below.
+		if editor.completion_popup.is_visible {
+			if completion_popup_handle_key(editor, event) { return }
+		}
 		if ctrl_held && pressed_key == sdl3.K_S {
 			shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
 			if shift_held {
@@ -237,6 +277,31 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 			editor_handle_key(editor, event)
 		case TerminalPane:
 			if content_value.terminal != nil {
+				shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
+				// Ctrl+Shift+C / Ctrl+Shift+V are the terminal's copy/paste —
+				// plain Ctrl+C goes through to the shell as SIGINT, so we
+				// can't shadow it. Page Up/Down with no modifiers scroll
+				// scrollback rather than sending PgUp/PgDn to the shell.
+				if ctrl_held && shift_held && pressed_key == sdl3.K_C {
+					terminal.terminal_copy_selection_to_clipboard(content_value.terminal)
+					return
+				}
+				if ctrl_held && shift_held && pressed_key == sdl3.K_V {
+					terminal.terminal_paste_from_clipboard(content_value.terminal)
+					return
+				}
+				if !ctrl_held && !shift_held && pressed_key == sdl3.K_PAGEUP {
+					if terminal.terminal_scroll(content_value.terminal, i32(content_value.terminal.screen.rows - 1)) {
+						editor_mark_dirty(editor)
+					}
+					return
+				}
+				if !ctrl_held && !shift_held && pressed_key == sdl3.K_PAGEDOWN {
+					if terminal.terminal_scroll(content_value.terminal, -i32(content_value.terminal.screen.rows - 1)) {
+						editor_mark_dirty(editor)
+					}
+					return
+				}
 				terminal.terminal_handle_event(content_value.terminal, event)
 			}
 		case MarkdownPreviewPane:
@@ -261,6 +326,14 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 				} else {
 					editor_scroll(editor, -i32(event.wheel.y * 3))
 				}
+			case TerminalPane:
+				if content_value.terminal != nil {
+					// Positive wheel.y = wheel rolled up (intuitive scroll up
+					// in scrollback). Step of 3 rows matches editor panes.
+					if terminal.terminal_scroll(content_value.terminal, i32(event.wheel.y * 3)) {
+						editor_mark_dirty(editor)
+					}
+				}
 			case MarkdownPreviewPane:
 				markdown_preview_pane_scroll(editor, &content_value, -i32(event.wheel.y * 3))
 			}
@@ -270,7 +343,7 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 		if event.button.button == sdl3.BUTTON_LEFT {
 			key_modifiers := sdl3.GetModState()
 			shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
-			editor_mouse_down(editor, event.button.x, event.button.y, shift_held)
+			editor_mouse_down(editor, event.button.x, event.button.y, shift_held, i32(event.button.clicks))
 		}
 
 	case .MOUSE_BUTTON_UP:
@@ -340,12 +413,13 @@ editor_handle_key :: proc(editor: ^Editor, event: ^sdl3.Event) {
 
 	case sdl3.K_BACKSPACE:
 		if is_diff_mode { return }
+		_ = completion_popup_consume_backspace(editor)
 		if delete_selection(editor) { return }
 		if editor_pane.cursor_offset > 0 {
 			deletion_length := prev_char_len(editor)
 			document.document_delete(&editor_pane.document, editor_pane.cursor_offset - deletion_length, deletion_length)
 			editor_pane.cursor_offset -= deletion_length
-			pane_mark_document_modified(editor_pane)
+			pane_mark_document_modified(editor, editor_pane)
 			sync_cursor_from_offset(editor)
 		}
 
@@ -356,7 +430,7 @@ editor_handle_key :: proc(editor: ^Editor, event: ^sdl3.Event) {
 		if editor_pane.cursor_offset < document_length {
 			deletion_length := next_char_len(editor)
 			document.document_delete(&editor_pane.document, editor_pane.cursor_offset, deletion_length)
-			pane_mark_document_modified(editor_pane)
+			pane_mark_document_modified(editor, editor_pane)
 			sync_cursor_from_offset(editor)
 		}
 
@@ -479,4 +553,12 @@ editor_zoom :: proc(editor: ^Editor, wheel_direction: f32) {
 	// Invalidate the text cache so previously-shaped runs don't render at
 	// the old size on the next frame.
 	ui.text_cache_clear(&editor.text_cache)
+
+	// Markdown preview / hover popup / signature popup all share the same
+	// font set. Order matters: drop the layout caches FIRST (they hold
+	// `^ttf.Text*` bound to the about-to-be-closed font handles), THEN
+	// reload the markdown fonts at the new scale. The next render
+	// re-lays-out at the new metrics.
+	editor_invalidate_markdown_caches(editor)
+	markdown_fonts_apply_zoom(&editor.markdown_fonts, editor.font_size)
 }

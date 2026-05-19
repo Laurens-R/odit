@@ -27,6 +27,24 @@ screen_init :: proc(screen: ^Screen, requested_columns, requested_rows: i32) {
 screen_destroy :: proc(screen: ^Screen) {
 	delete(screen.cells)
 	screen.cells = nil
+	for row_slice in screen.scrollback_rows { delete(row_slice) }
+	if cap(screen.scrollback_rows) > 0 { delete(screen.scrollback_rows) }
+	screen.scrollback_rows = nil
+}
+
+// Push a deep copy of `cells_to_push` into the scrollback ring. Evicts the
+// oldest entry FIFO once the cap is reached so memory stays bounded.
+@(private)
+screen_push_scrollback_row :: proc(screen: ^Screen, cells_to_push: []Cell) {
+	if len(cells_to_push) == 0 { return }
+	captured_row := make([]Cell, len(cells_to_push))
+	copy(captured_row, cells_to_push)
+	append(&screen.scrollback_rows, captured_row)
+	for len(screen.scrollback_rows) > SCROLLBACK_MAX_ROWS {
+		evicted := screen.scrollback_rows[0]
+		ordered_remove(&screen.scrollback_rows, 0)
+		delete(evicted)
+	}
 }
 
 // Resize the grid, preserving as much of the existing content as fits in
@@ -125,7 +143,10 @@ screen_tab :: proc(screen: ^Screen) {
 }
 
 // Scroll the active region up by `line_count` lines, filling vacated rows at
-// the bottom with blanks colored with the current background.
+// the bottom with blanks colored with the current background. If the scroll
+// region covers the whole screen (the common case), the rows that fall off
+// the top are pushed into scrollback first; alternate-screen apps (vim,
+// less) typically narrow the region and won't pollute scrollback.
 @(private)
 screen_scroll_up :: proc(screen: ^Screen, line_count: i32) {
 	if line_count <= 0 { return }
@@ -136,6 +157,15 @@ screen_scroll_up :: proc(screen: ^Screen, line_count: i32) {
 	region_row_count := region_bottom - region_top + 1
 	shift_amount := line_count
 	if shift_amount > region_row_count { shift_amount = region_row_count }
+
+	// Preserve evicted rows when the scrolling region IS the whole screen.
+	scrolling_full_screen := region_top == 0 && region_bottom == screen.rows - 1
+	if scrolling_full_screen {
+		for evicted_row_index in 0..<shift_amount {
+			row_base := evicted_row_index * screen.columns
+			screen_push_scrollback_row(screen, screen.cells[row_base:row_base + screen.columns])
+		}
+	}
 
 	for row_index in region_top ..< (region_bottom - shift_amount + 1) {
 		source_row_base      := (row_index + shift_amount) * screen.columns

@@ -130,7 +130,7 @@ replace_close :: proc(editor: ^Editor, commit: bool) {
 		if commit {
 			if editor.replace.has_preview_applied {
 				document.document_end_compound(&editor_pane.document, editor.replace.undo_snapshot_position)
-				pane_mark_document_modified(editor_pane)
+				pane_mark_document_modified(editor, editor_pane)
 			}
 		} else {
 			if editor.replace.has_preview_applied {

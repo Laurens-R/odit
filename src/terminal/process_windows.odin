@@ -75,6 +75,18 @@ pty_spawn :: proc(terminal: ^Terminal, columns, rows: i32, working_directory: st
 	pty_state := &terminal.pty_state
 	pty_state^ = PtyState{}
 
+	// Strip environment variables that leak from upstream build tooling and
+	// break tools downstream when launched from this terminal. Right now
+	// just ELECTRON_RUN_AS_NODE — when set, the Electron binary impersonates
+	// plain Node.js and `require('electron')` returns the path string instead
+	// of the API, which crashes any main-process code that touches
+	// `electron.app`. electron-vite / electron-builder set the variable on
+	// short-lived child invocations during bundling and rely on it being
+	// scoped to that child; if it leaks into our own env (odit was launched
+	// from a shell that already had it set), every shell we spawn would
+	// otherwise inherit it forever.
+	scrub_inheritable_environment()
+
 	// Two pairs of anonymous pipes — one in each direction.
 	pty_input_read_handle,    pty_input_write_handle:  win32.HANDLE
 	pty_output_read_handle,   pty_output_write_handle: win32.HANDLE
@@ -261,6 +273,19 @@ pty_write :: proc(terminal: ^Terminal, data: []u8) -> int {
 }
 
 // --- Helpers ------------------------------------------------------------
+
+// Remove the named env var from our process. CreateProcessW with
+// lpEnvironment = nil hands the child a copy of OUR env, so clearing it
+// here also clears it for everything we spawn after — exactly what we want.
+@(private="file")
+scrub_inheritable_environment :: proc() {
+	scrub :: proc(name: string) {
+		name_wstring := win32.utf8_to_wstring(name)
+		// Per MSDN: passing NULL as the value removes the variable.
+		_ = win32.SetEnvironmentVariableW(name_wstring, nil)
+	}
+	scrub("ELECTRON_RUN_AS_NODE")
+}
 
 @(private="file")
 raw_alloc :: proc(byte_count: int) -> rawptr {

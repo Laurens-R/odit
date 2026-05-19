@@ -127,21 +127,21 @@ find_in_files_open :: proc(editor: ^Editor) {
 		for byte_value in transmute([]u8)default_path { append(&state.path_buffer, byte_value) }
 	}
 
-	// Seed query from a short single-line selection — only when the query is
-	// empty, so a reopened dialog doesn't have its query overwritten by the
-	// selection the user happened to leave behind in the file they jumped to.
-	if len(state.query_buffer) == 0 {
-		if editor_pane := editor_active_editor_pane(editor); editor_pane != nil && editor_pane.selection_active {
-			low_offset, high_offset, has_selection := editor_pane_selection_range(editor_pane)
-			if has_selection && high_offset - low_offset <= 256 {
-				selection_text := document.document_get_slice(&editor_pane.document, low_offset, high_offset - low_offset, context.temp_allocator)
-				contains_newline := false
-				for byte_value in transmute([]u8)selection_text {
-					if byte_value == '\n' { contains_newline = true; break }
-				}
-				if !contains_newline {
-					for byte_value in transmute([]u8)selection_text { append(&state.query_buffer, byte_value) }
-				}
+	// Seed query from a short single-line selection — and override any prior
+	// query if the user explicitly selected something before invoking this
+	// dialog. That matches the bottom-bar Find behaviour and matches what users
+	// expect from "select text, hit Ctrl+Shift+F".
+	if editor_pane := editor_active_editor_pane(editor); editor_pane != nil && editor_pane.selection_active {
+		low_offset, high_offset, has_selection := editor_pane_selection_range(editor_pane)
+		if has_selection && high_offset - low_offset <= 256 {
+			selection_text := document.document_get_slice(&editor_pane.document, low_offset, high_offset - low_offset, context.temp_allocator)
+			contains_newline := false
+			for byte_value in transmute([]u8)selection_text {
+				if byte_value == '\n' { contains_newline = true; break }
+			}
+			if !contains_newline {
+				clear(&state.query_buffer)
+				for byte_value in transmute([]u8)selection_text { append(&state.query_buffer, byte_value) }
 			}
 		}
 	}

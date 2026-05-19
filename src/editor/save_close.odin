@@ -593,6 +593,12 @@ editor_close_active_pane_content :: proc(editor: ^Editor) {
 		replace_close(editor, false)
 	}
 
+	// Notify the LSP layer that the active document is going away. Safe to
+	// call when the doc wasn't LSP-tracked — short-circuits inside.
+	if editor_pane := pane_as_editor(active_pane); editor_pane != nil {
+		editor_lsp_pane_closing(editor, editor_pane)
+	}
+
 	// Easy case: no split. Just blank the file we were on. We DON'T route
 	// through `editor_open_string_in_pane` here because that would stash the
 	// doc into background_documents — but the user explicitly asked to close

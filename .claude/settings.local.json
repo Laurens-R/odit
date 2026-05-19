@@ -21,7 +21,11 @@
       "PowerShell(& \"scripts/build.ps1\" -Target windows -Config debug 2>&1 | Select-Object -Last 20)",
       "PowerShell(& \"scripts/build.ps1\" -Target windows -Config debug 2>&1 | Select-Object -Last 60)",
       "PowerShell(& \"scripts/build.ps1\" -Target windows -Config debug 2>&1 | Select-Object -Last 30)",
-      "Bash(where odin *)"
+      "Bash(where odin *)",
+      "Bash(where.exe ols *)",
+      "Bash(ols --version)",
+      "PowerShell(odin check *)",
+      "Bash(awk 'NR==147 {for\\(i=1;i<=length\\($0\\);i++\\) printf \"%d \", $i==\" \"?32:9; print \"\"}' /d/odit/src/editor/mouse.odin)"
     ]
   }
 }
