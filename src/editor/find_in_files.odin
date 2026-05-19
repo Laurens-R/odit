@@ -393,20 +393,31 @@ find_in_files_open_selected :: proc(editor: ^Editor) {
 	if state.selected_index < 0 || state.selected_index >= len(state.results) { return }
 	result := state.results[state.selected_index]
 
-	file_data, read_error := os.read_entire_file_from_path(result.file_path, context.allocator)
-	if read_error != nil {
-		find_in_files_set_error(editor, fmt.tprintf("Cannot open %s: %v", result.relative_path, read_error))
-		return
-	}
-	defer delete(file_data)
+	// Dedupe: if the file is already loaded (visible pane or stashed in the
+	// background list) skip the disk read entirely and switch to that copy.
+	// This also preserves any unsaved edits the user has on the in-memory
+	// version — re-reading from disk would replace them.
+	existing_pane_index, existing_background_index := editor_find_open_document(editor, result.file_path)
+	if existing_pane_index >= 0 {
+		editor.active_pane_index = existing_pane_index
+	} else if existing_background_index >= 0 {
+		editor_swap_background_into_pane(editor, editor.active_pane_index, existing_background_index)
+	} else {
+		file_data, read_error := os.read_entire_file_from_path(result.file_path, context.allocator)
+		if read_error != nil {
+			find_in_files_set_error(editor, fmt.tprintf("Cannot open %s: %v", result.relative_path, read_error))
+			return
+		}
+		defer delete(file_data)
 
-	if len(file_data) > EDITOR_MAX_DOCUMENT_BYTES {
-		find_in_files_set_error(editor, fmt.tprintf("File %s is too large to open", result.relative_path))
-		return
-	}
+		if len(file_data) > EDITOR_MAX_DOCUMENT_BYTES {
+			find_in_files_set_error(editor, fmt.tprintf("File %s is too large to open", result.relative_path))
+			return
+		}
 
-	file_content := strings.clone(string(file_data))
-	editor_open_string_in_pane(editor, editor.active_pane_index, file_content, result.file_path)
+		file_content := strings.clone(string(file_data))
+		editor_open_string_in_pane(editor, editor.active_pane_index, file_content, result.file_path)
+	}
 
 	editor_pane := editor_active_editor_pane(editor)
 	if editor_pane != nil {

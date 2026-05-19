@@ -386,6 +386,32 @@ browse_activate :: proc(editor: ^Editor, open_target: OpenTarget = .Active) {
 		return
 	}
 
+	// Dedupe: if the picked file is already loaded (visible pane or stashed in
+	// background_documents) we don't want to read it from disk again — that
+	// would create a second copy and silently throw away the user's unsaved
+	// edits on the existing one. Switch to the existing copy instead.
+	existing_pane_index, existing_background_index := editor_find_open_document(editor, full_path)
+	if existing_pane_index >= 0 {
+		// .SplitSecondary on an already-visible file is treated as "focus
+		// where the file lives" rather than forcing a split that would push
+		// the file into the other pane — too disruptive for what's really a
+		// navigation gesture.
+		editor.active_pane_index = existing_pane_index
+		browse_close(editor)
+		return
+	}
+	if existing_background_index >= 0 {
+		target_pane_index := editor.active_pane_index
+		if open_target == .SplitSecondary {
+			editor.split_active = true
+			target_pane_index   = 1
+			editor.active_pane_index = 1
+		}
+		editor_swap_background_into_pane(editor, target_pane_index, existing_background_index)
+		browse_close(editor)
+		return
+	}
+
 	file_data, read_file_error := os.read_entire_file_from_path(full_path, context.allocator)
 	if read_file_error != nil {
 		browse_set_error(editor, fmt.tprintf("Cannot open %s: %v", entry.name, read_file_error))

@@ -272,6 +272,20 @@ Editor :: struct {
 	show_git_history:           bool,
 	git_history_dialog:         GitHistoryDialog,
 
+	// Open-documents picker (F4). Lists every EditorPane that's open but
+	// not currently displayed — selecting one swaps it into the active
+	// pane (stashing whatever was there first via the same mechanism).
+	show_open_docs:             bool,
+	open_docs_dialog:           OpenDocsDialog,
+
+	// Documents that are open but not currently displayed in any pane.
+	// Populated whenever an EditorPane is replaced via
+	// `editor_open_string_in_pane` (the "switch" path); drained when the
+	// user picks one back via F4 or opens the same file from the browser.
+	// EditorPane values are stored by value — the slot owns its document,
+	// file_path, display_title_override, symbols, and symbol_names.
+	background_documents:       [dynamic]EditorPane,
+
 	// Fonts loaded lazily for the markdown preview pane. Proportional (Arial-
 	// like) for body / headings; monospace for inline code and code blocks.
 	// Loaded on the first F5 press, freed in `editor_destroy`.
@@ -384,6 +398,11 @@ editor_destroy :: proc(editor: ^Editor) {
 	replace_in_files_destroy(&editor.replace_in_files)
 	save_as_dialog_destroy(&editor.save_as_dialog)
 	git_history_dialog_destroy(&editor.git_history_dialog)
+	open_docs_dialog_destroy(&editor.open_docs_dialog)
+	for background_index in 0..<len(editor.background_documents) {
+		editor_pane_destroy_in_place(&editor.background_documents[background_index])
+	}
+	if cap(editor.background_documents) > 0 { delete(editor.background_documents) }
 	markdown_fonts_destroy(&editor.markdown_fonts)
 	if len(editor.project_root) > 0 {
 		delete(editor.project_root)
@@ -412,18 +431,7 @@ pane_destroy :: proc(pane: ^Pane) {
 pane_content_destroy :: proc(pane_content: ^PaneContent) {
 	#partial switch &content_value in pane_content {
 	case EditorPane:
-		document.document_destroy(&content_value.document)
-		if len(content_value.file_path) > 0 {
-			delete(content_value.file_path)
-			content_value.file_path = ""
-		}
-		if len(content_value.display_title_override) > 0 {
-			delete(content_value.display_title_override)
-			content_value.display_title_override = ""
-		}
-		for symbol in content_value.symbols { delete(symbol.name) }
-		delete(content_value.symbols)
-		delete(content_value.symbol_names)
+		editor_pane_destroy_in_place(&content_value)
 	case TerminalPane:
 		if content_value.terminal != nil {
 			terminal.terminal_destroy(content_value.terminal)
@@ -432,6 +440,25 @@ pane_content_destroy :: proc(pane_content: ^PaneContent) {
 	case MarkdownPreviewPane:
 		markdown_preview_pane_destroy(&content_value)
 	}
+}
+
+// Release every owned resource on an EditorPane in place. Shared by
+// `pane_content_destroy` (for live panes) and `editor_destroy` (for
+// EditorPanes parked in `background_documents`).
+@(private)
+editor_pane_destroy_in_place :: proc(editor_pane: ^EditorPane) {
+	document.document_destroy(&editor_pane.document)
+	if len(editor_pane.file_path) > 0 {
+		delete(editor_pane.file_path)
+		editor_pane.file_path = ""
+	}
+	if len(editor_pane.display_title_override) > 0 {
+		delete(editor_pane.display_title_override)
+		editor_pane.display_title_override = ""
+	}
+	for symbol in editor_pane.symbols { delete(symbol.name) }
+	delete(editor_pane.symbols)
+	delete(editor_pane.symbol_names)
 }
 
 // Height of the title strip at the top of every editor pane (filename area).
@@ -622,18 +649,44 @@ editor_open_string :: proc(editor: ^Editor, content_text: string) {
 	editor_open_string_in_pane(editor, editor.active_pane_index, content_text)
 }
 
-// Load a string into a specific pane, replacing its content with a fresh
-// editor pane regardless of the previous content type. `file_path` is stored
-// on the pane for display in the title bar; pass "" for an untitled doc.
+// Load a string into a specific pane. If a `file_path` is supplied and the
+// document is already open (in any pane or in `background_documents`), this
+// switches to the existing copy rather than reloading — the user's cursor,
+// scroll, undo history and unsaved edits are preserved. Otherwise the target
+// pane's current EditorPane is moved into `background_documents` (if it's
+// worth keeping — has a path, override, or unsaved changes) and a fresh
+// editor pane is installed in its place.
 editor_open_string_in_pane :: proc(editor: ^Editor, pane_index: int, content_text: string, file_path: string = "") {
 	if pane_index < 0 || pane_index >= len(editor.panes) { return }
+
+	// Dedupe: if this path is already loaded, switch to it instead of doing a
+	// fresh load. Avoids two EditorPanes diverging from the same on-disk file
+	// and discards the (already-read) `content_text` argument — that read is
+	// the caller's choice, not something we can undo here.
+	if len(file_path) > 0 {
+		existing_pane_index, existing_background_index := editor_find_open_document(editor, file_path)
+		if existing_pane_index == pane_index { return }
+		if existing_pane_index >= 0 {
+			editor.active_pane_index = existing_pane_index
+			return
+		}
+		if existing_background_index >= 0 {
+			editor_swap_background_into_pane(editor, pane_index, existing_background_index)
+			return
+		}
+	}
+
+	// Stash whatever was in the target pane so it can be reached again from
+	// the F4 picker. Untitled-and-clean panes are not worth stashing and are
+	// just destroyed by `pane_destroy` below.
+	pane_stash_editor(editor, pane_index)
 
 	safe_content := content_text
 	if len(safe_content) < 0 || len(safe_content) > EDITOR_MAX_DOCUMENT_BYTES {
 		safe_content = ""
 	}
 
-	// Tear down whatever was in the pane and replace with a fresh editor.
+	// Tear down whatever remains in the pane and install a fresh editor.
 	pane_destroy(&editor.panes[pane_index])
 
 	new_editor_pane: EditorPane
@@ -651,6 +704,103 @@ editor_open_string_in_pane :: proc(editor: ^Editor, pane_index: int, content_tex
 			pane_rebuild_symbols(editor_pane)
 		}
 	}
+}
+
+// Drop a fresh untitled EditorPane into the given pane, destroying whatever
+// was there. Use this on the Ctrl+F4 close path — `editor_open_string_in_pane`
+// would stash the doc the user is asking to close, which is wrong.
+@(private)
+editor_replace_pane_with_empty_editor :: proc(editor: ^Editor, pane_index: int) {
+	if pane_index < 0 || pane_index >= len(editor.panes) { return }
+	pane_destroy(&editor.panes[pane_index])
+
+	new_editor_pane: EditorPane
+	document.document_init(&new_editor_pane.document, "")
+	editor.panes[pane_index].content = new_editor_pane
+}
+
+// Move the target pane's EditorPane into `background_documents` if it's
+// worth keeping (has a path, has a display-title override, or is dirty).
+// On success the pane is left with an empty `PaneContent{}` — the caller is
+// expected to install new content right after. Returns true when a stash
+// actually happened.
+@(private)
+pane_stash_editor :: proc(editor: ^Editor, pane_index: int) -> bool {
+	if pane_index < 0 || pane_index >= len(editor.panes) { return false }
+	pane := &editor.panes[pane_index]
+	editor_pane_ptr, is_editor := &pane.content.(EditorPane)
+	if !is_editor { return false }
+
+	is_worth_keeping := len(editor_pane_ptr.file_path) > 0 ||
+	                    len(editor_pane_ptr.display_title_override) > 0 ||
+	                    document.document_is_dirty(&editor_pane_ptr.document)
+	if !is_worth_keeping { return false }
+
+	// Find/Replace bars are pinned to a specific pane index; the doc we are
+	// moving away is the one the bar was bound to, so close the bar before
+	// the pane content changes underneath it.
+	if find_active(editor)    && editor.find.pane_index    == pane_index { find_close(editor) }
+	if replace_active(editor) && editor.replace.pane_index == pane_index { replace_close(editor, false) }
+
+	// Append a value-copy; ownership of the heap-allocated fields transfers
+	// to the new slot. Clear the pane's content so `pane_destroy` (which the
+	// caller typically runs next) doesn't double-free what we just moved.
+	append(&editor.background_documents, editor_pane_ptr^)
+	pane.content = PaneContent{}
+	return true
+}
+
+// Pull a background document into the target pane, stashing the pane's
+// current content (if worth keeping) on the way out. Used both by
+// `editor_open_string_in_pane` when a requested path is found in the stash
+// and by the F4 picker when the user clicks a row.
+@(private)
+editor_swap_background_into_pane :: proc(editor: ^Editor, pane_index, background_index: int) {
+	if pane_index       < 0 || pane_index       >= len(editor.panes)               { return }
+	if background_index < 0 || background_index >= len(editor.background_documents) { return }
+
+	// Lift the target out of the list first. Subsequent mutations to
+	// `background_documents` (the stash that follows) can then freely append
+	// without shifting the index we already captured.
+	restored_editor_pane := editor.background_documents[background_index]
+	ordered_remove(&editor.background_documents, background_index)
+
+	// Move the pane's existing editor into the background, OR — if it isn't
+	// stash-worthy — destroy it directly. Either way the pane is empty
+	// afterwards and ready to receive the restored content.
+	if !pane_stash_editor(editor, pane_index) {
+		pane_destroy(&editor.panes[pane_index])
+		editor.panes[pane_index].content = PaneContent{}
+	}
+
+	editor.panes[pane_index].content = restored_editor_pane
+}
+
+// Find an open EditorPane whose `file_path` matches (case-insensitively).
+// Returns `(pane_index, -1)` when the doc is in a visible pane, `(-1,
+// background_index)` when it's stashed, and `(-1, -1)` when not open.
+@(private)
+editor_find_open_document :: proc(editor: ^Editor, file_path: string) -> (pane_index: int, background_index: int) {
+	pane_index, background_index = -1, -1
+	if len(file_path) == 0 { return }
+
+	for visible_pane_index in 0..<len(editor.panes) {
+		visible_editor_pane := pane_as_editor(&editor.panes[visible_pane_index])
+		if visible_editor_pane == nil                                                  { continue }
+		if len(visible_editor_pane.file_path) == 0                                     { continue }
+		if path_equals_ignore_case(visible_editor_pane.file_path, file_path) {
+			pane_index = visible_pane_index
+			return
+		}
+	}
+	for background_editor_pane, idx in editor.background_documents {
+		if len(background_editor_pane.file_path) == 0                                  { continue }
+		if path_equals_ignore_case(background_editor_pane.file_path, file_path) {
+			background_index = idx
+			return
+		}
+	}
+	return
 }
 
 // Mark the editor as needing a fresh render. Cheap; safe to call from any
@@ -675,7 +825,7 @@ editor_needs_render :: proc(editor: ^Editor) -> bool {
 
 // True when a modal dialog (help, browse, future popups) currently owns input.
 editor_is_modal_open :: proc(editor: ^Editor) -> bool {
-	return editor.show_help || editor.show_browse || editor.show_symbols || editor.show_terminal_close_confirm || editor.show_find_in_files || editor.show_replace_in_files || editor.show_save_as || editor.show_close_confirm || editor.show_git_history
+	return editor.show_help || editor.show_browse || editor.show_symbols || editor.show_terminal_close_confirm || editor.show_find_in_files || editor.show_replace_in_files || editor.show_save_as || editor.show_close_confirm || editor.show_git_history || editor.show_open_docs
 }
 
 // --- Project root ---------------------------------------------------------
@@ -716,7 +866,7 @@ editor_path_inside_project_root :: proc(editor: ^Editor, path: string) -> bool {
 // Case-insensitive path equality. ASCII-only fold; full Unicode case folding
 // would need a real table and we don't need it for path matching on the
 // platforms we target.
-@(private="file")
+@(private)
 path_equals_ignore_case :: proc(a, b: string) -> bool {
 	if len(a) != len(b) { return false }
 	for byte_index in 0..<len(a) {

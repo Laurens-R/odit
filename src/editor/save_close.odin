@@ -593,9 +593,12 @@ editor_close_active_pane_content :: proc(editor: ^Editor) {
 		replace_close(editor, false)
 	}
 
-	// Easy case: no split. Just blank the file we were on.
+	// Easy case: no split. Just blank the file we were on. We DON'T route
+	// through `editor_open_string_in_pane` here because that would stash the
+	// doc into background_documents — but the user explicitly asked to close
+	// it, not switch away from it.
 	if !editor.split_active {
-		editor_open_string_in_pane(editor, editor.active_pane_index, "", "")
+		editor_replace_pane_with_empty_editor(editor, editor.active_pane_index)
 		return
 	}
 
@@ -607,7 +610,7 @@ editor_close_active_pane_content :: proc(editor: ^Editor) {
 		// The other side is a terminal (only other content kind today). We
 		// don't want closing a file to also kill an in-flight shell, so just
 		// blank the active pane and keep the split going.
-		editor_open_string_in_pane(editor, editor.active_pane_index, "", "")
+		editor_replace_pane_with_empty_editor(editor, editor.active_pane_index)
 		return
 	}
 

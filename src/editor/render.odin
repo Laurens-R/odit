@@ -310,6 +310,9 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 	if editor.show_git_history {
 		git_history_dialog_render(editor, renderer, window_width, window_height)
 	}
+	if editor.show_open_docs {
+		open_docs_dialog_render(editor, renderer, window_width, window_height)
+	}
 }
 
 // --- Per-content renderers ------------------------------------------------

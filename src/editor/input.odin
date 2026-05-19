@@ -81,6 +81,10 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 		git_history_dialog_handle_event(editor, event)
 		return
 	}
+	if editor.show_open_docs {
+		open_docs_dialog_handle_event(editor, event)
+		return
+	}
 
 	// Find mode intercepts text + key events but lets mouse wheel and mouse
 	// buttons fall through (so the user can still scroll, and a click outside
@@ -125,6 +129,10 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 		}
 		if pressed_key == sdl3.K_F3 {
 			git_history_dialog_open(editor)
+			return
+		}
+		if pressed_key == sdl3.K_F4 && !ctrl_held {
+			open_docs_dialog_open(editor)
 			return
 		}
 		if pressed_key == sdl3.K_F5 {
