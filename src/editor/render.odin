@@ -67,6 +67,10 @@ build_line_display :: proc(line_text: string, allocator := context.temp_allocato
 editor_update :: proc(editor: ^Editor, delta_time: f64) {
 	editor.clock += delta_time
 
+	// Alt-key state is polled here because SDL3 KEY_UP events don't reach
+	// the editor — the menu bar uses this to toggle mnemonic underlines.
+	menu_bar_poll_alt_state(editor)
+
 	if editor.diff_state.active {
 		// Animate the shared diff scroll.
 		if editor.diff_state.scroll_y != editor.diff_state.scroll_y_target {
@@ -176,7 +180,9 @@ editor_pane_update :: proc(editor: ^Editor, editor_pane: ^EditorPane, delta_time
 
 editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i32, window_height: i32) {
 	status_bar_height: i32 = editor.line_height + 4
-	text_area_height := window_height - status_bar_height
+	menu_bar_height   := editor_menu_bar_height(editor)
+	text_area_top     := menu_bar_height
+	text_area_height  := window_height - status_bar_height - menu_bar_height
 
 	// Full-window background
 	sdl3.SetRenderDrawColorFloat(renderer, editor.background_color.r, editor.background_color.g, editor.background_color.b, editor.background_color.a)
@@ -185,10 +191,11 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 	// Compute per-pane rectangles. The divider sits at `split_ratio` of the
 	// total width and is clamped so neither pane can drop below a usable
 	// minimum (~10 character cells, falling back to 80 px if the font hasn't
-	// been measured yet).
+	// been measured yet). Panes start under the menu bar — `text_area_top`
+	// is `menu_bar_height` rather than 0.
 	visible_pane_count := editor_visible_pane_count(editor)
 	if visible_pane_count == 1 {
-		editor.panes[0].rectangle = sdl3.Rect{0, 0, window_width, text_area_height}
+		editor.panes[0].rectangle = sdl3.Rect{0, text_area_top, window_width, text_area_height}
 	} else {
 		divider_width: i32 = 2
 		usable_width := window_width - divider_width
@@ -204,8 +211,8 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 		if left_pane_width < minimum_pane_width              { left_pane_width = minimum_pane_width }
 		if left_pane_width > usable_width - minimum_pane_width { left_pane_width = usable_width - minimum_pane_width }
 
-		editor.panes[0].rectangle = sdl3.Rect{0,                            0, left_pane_width,                 text_area_height}
-		editor.panes[1].rectangle = sdl3.Rect{left_pane_width + divider_width, 0, usable_width - left_pane_width,  text_area_height}
+		editor.panes[0].rectangle = sdl3.Rect{0,                                text_area_top, left_pane_width,                text_area_height}
+		editor.panes[1].rectangle = sdl3.Rect{left_pane_width + divider_width,  text_area_top, usable_width - left_pane_width, text_area_height}
 	}
 
 	// Render each visible pane by dispatching on its content type.
@@ -242,10 +249,11 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 		}
 	}
 
-	// Divider between panes.
+	// Divider between panes. Starts at `text_area_top` so it doesn't paint
+	// over the menu bar above.
 	if visible_pane_count == 2 {
 		divider_x := editor.panes[1].rectangle.x - 2
-		divider_rectangle := sdl3.FRect{f32(divider_x), 0, 2, f32(text_area_height)}
+		divider_rectangle := sdl3.FRect{f32(divider_x), f32(text_area_top), 2, f32(text_area_height)}
 		sdl3.SetRenderDrawColorFloat(renderer, editor.divider_color.r, editor.divider_color.g, editor.divider_color.b, editor.divider_color.a)
 		sdl3.RenderFillRect(renderer, &divider_rectangle)
 	}
@@ -331,6 +339,13 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 	if editor.show_terminal_picker {
 		terminal_picker_render(editor, renderer, window_width, window_height)
 	}
+
+	// Menu bar paints last so it sits above pane content, and the dropdown
+	// overlays whatever's underneath. Modal overlays earlier still draw on
+	// top of any subsequently-opened dialog — those close the menu before
+	// opening anyway, so there's no ordering conflict in practice.
+	menu_bar_render(editor, renderer, window_width)
+	menu_bar_render_dropdown(editor, renderer, window_width, window_height)
 }
 
 // --- Per-content renderers ------------------------------------------------
@@ -877,7 +892,7 @@ syntax_color_for :: proc(editor: ^Editor, token_kind: syntax.TokenKind) -> sdl3.
 	return editor.foreground_color
 }
 
-@(private="file")
+@(private)
 render_string :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, text_to_render: string, x_position: i32, y_position: i32, color: sdl3.FColor) {
 	if len(text_to_render) == 0 { return }
 	text_object := ui.text_cache_get(&editor.text_cache, text_to_render)

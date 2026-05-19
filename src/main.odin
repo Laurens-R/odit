@@ -142,6 +142,9 @@ main :: proc() {
 			}
 		}
 
+		// File > Quit (or anything else that sets the flag) ends the loop.
+		if editor_state.quit_requested { is_running = false }
+
 		// Update — animations / blink / terminal drain all live here. The
 		// editor flips its own `needs_redraw` flag when anything visible
 		// changes, so the render path below is free to skip work on idle

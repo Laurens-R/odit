@@ -21,6 +21,12 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 	// covers all the keyboard / mouse / wheel paths in one place.
 	editor_mark_dirty(editor)
 
+	// Menu bar gets first crack at events. When a dropdown is open it
+	// behaves as a modal and consumes everything; when nothing is open it
+	// only consumes clicks on the menu-bar strip itself and lets the rest
+	// pass through to the panes / modals below.
+	if menu_bar_handle_event(editor, event) { return }
+
 	// Modal dialogs intercept input.
 	if editor.show_help {
 		#partial switch event.type {
@@ -300,25 +306,11 @@ editor_handle_key :: proc(editor: ^Editor, event: ^sdl3.Event) {
 		switch pressed_key {
 		case sdl3.K_Z:
 			if is_diff_mode { return }
-			if shift_held {
-				if new_offset, redo_succeeded := document.document_redo(&editor_pane.document); redo_succeeded {
-					editor_pane.cursor_offset = new_offset
-				}
-			} else {
-				if new_offset, undo_succeeded := document.document_undo(&editor_pane.document); undo_succeeded {
-					editor_pane.cursor_offset = new_offset
-				}
-			}
-			editor_pane.selection_active = false
-			sync_cursor_from_offset(editor)
+			if shift_held { editor_redo_active(editor) } else { editor_undo_active(editor) }
 			return
 		case sdl3.K_Y:
 			if is_diff_mode { return }
-			if new_offset, redo_succeeded := document.document_redo(&editor_pane.document); redo_succeeded {
-				editor_pane.cursor_offset = new_offset
-			}
-			editor_pane.selection_active = false
-			sync_cursor_from_offset(editor)
+			editor_redo_active(editor)
 			return
 		case sdl3.K_A:
 			// Select all (future)
@@ -438,6 +430,32 @@ editor_handle_key :: proc(editor: ^Editor, event: ^sdl3.Event) {
 			move_cursor_vertical(editor, i32(remaining_lines))
 		}
 	}
+}
+
+// Undo a single edit on the active editor pane. Diff mode is read-only so
+// the call is silently dropped there. Shared by the Ctrl+Z hotkey and the
+// Edit menu — they need identical behavior, including the cursor sync.
+@(private)
+editor_undo_active :: proc(editor: ^Editor) {
+	if editor.diff_state.active { return }
+	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return }
+	if new_offset, ok := document.document_undo(&editor_pane.document); ok {
+		editor_pane.cursor_offset = new_offset
+	}
+	editor_pane.selection_active = false
+	sync_cursor_from_offset(editor)
+}
+
+// Symmetric counterpart for Ctrl+Shift+Z / Ctrl+Y / Edit > Redo.
+@(private)
+editor_redo_active :: proc(editor: ^Editor) {
+	if editor.diff_state.active { return }
+	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return }
+	if new_offset, ok := document.document_redo(&editor_pane.document); ok {
+		editor_pane.cursor_offset = new_offset
+	}
+	editor_pane.selection_active = false
+	sync_cursor_from_offset(editor)
 }
 
 @(private="file")

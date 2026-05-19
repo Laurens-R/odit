@@ -317,6 +317,18 @@ Editor :: struct {
 	// Loaded on the first F5 press, freed in `editor_destroy`.
 	markdown_fonts:             MarkdownFonts,
 
+	// Top-of-window menu bar. Always visible; clicking a title opens the
+	// dropdown, clicking outside or pressing Esc closes it. While a menu is
+	// open, `menu_bar.open_menu_index >= 0` — this also counts as a modal
+	// for the purpose of `editor_is_modal_open` so global hotkeys are
+	// suppressed.
+	menu_bar:                    MenuBarState,
+
+	// Set by the File > Quit menu entry. main.odin polls this each frame
+	// and exits the main loop when it flips true. Mirrors the existing
+	// Ctrl+Q-in-main-loop path without needing the menu to reach into SDL.
+	quit_requested:              bool,
+
 	// Project root, set by Ctrl+P in the file browser. Owned absolute path;
 	// "" when unset. When set:
 	//   - The F2 browser defaults to it on next open if the cached cwd has
@@ -369,6 +381,8 @@ editor_init :: proc(editor: ^Editor, text_engine: ^ttf.TextEngine, font: ^ttf.Fo
 
 	editor.padding_x = 8
 	editor.padding_y = 4
+
+	menu_bar_init(&editor.menu_bar)
 
 	// Measure monospace character dimensions
 	editor.line_height = i32(ttf.GetFontLineSkip(font))
@@ -971,7 +985,7 @@ editor_needs_render :: proc(editor: ^Editor) -> bool {
 
 // True when a modal dialog (help, browse, future popups) currently owns input.
 editor_is_modal_open :: proc(editor: ^Editor) -> bool {
-	return editor.show_help || editor.show_browse || editor.show_symbols || editor.show_find_in_files || editor.show_replace_in_files || editor.show_save_as || editor.show_close_confirm || editor.show_git_history || editor.show_open_docs || editor.show_terminal_picker
+	return editor.show_help || editor.show_browse || editor.show_symbols || editor.show_find_in_files || editor.show_replace_in_files || editor.show_save_as || editor.show_close_confirm || editor.show_git_history || editor.show_open_docs || editor.show_terminal_picker || editor.menu_bar.open_menu_index >= 0
 }
 
 // --- Project root ---------------------------------------------------------
