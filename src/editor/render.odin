@@ -79,8 +79,9 @@ editor_update :: proc(editor: ^Editor, delta_time: f64) {
 			editor_mark_dirty(editor)
 		}
 	} else {
-		// Per-pane content updates (smooth-scroll for editor panes, byte
-		// drain + cursor blink for terminal panes).
+		// Per-pane content updates (smooth-scroll for editor panes, geometry
+		// for the visible terminal). Terminal byte-drain is handled in the
+		// per-editor terminal loop below so hidden sessions don't stall.
 		for pane_index in 0..<len(editor.panes) {
 			#partial switch &content_value in editor.panes[pane_index].content {
 			case EditorPane:
@@ -95,12 +96,20 @@ editor_update :: proc(editor: ^Editor, delta_time: f64) {
 						editor.panes[pane_index].rectangle.h - title_bar_height,
 					}
 					terminal.terminal_set_geometry(content_value.terminal, terminal_body_rectangle, editor.character_width, editor.line_height)
-					if terminal.terminal_update(content_value.terminal, delta_time) {
-						editor_mark_dirty(editor)
-					}
 				}
 			case MarkdownPreviewPane:
 				markdown_preview_pane_update(editor, &content_value, delta_time)
+			}
+		}
+
+		// Drain every terminal session — even hidden ones, so their byte
+		// queues don't back up and stall the shell. Geometry stays at
+		// whatever was last set; for hidden sessions that's the size from
+		// when they were last visible (or the initial size at creation).
+		for &terminal_entry in editor.terminals {
+			if terminal_entry.terminal == nil { continue }
+			if terminal.terminal_update(terminal_entry.terminal, delta_time) {
+				editor_mark_dirty(editor)
 			}
 		}
 	}
@@ -209,7 +218,16 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 		case TerminalPane:
 			if content_value.terminal != nil {
 				title_bar_height := editor_title_bar_height(editor)
-				render_pane_title_strip(editor, renderer, pane.rectangle.x, pane.rectangle.y, pane.rectangle.w, title_bar_height, "Terminal", pane_is_active)
+				title_label: string
+				active_display_number := editor_active_terminal_display_number(editor)
+				if active_display_number > 0 && len(editor.terminals) > 1 {
+					title_label = fmt.tprintf("Terminal #%d  (%d of %d)", active_display_number, editor.active_terminal_index + 1, len(editor.terminals))
+				} else if active_display_number > 0 {
+					title_label = fmt.tprintf("Terminal #%d", active_display_number)
+				} else {
+					title_label = "Terminal"
+				}
+				render_pane_title_strip(editor, renderer, pane.rectangle.x, pane.rectangle.y, pane.rectangle.w, title_bar_height, title_label, pane_is_active)
 				terminal_body_rectangle := sdl3.Rect{
 					pane.rectangle.x,
 					pane.rectangle.y + title_bar_height,
@@ -292,9 +310,6 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 	if editor.show_help {
 		help_render(editor, renderer, window_width, window_height)
 	}
-	if editor.show_terminal_close_confirm {
-		terminal_close_confirm_render(editor, renderer, window_width, window_height)
-	}
 	if editor.show_find_in_files {
 		find_in_files_render(editor, renderer, window_width, window_height)
 	}
@@ -312,6 +327,9 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 	}
 	if editor.show_open_docs {
 		open_docs_dialog_render(editor, renderer, window_width, window_height)
+	}
+	if editor.show_terminal_picker {
+		terminal_picker_render(editor, renderer, window_width, window_height)
 	}
 }
 

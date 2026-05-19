@@ -57,10 +57,6 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 		symbols_dialog_handle_event(editor, event)
 		return
 	}
-	if editor.show_terminal_close_confirm {
-		terminal_close_confirm_handle_event(editor, event)
-		return
-	}
 	if editor.show_find_in_files {
 		find_in_files_handle_event(editor, event)
 		return
@@ -83,6 +79,10 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 	}
 	if editor.show_open_docs {
 		open_docs_dialog_handle_event(editor, event)
+		return
+	}
+	if editor.show_terminal_picker {
+		terminal_picker_handle_event(editor, event)
 		return
 	}
 
@@ -148,7 +148,18 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 			return
 		}
 		if pressed_key == sdl3.K_F9 {
-			editor_toggle_terminal(editor)
+			shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
+			switch {
+			case ctrl_held && shift_held:
+				// Ctrl+Shift+F9 — picker over all open terminal sessions.
+				terminal_picker_open(editor)
+			case ctrl_held:
+				// Ctrl+F9 — always spawn a new session and activate it.
+				editor_terminal_create_new(editor)
+			case:
+				// Plain F9 — show/hide toggle (creates first session if none).
+				editor_toggle_terminal(editor)
+			}
 			return
 		}
 		if ctrl_held && pressed_key == sdl3.K_TAB {
@@ -171,7 +182,14 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 			return
 		}
 		if ctrl_held && pressed_key == sdl3.K_F4 {
-			editor_close_active_file(editor)
+			// In a terminal pane Ctrl+F4 kills the active terminal session
+			// (and rolls over to the next one, or hides if it was the last).
+			// Anywhere else it's the regular close-active-file flow.
+			if _, is_terminal_pane := editor.panes[editor.active_pane_index].content.(TerminalPane); is_terminal_pane {
+				editor_terminal_destroy_active(editor)
+			} else {
+				editor_close_active_file(editor)
+			}
 			return
 		}
 		if ctrl_held && pressed_key == sdl3.K_F {

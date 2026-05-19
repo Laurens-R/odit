@@ -100,8 +100,22 @@ ScrollbarState :: struct {
 // screen — see the `terminal` package. We store a pointer rather than the
 // terminal by value so the union variant stays a single word and the
 // terminal's internal pointers (mutex, thread handle) are address-stable.
+//
+// The pointer here aliases the active entry in `Editor.terminals` — the
+// editor owns the terminal lifetime; the pane just holds a borrowed
+// pointer for rendering/input dispatch.
 TerminalPane :: struct {
 	terminal: ^terminal.Terminal,
+}
+
+// One entry in the editor's multi-terminal list. `display_number` is a
+// stable monotonically-assigned 1-based label used in the title strip and
+// the picker — when a terminal is destroyed, the others keep their numbers
+// instead of shifting, so the user's mental map ("Terminal 3") stays valid.
+@(private)
+TerminalEntry :: struct {
+	terminal:       ^terminal.Terminal,
+	display_number: int,
 }
 
 // Tagged union of all pane content kinds. Add variants here as new pane types
@@ -230,11 +244,23 @@ Editor :: struct {
 	show_symbols:   bool,
 	symbols_dialog: SymbolsDialog,
 
-	// Confirm-close dialog for the embedded terminal (F9). When the user
-	// hits F9 while a terminal is running we show this modal instead of
-	// killing the shell immediately.
-	show_terminal_close_confirm: bool,
-	terminal_close_confirm:      TerminalCloseConfirm,
+	// All open terminal sessions. F9 toggles visibility of the active
+	// entry (and creates the first one when the list is empty); Ctrl+F9
+	// always creates a fresh session; Ctrl+Shift+F9 opens a picker over
+	// `terminals` so the user can switch between them. Ctrl+F4 in a
+	// terminal pane destroys the active entry — when the last one goes
+	// away the terminal slot collapses back to whatever was in pane[1]
+	// before the first show. Whether a terminal is currently visible is
+	// derived from `editor.panes[1].content` (see `editor_is_terminal_visible`),
+	// so we don't carry a separate boolean that could go out of sync.
+	terminals:                   [dynamic]TerminalEntry,
+	active_terminal_index:       int,  // index into `terminals`; 0 when the list is empty
+	next_terminal_display_number: int, // monotonically incremented; assigned at create-time
+
+	// Ctrl+Shift+F9 picker. Lists open terminal sessions so the user can
+	// jump between them.
+	show_terminal_picker:        bool,
+	terminal_picker:             TerminalPicker,
 
 	// Find mode (Ctrl+F). Attached to a single pane at a time; closes on
 	// click outside the bar, on Esc, or on pane switch.
@@ -399,10 +425,24 @@ editor_destroy :: proc(editor: ^Editor) {
 	save_as_dialog_destroy(&editor.save_as_dialog)
 	git_history_dialog_destroy(&editor.git_history_dialog)
 	open_docs_dialog_destroy(&editor.open_docs_dialog)
+	terminal_picker_destroy(&editor.terminal_picker)
 	for background_index in 0..<len(editor.background_documents) {
 		editor_pane_destroy_in_place(&editor.background_documents[background_index])
 	}
 	if cap(editor.background_documents) > 0 { delete(editor.background_documents) }
+
+	// Tear down every open terminal session. The pane teardown above only
+	// cleared borrowed pointers — actual ownership lives here. After my
+	// pane_content_destroy change the TerminalPane case is a no-op on the
+	// terminal pointer, so this loop is the *only* call to terminal_destroy
+	// and double-free is structurally impossible.
+	for &entry in editor.terminals {
+		if entry.terminal != nil {
+			terminal.terminal_destroy(entry.terminal)
+			entry.terminal = nil
+		}
+	}
+	if cap(editor.terminals) > 0 { delete(editor.terminals) }
 	markdown_fonts_destroy(&editor.markdown_fonts)
 	if len(editor.project_root) > 0 {
 		delete(editor.project_root)
@@ -433,10 +473,12 @@ pane_content_destroy :: proc(pane_content: ^PaneContent) {
 	case EditorPane:
 		editor_pane_destroy_in_place(&content_value)
 	case TerminalPane:
-		if content_value.terminal != nil {
-			terminal.terminal_destroy(content_value.terminal)
-			content_value.terminal = nil
-		}
+		// Terminal lifetimes are owned by `Editor.terminals`, not by the
+		// pane — the pane just holds a borrowed pointer. Clearing it here
+		// (instead of calling terminal_destroy) lets the pane be replaced
+		// or torn down without killing a session the user only meant to
+		// hide. `editor_destroy` is the one place that actually destroys.
+		content_value.terminal = nil
 	case MarkdownPreviewPane:
 		markdown_preview_pane_destroy(&content_value)
 	}
@@ -544,20 +586,105 @@ editor_focus_other_pane :: proc(editor: ^Editor) {
 	editor.cursor_timer = 0
 }
 
-// --- Terminal pane toggle (F9) --------------------------------------------
+// --- Multi-terminal session model -----------------------------------------
+//
+// Terminals live in `editor.terminals` and are independent of pane state.
+// pane[1] is the "terminal slot" — when a terminal is being shown it holds
+// a `TerminalPane` whose `terminal` field is a *borrowed* pointer aliasing
+// the active entry. The terminal itself stays alive even when pane[1] is
+// showing something else.
+//
+// F9               toggle visibility of the active terminal (creates the
+//                  first one when the list is empty)
+// Ctrl+F9          always create a new session and make it the active one
+// Ctrl+Shift+F9    open a picker over `editor.terminals`
+// Ctrl+F4          (in a terminal pane) destroy the active session
 
-// Open the embedded terminal in the right pane. If a document is already
-// there it gets stashed (untouched) and restored on the next toggle. If a
-// terminal is already running this is a no-op so a stray F9 press doesn't
-// kill a working shell.
 @(private)
-editor_open_terminal :: proc(editor: ^Editor) {
-	terminal_pane_index := 1
-	pane := &editor.panes[terminal_pane_index]
+TERMINAL_PANE_INDEX :: 1
 
-	// Already a terminal — nothing to do.
-	if _, is_terminal_pane := pane.content.(TerminalPane); is_terminal_pane { return }
+@(private)
+editor_is_terminal_visible :: proc(editor: ^Editor) -> bool {
+	_, is_terminal := editor.panes[TERMINAL_PANE_INDEX].content.(TerminalPane)
+	return is_terminal
+}
 
+@(private)
+editor_active_terminal :: proc(editor: ^Editor) -> ^terminal.Terminal {
+	if len(editor.terminals) == 0 { return nil }
+	if editor.active_terminal_index < 0 || editor.active_terminal_index >= len(editor.terminals) { return nil }
+	return editor.terminals[editor.active_terminal_index].terminal
+}
+
+// Display number of the active terminal entry, or 0 when nothing's open.
+// Used by the title strip and the picker so the user sees the same stable
+// "Terminal #N" label regardless of where it appears.
+@(private)
+editor_active_terminal_display_number :: proc(editor: ^Editor) -> int {
+	if len(editor.terminals) == 0 { return 0 }
+	if editor.active_terminal_index < 0 || editor.active_terminal_index >= len(editor.terminals) { return 0 }
+	return editor.terminals[editor.active_terminal_index].display_number
+}
+
+// Show the active terminal in pane[1], stashing whatever was there into the
+// pane's `saved_content` slot. No-op when no terminals exist or one is
+// already visible — the caller is expected to handle those.
+@(private)
+editor_terminal_show :: proc(editor: ^Editor) {
+	if editor_is_terminal_visible(editor) { return }
+	active_terminal := editor_active_terminal(editor); if active_terminal == nil { return }
+
+	pane := &editor.panes[TERMINAL_PANE_INDEX]
+	// Drop any prior saved_content defensively — a stale stash would leak
+	// the doc we'd be overwriting.
+	if pane.has_saved_content {
+		pane_content_destroy(&pane.saved_content)
+		pane.has_saved_content = false
+	}
+	pane.saved_content      = pane.content
+	pane.saved_split_active = editor.split_active
+	pane.has_saved_content  = true
+
+	pane.content             = TerminalPane{ terminal = active_terminal }
+	editor.split_active      = true
+	editor.active_pane_index = TERMINAL_PANE_INDEX
+}
+
+// Hide the currently-visible terminal: restore pane[1] from `saved_content`
+// (and the matching `split_active` snapshot) without destroying anything in
+// `editor.terminals`. The session keeps running in the background.
+@(private)
+editor_terminal_hide :: proc(editor: ^Editor) {
+	if !editor_is_terminal_visible(editor) { return }
+	pane := &editor.panes[TERMINAL_PANE_INDEX]
+
+	// Clear the borrowed pointer before swapping content out — keeps the
+	// pane_content_destroy fallthrough below from doing anything to a
+	// terminal that's still owned by `editor.terminals`.
+	if terminal_pane, is_terminal := &pane.content.(TerminalPane); is_terminal {
+		terminal_pane.terminal = nil
+	}
+
+	if pane.has_saved_content {
+		pane.content            = pane.saved_content
+		editor.split_active     = pane.saved_split_active
+		pane.saved_content      = PaneContent{}
+		pane.saved_split_active = false
+		pane.has_saved_content  = false
+	} else {
+		pane.content        = PaneContent{}
+		editor.split_active = false
+	}
+
+	if !editor.split_active { editor.active_pane_index = 0 }
+}
+
+// Spawn a new shell session and make it the active terminal. If the slot is
+// already visible the borrowed pointer in pane[1] swaps to the new one; if
+// hidden, this also makes the slot visible.
+@(private)
+editor_terminal_create_new :: proc(editor: ^Editor) {
+	pane := &editor.panes[TERMINAL_PANE_INDEX]
 	pane_rectangle := pane.rectangle
 	if pane_rectangle.w == 0 || pane_rectangle.h == 0 {
 		// Pane hasn't been laid out yet; conjure something reasonable so
@@ -571,9 +698,6 @@ editor_open_terminal :: proc(editor: ^Editor) {
 	row_count    := max(i32(4),  (pane_rectangle.h - editor_title_bar_height(editor)) / line_height)
 	column_count := max(i32(10), pane_rectangle.w / character_width)
 
-	// Match the terminal's default colors to the editor palette so plain
-	// shell output blends with the surrounding UI instead of sitting on a
-	// black slab.
 	default_foreground := terminal.Color{ editor.foreground_color.r, editor.foreground_color.g, editor.foreground_color.b, editor.foreground_color.a }
 	default_background := terminal.Color{ editor.background_color.r, editor.background_color.g, editor.background_color.b, editor.background_color.a }
 
@@ -583,64 +707,81 @@ editor_open_terminal :: proc(editor: ^Editor) {
 	new_terminal := terminal.terminal_new(row_count, column_count, default_foreground, default_background, editor.project_root)
 	if new_terminal == nil { return }
 
-	// Stash both the previous content AND the previous split state so
-	// closing the terminal puts the editor back exactly as it was — single
-	// pane if it started single, split with the original right-side doc if
-	// it started split. Drop any prior stash defensively.
-	if pane.has_saved_content {
-		pane_content_destroy(&pane.saved_content)
-		pane.has_saved_content = false
-	}
-	pane.saved_content      = pane.content
-	pane.saved_split_active = editor.split_active
-	pane.has_saved_content  = true
+	editor.next_terminal_display_number += 1
+	append(&editor.terminals, TerminalEntry{
+		terminal       = new_terminal,
+		display_number = editor.next_terminal_display_number,
+	})
+	editor.active_terminal_index = len(editor.terminals) - 1
 
-	pane.content              = TerminalPane{ terminal = new_terminal }
-	editor.split_active       = true
-	editor.active_pane_index  = terminal_pane_index
-}
-
-// F9-again: shut the terminal down and restore both the document that was
-// stashed when it opened AND the split state that was in effect then.
-@(private)
-editor_close_terminal :: proc(editor: ^Editor) {
-	terminal_pane_index := 1
-	pane := &editor.panes[terminal_pane_index]
-
-	terminal_pane, is_terminal_pane := &pane.content.(TerminalPane)
-	if !is_terminal_pane { return }
-
-	if terminal_pane.terminal != nil {
-		terminal.terminal_destroy(terminal_pane.terminal)
-		terminal_pane.terminal = nil
-	}
-
-	if pane.has_saved_content {
-		pane.content            = pane.saved_content
-		editor.split_active     = pane.saved_split_active
-		pane.saved_content      = PaneContent{}
-		pane.saved_split_active = false
-		pane.has_saved_content  = false
+	if editor_is_terminal_visible(editor) {
+		// Already showing a different session — swap the borrowed pointer
+		// in place rather than re-stashing pane[1].
+		if terminal_pane, is_terminal := &editor.panes[TERMINAL_PANE_INDEX].content.(TerminalPane); is_terminal {
+			terminal_pane.terminal = new_terminal
+		}
+		editor.active_pane_index = TERMINAL_PANE_INDEX
 	} else {
-		// No stash recorded — defensively reset to single-pane mode.
-		pane.content        = PaneContent{}
-		editor.split_active = false
+		editor_terminal_show(editor)
 	}
-
-	// If we ended up single-pane, focus has to be on pane 0.
-	if !editor.split_active { editor.active_pane_index = 0 }
 }
 
-// Single entry point bound to F9. Opening a fresh terminal is fire-and-
-// forget; closing one prompts with a Yes/No dialog so an accidental press
-// doesn't nuke a running shell.
+// Kill the active terminal session. If others remain, the next one in the
+// list becomes active and the visible pane (if any) swaps over to it. If the
+// list empties, pane[1] is restored from saved_content.
+@(private)
+editor_terminal_destroy_active :: proc(editor: ^Editor) {
+	if len(editor.terminals) == 0 { return }
+	if editor.active_terminal_index < 0 || editor.active_terminal_index >= len(editor.terminals) { return }
+
+	was_visible := editor_is_terminal_visible(editor)
+
+	doomed_terminal := editor.terminals[editor.active_terminal_index].terminal
+	ordered_remove(&editor.terminals, editor.active_terminal_index)
+
+	// Clear the borrowed pointer in pane[1] *before* terminal_destroy so a
+	// concurrent render path can't latch onto a half-freed handle.
+	if was_visible {
+		if terminal_pane, is_terminal := &editor.panes[TERMINAL_PANE_INDEX].content.(TerminalPane); is_terminal {
+			terminal_pane.terminal = nil
+		}
+	}
+	if doomed_terminal != nil { terminal.terminal_destroy(doomed_terminal) }
+
+	if len(editor.terminals) == 0 {
+		editor.active_terminal_index = 0
+		if was_visible { editor_terminal_hide(editor) }
+		return
+	}
+
+	// Clamp the active index to the new list size; the most natural fall-
+	// through pick is the entry that just shifted into the removed slot
+	// (same index unless we killed the last entry).
+	if editor.active_terminal_index >= len(editor.terminals) {
+		editor.active_terminal_index = len(editor.terminals) - 1
+	}
+
+	if was_visible {
+		new_active := editor_active_terminal(editor)
+		if terminal_pane, is_terminal := &editor.panes[TERMINAL_PANE_INDEX].content.(TerminalPane); is_terminal {
+			terminal_pane.terminal = new_active
+		}
+	}
+}
+
+// F9: hide if currently visible, show the active one if hidden, or create
+// the first session when none exist yet.
 @(private)
 editor_toggle_terminal :: proc(editor: ^Editor) {
-	if _, is_terminal_pane := editor.panes[1].content.(TerminalPane); is_terminal_pane {
-		terminal_close_confirm_open(editor)
-	} else {
-		editor_open_terminal(editor)
+	if editor_is_terminal_visible(editor) {
+		editor_terminal_hide(editor)
+		return
 	}
+	if len(editor.terminals) == 0 {
+		editor_terminal_create_new(editor)
+		return
+	}
+	editor_terminal_show(editor)
 }
 
 // --- Public open-string entry points --------------------------------------
@@ -743,9 +884,14 @@ pane_stash_editor :: proc(editor: ^Editor, pane_index: int) -> bool {
 	if replace_active(editor) && editor.replace.pane_index == pane_index { replace_close(editor, false) }
 
 	// Append a value-copy; ownership of the heap-allocated fields transfers
-	// to the new slot. Clear the pane's content so `pane_destroy` (which the
-	// caller typically runs next) doesn't double-free what we just moved.
+	// to the new slot. We then *both* zero out the EditorPane fields in the
+	// union storage AND set the union to its nil variant. The belt-and-
+	// suspenders matters: if a later destroy path somehow still observes the
+	// union as an EditorPane variant, every heap-pointer field is now nil/
+	// empty so `editor_pane_destroy_in_place` short-circuits on each one
+	// instead of double-freeing what we just transferred to the background.
 	append(&editor.background_documents, editor_pane_ptr^)
+	editor_pane_ptr^ = EditorPane{}
 	pane.content = PaneContent{}
 	return true
 }
@@ -825,7 +971,7 @@ editor_needs_render :: proc(editor: ^Editor) -> bool {
 
 // True when a modal dialog (help, browse, future popups) currently owns input.
 editor_is_modal_open :: proc(editor: ^Editor) -> bool {
-	return editor.show_help || editor.show_browse || editor.show_symbols || editor.show_terminal_close_confirm || editor.show_find_in_files || editor.show_replace_in_files || editor.show_save_as || editor.show_close_confirm || editor.show_git_history || editor.show_open_docs
+	return editor.show_help || editor.show_browse || editor.show_symbols || editor.show_find_in_files || editor.show_replace_in_files || editor.show_save_as || editor.show_close_confirm || editor.show_git_history || editor.show_open_docs || editor.show_terminal_picker
 }
 
 // --- Project root ---------------------------------------------------------

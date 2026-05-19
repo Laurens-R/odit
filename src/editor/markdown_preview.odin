@@ -49,6 +49,12 @@ MarkdownBlock :: struct {
 // Pane variant rendering pre-parsed markdown blocks. State is fully self-
 // contained — we re-parse on every F5 rather than tracking the source pane's
 // document for live updates.
+//
+// `layouted_blocks` is a per-frame-stable layout cache: word-wrapping, atom
+// widths, and per-atom `ttf.Text*` handles. The render path is hot (cursor
+// blink alone fires it twice a second) so recomputing this every frame was
+// the dominant cost — instead we recompute only when `layout_width` no longer
+// matches the current viewport, or `set_content` invalidates the cache.
 @(private)
 MarkdownPreviewPane :: struct {
 	blocks:           [dynamic]MarkdownBlock,
@@ -56,6 +62,13 @@ MarkdownPreviewPane :: struct {
 	scroll_y:         f32,
 	scroll_y_target:  f32,
 	visible_lines:    u32,
+
+	// Layout cache. Owns its dynamic arrays AND every `^ttf.Text` it points at
+	// (via atoms / code_lines / marker_text_object). Invalidated by
+	// `markdown_preview_pane_set_content` and rebuilt lazily on the next
+	// render whose `usable_text_pixels` doesn't match `layout_width`.
+	layouted_blocks:  [dynamic]LayoutedBlock,
+	layout_width:     i32,
 }
 
 // --- Fonts -----------------------------------------------------------------
@@ -247,21 +260,70 @@ markdown_measure_text_pixels :: proc(font: ^ttf.Font, text: string) -> (width: i
 	return
 }
 
+// Build a `ttf.Text*` that the layout cache will hand back to the renderer
+// every frame, avoiding a CreateText/Destroy roundtrip per atom per frame.
+// Callers own the returned handle and must ttf.DestroyText it on invalidation.
 @(private="file")
-markdown_draw_text :: proc(engine: ^ttf.TextEngine, font: ^ttf.Font, text: string, x, y: i32, color: sdl3.FColor) {
-	if len(text) == 0 || font == nil || engine == nil { return }
+markdown_create_text :: proc(engine: ^ttf.TextEngine, font: ^ttf.Font, text: string) -> ^ttf.Text {
+	if len(text) == 0 || font == nil || engine == nil { return nil }
 	c_text := strings.clone_to_cstring(text, context.temp_allocator)
-	text_object := ttf.CreateText(engine, font, c_text, 0)
+	return ttf.CreateText(engine, font, c_text, 0)
+}
+
+// Draw a cached text object at (x, y) in `color`. SetTextColorFloat mutates
+// the object, so atoms shared across colors would corrupt each other — we
+// give every atom its own object, so this is safe.
+@(private="file")
+markdown_draw_cached_text :: proc(text_object: ^ttf.Text, x, y: i32, color: sdl3.FColor) {
 	if text_object == nil { return }
-	defer ttf.DestroyText(text_object)
 	_ = ttf.SetTextColorFloat(text_object, color.r, color.g, color.b, color.a)
 	_ = ttf.DrawRendererText(text_object, f32(x), f32(y))
+}
+
+// Tear down the layout cache: destroys every cached `^ttf.Text` and frees
+// every owned dynamic array. Idempotent. Called on content-set, pane destroy,
+// and as part of the resize re-layout path.
+@(private="file")
+markdown_clear_layout_cache :: proc(pane: ^MarkdownPreviewPane) {
+	for layouted_index in 0..<len(pane.layouted_blocks) {
+		layouted := &pane.layouted_blocks[layouted_index]
+		for visual_line_index in 0..<len(layouted.visual_lines) {
+			visual_line := &layouted.visual_lines[visual_line_index]
+			for atom_index in 0..<len(visual_line.atoms) {
+				atom := &visual_line.atoms[atom_index]
+				if atom.text_object != nil {
+					ttf.DestroyText(atom.text_object)
+					atom.text_object = nil
+				}
+			}
+			if cap(visual_line.atoms) > 0 { delete(visual_line.atoms) }
+		}
+		if cap(layouted.visual_lines) > 0 { delete(layouted.visual_lines) }
+
+		for code_line_index in 0..<len(layouted.code_lines) {
+			code_line := &layouted.code_lines[code_line_index]
+			if code_line.text_object != nil {
+				ttf.DestroyText(code_line.text_object)
+				code_line.text_object = nil
+			}
+		}
+		if cap(layouted.code_lines) > 0 { delete(layouted.code_lines) }
+
+		if layouted.marker_text_object != nil {
+			ttf.DestroyText(layouted.marker_text_object)
+			layouted.marker_text_object = nil
+		}
+	}
+	clear(&pane.layouted_blocks)
+	pane.layout_width = 0
 }
 
 // --- Lifecycle -------------------------------------------------------------
 
 @(private)
 markdown_preview_pane_destroy :: proc(pane: ^MarkdownPreviewPane) {
+	markdown_clear_layout_cache(pane)
+	if cap(pane.layouted_blocks) > 0 { delete(pane.layouted_blocks) }
 	markdown_preview_clear_blocks(pane)
 	if cap(pane.blocks) > 0 { delete(pane.blocks) }
 	if len(pane.source_file_path) > 0 { delete(pane.source_file_path) }
@@ -282,16 +344,18 @@ markdown_preview_clear_blocks :: proc(pane: ^MarkdownPreviewPane) {
 
 @(private)
 markdown_preview_pane_set_content :: proc(pane: ^MarkdownPreviewPane, content_text, source_file_path: string) {
+	// Invalidate the layout cache first — it holds `^ttf.Text` handles that
+	// reference (string content of) the blocks we're about to delete. Destroy
+	// order is independent in practice, but doing it here keeps the cache's
+	// invariant "every entry's text_object is alive" honest.
+	markdown_clear_layout_cache(pane)
+
 	markdown_preview_clear_blocks(pane)
 	if len(pane.source_file_path) > 0 {
 		delete(pane.source_file_path)
 		pane.source_file_path = ""
 	}
 	pane.source_file_path = strings.clone(source_file_path)
-
-	if pane.blocks == nil {
-		pane.blocks = make([dynamic]MarkdownBlock, 0, 32, context.allocator)
-	}
 	markdown_preview_parse_into(content_text, &pane.blocks)
 }
 
@@ -456,6 +520,7 @@ markdown_preview_parse_into :: proc(content_text: string, blocks: ^[dynamic]Mark
 	for line_index < len(lines) {
 		current_line := lines[line_index]
 		left_trimmed := strings.trim_left(current_line, " \t")
+		fully_trimmed := strings.trim_space(current_line) // shared by blank/rule checks
 
 		if strings.has_prefix(left_trimmed, "```") {
 			line_index += 1
@@ -481,13 +546,13 @@ markdown_preview_parse_into :: proc(content_text: string, blocks: ^[dynamic]Mark
 			continue
 		}
 
-		if len(strings.trim_space(current_line)) == 0 {
+		if len(fully_trimmed) == 0 {
 			append(blocks, MarkdownBlock{kind = .BlankLine})
 			line_index += 1
 			continue
 		}
 
-		if is_horizontal_rule_line(strings.trim_space(current_line)) {
+		if is_horizontal_rule_line(fully_trimmed) {
 			append(blocks, MarkdownBlock{kind = .HorizontalRule})
 			line_index += 1
 			continue
@@ -531,18 +596,19 @@ markdown_preview_parse_into :: proc(content_text: string, blocks: ^[dynamic]Mark
 		paragraph_builder: strings.Builder
 		strings.builder_init(&paragraph_builder, 0, 128, context.temp_allocator)
 		for line_index < len(lines) {
-			inner_line     := lines[line_index]
-			inner_trimmed  := strings.trim_left(inner_line, " \t")
-			if len(strings.trim_space(inner_line)) == 0                     { break }
-			if is_horizontal_rule_line(strings.trim_space(inner_line))      { break }
-			if count_atx_heading_marker(inner_trimmed) > 0                  { break }
-			if strings.has_prefix(inner_trimmed, ">")                       { break }
-			if strings.has_prefix(inner_trimmed, "```")                     { break }
-			if is_unordered_list_marker(inner_trimmed)                      { break }
-			if ordered_value, _ := parse_ordered_list_marker(inner_trimmed); ordered_value > 0 { break }
+			inner_line          := lines[line_index]
+			inner_left_trimmed  := strings.trim_left(inner_line, " \t")
+			inner_fully_trimmed := strings.trim_space(inner_line)
+			if len(inner_fully_trimmed) == 0                                          { break }
+			if is_horizontal_rule_line(inner_fully_trimmed)                           { break }
+			if count_atx_heading_marker(inner_left_trimmed) > 0                       { break }
+			if strings.has_prefix(inner_left_trimmed, ">")                            { break }
+			if strings.has_prefix(inner_left_trimmed, "```")                          { break }
+			if is_unordered_list_marker(inner_left_trimmed)                           { break }
+			if ordered_value, _ := parse_ordered_list_marker(inner_left_trimmed); ordered_value > 0 { break }
 
 			if strings.builder_len(paragraph_builder) > 0 { strings.write_byte(&paragraph_builder, ' ') }
-			strings.write_string(&paragraph_builder, strings.trim_space(inner_line))
+			strings.write_string(&paragraph_builder, inner_fully_trimmed)
 			line_index += 1
 		}
 		paragraph_text := strings.to_string(paragraph_builder)
@@ -713,6 +779,10 @@ MarkdownLayoutAtom :: struct {
 	font:        ^ttf.Font, // chosen at flatten time so layout/render measure with the same handle
 	pixel_width: i32,
 	is_space:    bool,
+	// Pre-built `ttf.Text*` for non-space atoms — avoids a CreateText/Destroy
+	// roundtrip per atom per frame. nil for whitespace atoms (never drawn).
+	// Owned by the enclosing `LayoutedBlock`'s pane cache.
+	text_object: ^ttf.Text,
 }
 
 @(private="file")
@@ -720,23 +790,43 @@ MarkdownVisualLine :: struct {
 	atoms: [dynamic]MarkdownLayoutAtom,
 }
 
-// Layout cache for one block — computed once per frame and consulted by both
-// the height pass and the render pass so we never disagree about geometry.
+// One pre-split line of a fenced code block, with its pre-built `ttf.Text*`
+// so the render path can reuse the same handle every frame.
+@(private="file")
+MarkdownCodeLine :: struct {
+	text_object: ^ttf.Text, // owned by the enclosing LayoutedBlock's pane cache
+}
+
+// Layout cache for one block — computed once on (re)layout and held on the
+// pane until the content or pane width changes. Both the height-accumulation
+// pass and the render pass walk the same cache so geometry stays in sync.
 @(private="file")
 LayoutedBlock :: struct {
 	block:              ^MarkdownBlock,
 	block_default_font: ^ttf.Font,
 	visual_lines:       [dynamic]MarkdownVisualLine,
 	height_pixels:      i32,
+	// .CodeBlock only: pre-split lines + their text objects.
+	code_lines:         [dynamic]MarkdownCodeLine,
+	// .ListItem only: pre-measured + pre-built marker glyph. Marker text
+	// itself isn't stored — its contents are captured inside the Text object.
+	marker_width:       i32,
+	marker_text_object: ^ttf.Text, // owned by the enclosing pane cache
 }
 
 // Walks the inline runs once and produces width-measured atoms. Whitespace
 // runs (one or more spaces / tabs) become space atoms. Code atoms keep the
 // whole run as one indivisible token so a code span never breaks mid-word.
+// Non-space atoms get a pre-built `^ttf.Text` so the render path doesn't
+// have to CreateText/Destroy per atom per frame.
 @(private="file")
 flatten_runs_to_atoms_pixel :: proc(editor: ^Editor, runs: []MarkdownInlineRun, block_default_font: ^ttf.Font) -> [dynamic]MarkdownLayoutAtom {
 	atoms: [dynamic]MarkdownLayoutAtom
+	// Atoms here are a scratch buffer — layout_atoms_pixel copies each one
+	// (including the text_object pointer) into a per-visual-line dynamic array
+	// allocated on context.allocator, after which this buffer can be discarded.
 	atoms.allocator = context.temp_allocator
+	engine := editor.text_engine
 
 	for run in runs {
 		atom_font := markdown_inline_font(editor, run.kind, block_default_font)
@@ -750,6 +840,7 @@ flatten_runs_to_atoms_pixel :: proc(editor: ^Editor, runs: []MarkdownInlineRun, 
 				font        = atom_font,
 				pixel_width = width_pixels,
 				is_space    = false,
+				text_object = markdown_create_text(engine, atom_font, run.text),
 			})
 			continue
 		}
@@ -768,6 +859,8 @@ flatten_runs_to_atoms_pixel :: proc(editor: ^Editor, runs: []MarkdownInlineRun, 
 					font        = atom_font,
 					pixel_width = width_pixels,
 					is_space    = true,
+					// Whitespace is never drawn as glyphs — leave text_object nil
+					// to avoid burning a TTF text object on each space run.
 				})
 				continue
 			}
@@ -782,6 +875,7 @@ flatten_runs_to_atoms_pixel :: proc(editor: ^Editor, runs: []MarkdownInlineRun, 
 				font        = atom_font,
 				pixel_width = width_pixels,
 				is_space    = false,
+				text_object = markdown_create_text(engine, atom_font, word_text),
 			})
 		}
 	}
@@ -791,13 +885,18 @@ flatten_runs_to_atoms_pixel :: proc(editor: ^Editor, runs: []MarkdownInlineRun, 
 
 // Pack atoms into visual lines that fit within `max_pixel_width`. Leading
 // whitespace of each line is dropped; trailing whitespace is trimmed at wrap.
+// Output lives on `context.allocator` so the caller can stash it on the pane
+// layout cache.
 @(private="file")
 layout_atoms_pixel :: proc(atoms: []MarkdownLayoutAtom, max_pixel_width: i32) -> [dynamic]MarkdownVisualLine {
 	visual_lines: [dynamic]MarkdownVisualLine
-	visual_lines.allocator = context.temp_allocator
+	visual_lines.allocator = context.allocator
 
+	// `current_atoms` is built per visual line and then donated to the line
+	// (its buffer becomes the line's atoms slice). After each flush we start
+	// fresh — append on a zero-valued [dynamic] picks up the context allocator.
 	current_atoms: [dynamic]MarkdownLayoutAtom
-	current_atoms.allocator = context.temp_allocator
+	current_atoms.allocator = context.allocator
 	current_width: i32 = 0
 
 	for atom in atoms {
@@ -821,21 +920,29 @@ layout_atoms_pixel :: proc(atoms: []MarkdownLayoutAtom, max_pixel_width: i32) ->
 	return visual_lines
 }
 
+// Trim trailing whitespace, then donate `current_atoms`'s buffer to a new
+// visual line and reset `current_atoms` so the next line builds a fresh
+// buffer. Avoids the per-atom copy the old element-by-element flush did.
 @(private="file")
 markdown_flush_visual_line :: proc(visual_lines: ^[dynamic]MarkdownVisualLine, current_atoms: ^[dynamic]MarkdownLayoutAtom) {
 	for len(current_atoms^) > 0 && current_atoms[len(current_atoms^) - 1].is_space {
 		resize(current_atoms, len(current_atoms^) - 1)
 	}
 	if len(current_atoms^) == 0 { return }
-	line_atoms: [dynamic]MarkdownLayoutAtom
-	line_atoms.allocator = context.temp_allocator
-	for atom_value in current_atoms { append(&line_atoms, atom_value) }
-	append(visual_lines, MarkdownVisualLine{atoms = line_atoms})
-	clear(current_atoms)
+
+	// Hand the dynamic-array header (data, len, cap, allocator) over to the
+	// new visual line; reset our local builder so the next line allocates a
+	// fresh buffer on first append.
+	donated := current_atoms^
+	current_atoms^ = [dynamic]MarkdownLayoutAtom{}
+	current_atoms.allocator = donated.allocator
+	append(visual_lines, MarkdownVisualLine{atoms = donated})
 }
 
 // Lay one block out into a LayoutedBlock. Headings and code blocks have
-// special height math; everything else word-wraps with the body font.
+// special height math; everything else word-wraps with the body font. Any
+// `^ttf.Text` allocated here is owned by the returned LayoutedBlock and is
+// freed by `markdown_clear_layout_cache`.
 @(private="file")
 layout_block :: proc(editor: ^Editor, block: ^MarkdownBlock, max_pixel_width: i32) -> LayoutedBlock {
 	layouted: LayoutedBlock
@@ -863,10 +970,9 @@ layout_block :: proc(editor: ^Editor, block: ^MarkdownBlock, max_pixel_width: i3
 		if heading_line_height <= 0 { heading_line_height = body_line_height + 4 }
 
 		atoms := flatten_runs_to_atoms_pixel(editor, block.inline_runs[:], layouted.block_default_font)
-		lines := layout_atoms_pixel(atoms[:], max_pixel_width)
-		layouted.visual_lines = lines
+		layouted.visual_lines = layout_atoms_pixel(atoms[:], max_pixel_width)
 
-		line_count := len(lines)
+		line_count := len(layouted.visual_lines)
 		if line_count == 0 { line_count = 1 }
 		// Padding above + below the heading so it breathes; bottom padding
 		// also leaves room for the full-width underline.
@@ -878,20 +984,40 @@ layout_block :: proc(editor: ^Editor, block: ^MarkdownBlock, max_pixel_width: i3
 	case .CodeBlock:
 		code_text := ""
 		if len(block.inline_runs) > 0 { code_text = block.inline_runs[0].text }
-		code_line_count := 1
-		for byte_index in 0..<len(code_text) {
-			if code_text[byte_index] == '\n' { code_line_count += 1 }
-		}
+		code_font := editor.markdown_fonts.code
+		if code_font == nil { code_font = editor.font }
 		code_line_height := editor.markdown_fonts.code_line_height
 		if code_line_height <= 0 { code_line_height = body_line_height }
-		layouted.height_pixels = i32(code_line_count) * code_line_height + 8
+
+		// Pre-split the code block into lines and pre-build a Text object per
+		// line. Render replays these directly — no per-frame string splitting,
+		// no per-frame CreateText.
+		layouted.code_lines = make([dynamic]MarkdownCodeLine, 0, 8, context.allocator)
+		remaining := code_text
+		for {
+			newline_offset := strings.index_byte(remaining, '\n')
+			line_text: string
+			if newline_offset >= 0 {
+				line_text = remaining[:newline_offset]
+				remaining = remaining[newline_offset + 1:]
+			} else {
+				line_text = remaining
+				remaining = ""
+			}
+			append(&layouted.code_lines, MarkdownCodeLine{
+				text_object = markdown_create_text(editor.text_engine, code_font, line_text),
+			})
+			if newline_offset < 0 { break }
+		}
+		line_count := len(layouted.code_lines)
+		if line_count < 1 { line_count = 1 }
+		layouted.height_pixels = i32(line_count) * code_line_height + 8
 		return layouted
 
 	case .Paragraph:
 		atoms := flatten_runs_to_atoms_pixel(editor, block.inline_runs[:], layouted.block_default_font)
-		lines := layout_atoms_pixel(atoms[:], max_pixel_width)
-		layouted.visual_lines = lines
-		line_count := len(lines)
+		layouted.visual_lines = layout_atoms_pixel(atoms[:], max_pixel_width)
+		line_count := len(layouted.visual_lines)
 		if line_count == 0 { line_count = 1 }
 		layouted.height_pixels = i32(line_count) * body_line_height + 4
 		return layouted
@@ -901,23 +1027,26 @@ layout_block :: proc(editor: ^Editor, block: ^MarkdownBlock, max_pixel_width: i3
 		quote_indent_pixels: i32 = 16
 		text_max_pixels := max_pixel_width - quote_indent_pixels
 		if text_max_pixels < 80 { text_max_pixels = 80 }
-		lines := layout_atoms_pixel(atoms[:], text_max_pixels)
-		layouted.visual_lines = lines
-		line_count := len(lines)
+		layouted.visual_lines = layout_atoms_pixel(atoms[:], text_max_pixels)
+		line_count := len(layouted.visual_lines)
 		if line_count == 0 { line_count = 1 }
 		layouted.height_pixels = i32(line_count) * body_line_height + 2
 		return layouted
 
 	case .ListItem:
 		atoms := flatten_runs_to_atoms_pixel(editor, block.inline_runs[:], layouted.block_default_font)
-		marker_text       := list_marker_text(block)
+		// Pre-measure + pre-build the marker glyph. The marker text itself is
+		// captured inside the Text object — we don't need to keep our own copy.
+		marker_text := list_marker_text(block)
 		marker_width_px, _ := markdown_measure_text_pixels(layouted.block_default_font, marker_text)
+		layouted.marker_width       = marker_width_px
+		layouted.marker_text_object = markdown_create_text(editor.text_engine, layouted.block_default_font, marker_text)
+
 		list_indent_pixels := marker_width_px + 4
 		text_max_pixels := max_pixel_width - list_indent_pixels
 		if text_max_pixels < 80 { text_max_pixels = 80 }
-		lines := layout_atoms_pixel(atoms[:], text_max_pixels)
-		layouted.visual_lines = lines
-		line_count := len(lines)
+		layouted.visual_lines = layout_atoms_pixel(atoms[:], text_max_pixels)
+		line_count := len(layouted.visual_lines)
 		if line_count == 0 { line_count = 1 }
 		layouted.height_pixels = i32(line_count) * body_line_height
 		return layouted
@@ -982,16 +1111,28 @@ markdown_preview_pane_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, 
 	usable_text_pixels := view_w - horizontal_padding * 2
 	if usable_text_pixels < 100 { usable_text_pixels = 100 }
 
-	// Single layout pass: each block computes once and is consulted twice
-	// (height accumulation for scroll clamp, then actual paint).
-	layouted_blocks: [dynamic]LayoutedBlock
-	layouted_blocks.allocator = context.temp_allocator
+	// Lay out only when the cache is stale: usable width changed, the block
+	// count drifted from the cache, or the cache is empty (post-set_content).
+	// Idle re-renders (cursor blink, mouse motion) hit the fast path and
+	// reuse the previous frame's measurements + Text objects unchanged.
+	cache_is_stale := content.layout_width != usable_text_pixels ||
+	                  len(content.layouted_blocks) != len(content.blocks)
+	if cache_is_stale {
+		markdown_clear_layout_cache(content)
+		if cap(content.layouted_blocks) < len(content.blocks) {
+			if cap(content.layouted_blocks) > 0 { delete(content.layouted_blocks) }
+			content.layouted_blocks = make([dynamic]LayoutedBlock, 0, len(content.blocks), context.allocator)
+		}
+		for block_index in 0..<len(content.blocks) {
+			block := &content.blocks[block_index]
+			append(&content.layouted_blocks, layout_block(editor, block, usable_text_pixels))
+		}
+		content.layout_width = usable_text_pixels
+	}
+
 	total_content_height := i32(0)
-	for block_index in 0..<len(content.blocks) {
-		block := &content.blocks[block_index]
-		lb := layout_block(editor, block, usable_text_pixels)
-		total_content_height += lb.height_pixels
-		append(&layouted_blocks, lb)
+	for layouted in content.layouted_blocks {
+		total_content_height += layouted.height_pixels
 	}
 
 	max_scroll_pixels := total_content_height + vertical_padding * 2 - text_area_h
@@ -1005,10 +1146,11 @@ markdown_preview_pane_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, 
 	current_y := text_origin_y + vertical_padding - scroll_pixels
 	bottom_y  := text_origin_y + text_area_h
 
-	for &layouted in layouted_blocks {
+	for layouted_index in 0..<len(content.layouted_blocks) {
+		layouted := &content.layouted_blocks[layouted_index]
 		block_height := layouted.height_pixels
 		if current_y + block_height >= text_origin_y && current_y < bottom_y {
-			markdown_render_layouted_block(editor, renderer, &layouted, text_left_x, current_y, usable_text_pixels)
+			markdown_render_layouted_block(editor, renderer, layouted, text_left_x, current_y, usable_text_pixels)
 		}
 		current_y += block_height
 		if current_y >= bottom_y { break }
@@ -1018,7 +1160,6 @@ markdown_preview_pane_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, 
 @(private="file")
 markdown_render_layouted_block :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, layouted: ^LayoutedBlock, x_start, y_start, usable_text_pixels: i32) {
 	block := layouted.block
-	engine := editor.text_engine
 
 	body_line_height := editor.markdown_fonts.body_line_height
 	if body_line_height <= 0 { body_line_height = editor.line_height }
@@ -1046,7 +1187,7 @@ markdown_render_layouted_block :: proc(editor: ^Editor, renderer: ^sdl3.Renderer
 		current_y := y_start + top_padding
 
 		for visual_line in layouted.visual_lines {
-			markdown_render_visual_line(engine, renderer, editor, visual_line, x_start, current_y, heading_color)
+			markdown_render_visual_line(renderer, editor, visual_line,x_start, current_y, heading_color)
 			current_y += heading_line_height
 		}
 
@@ -1062,14 +1203,11 @@ markdown_render_layouted_block :: proc(editor: ^Editor, renderer: ^sdl3.Renderer
 		return
 
 	case .CodeBlock:
-		code_text := ""
-		if len(block.inline_runs) > 0 { code_text = block.inline_runs[0].text }
-		code_line_count := 1
-		for byte_index in 0..<len(code_text) {
-			if code_text[byte_index] == '\n' { code_line_count += 1 }
-		}
 		code_line_height := editor.markdown_fonts.code_line_height
 		if code_line_height <= 0 { code_line_height = body_line_height }
+
+		code_line_count := len(layouted.code_lines)
+		if code_line_count < 1 { code_line_count = 1 }
 
 		background_rectangle := sdl3.FRect{
 			f32(x_start - 6),
@@ -1082,23 +1220,10 @@ markdown_render_layouted_block :: proc(editor: ^Editor, renderer: ^sdl3.Renderer
 		sdl3.RenderFillRect(renderer, &background_rectangle)
 
 		code_color := editor.syntax_keyword_foreground
-		code_font  := editor.markdown_fonts.code
-		if code_font == nil { code_font = editor.font }
 		current_y := y_start + 4
-		remaining_text := code_text
-		for {
-			newline_offset := strings.index_byte(remaining_text, '\n')
-			line_text: string
-			if newline_offset >= 0 {
-				line_text     = remaining_text[:newline_offset]
-				remaining_text = remaining_text[newline_offset + 1:]
-			} else {
-				line_text     = remaining_text
-				remaining_text = ""
-			}
-			markdown_draw_text(engine, code_font, line_text, x_start, current_y, code_color)
+		for code_line in layouted.code_lines {
+			markdown_draw_cached_text(code_line.text_object, x_start, current_y, code_color)
 			current_y += code_line_height
-			if newline_offset < 0 { break }
 		}
 		return
 
@@ -1115,22 +1240,19 @@ markdown_render_layouted_block :: proc(editor: ^Editor, renderer: ^sdl3.Renderer
 		quote_default_color := editor.syntax_comment_foreground
 		current_y := y_start
 		for visual_line in layouted.visual_lines {
-			markdown_render_visual_line(engine, renderer, editor, visual_line, quote_text_x, current_y, quote_default_color)
+			markdown_render_visual_line(renderer, editor, visual_line,quote_text_x, current_y, quote_default_color)
 			current_y += body_line_height
 		}
 		return
 
 	case .ListItem:
-		marker_text := list_marker_text(block)
-		marker_font := layouted.block_default_font
 		marker_color := editor.syntax_keyword_foreground
-		markdown_draw_text(engine, marker_font, marker_text, x_start, y_start, marker_color)
-		marker_width_px, _ := markdown_measure_text_pixels(marker_font, marker_text)
-		text_left_x := x_start + marker_width_px + 4
+		markdown_draw_cached_text(layouted.marker_text_object, x_start, y_start, marker_color)
+		text_left_x := x_start + layouted.marker_width + 4
 
 		current_y := y_start
 		for visual_line in layouted.visual_lines {
-			markdown_render_visual_line(engine, renderer, editor, visual_line, text_left_x, current_y, editor.foreground_color)
+			markdown_render_visual_line(renderer, editor, visual_line,text_left_x, current_y, editor.foreground_color)
 			current_y += body_line_height
 		}
 		return
@@ -1138,7 +1260,7 @@ markdown_render_layouted_block :: proc(editor: ^Editor, renderer: ^sdl3.Renderer
 	case .Paragraph:
 		current_y := y_start
 		for visual_line in layouted.visual_lines {
-			markdown_render_visual_line(engine, renderer, editor, visual_line, x_start, current_y, editor.foreground_color)
+			markdown_render_visual_line(renderer, editor, visual_line,x_start, current_y, editor.foreground_color)
 			current_y += body_line_height
 		}
 		return
@@ -1147,11 +1269,19 @@ markdown_render_layouted_block :: proc(editor: ^Editor, renderer: ^sdl3.Renderer
 
 @(private="file")
 markdown_render_visual_line :: proc(
-	engine: ^ttf.TextEngine, renderer: ^sdl3.Renderer, editor: ^Editor,
+	renderer: ^sdl3.Renderer, editor: ^Editor,
 	visual_line: MarkdownVisualLine,
 	x_start, y: i32,
 	default_color: sdl3.FColor,
 ) {
+	// Hoist line-height lookups out of the inner loop — these are pane-wide
+	// and only need to be resolved once per visual line, not per atom.
+	body_line_height := editor.markdown_fonts.body_line_height
+	if body_line_height <= 0 { body_line_height = editor.line_height }
+	code_line_height := editor.markdown_fonts.code_line_height
+	if code_line_height <= 0 { code_line_height = editor.line_height }
+	code_background_color := editor.status_bar_background
+
 	current_x := x_start
 	for atom in visual_line.atoms {
 		span_pixel_width := atom.pixel_width
@@ -1164,11 +1294,8 @@ markdown_render_visual_line :: proc(
 		// Inline code spans get a faint background slab so they read as code
 		// against the surrounding text.
 		if atom.kind == .Code {
-			code_line_height := editor.markdown_fonts.code_line_height
-			if code_line_height <= 0 { code_line_height = editor.line_height }
 			code_bg_rectangle := sdl3.FRect{f32(current_x - 2), f32(y), f32(span_pixel_width + 4), f32(code_line_height)}
-			bg := editor.status_bar_background
-			sdl3.SetRenderDrawColorFloat(renderer, bg.r, bg.g, bg.b, bg.a)
+			sdl3.SetRenderDrawColorFloat(renderer, code_background_color.r, code_background_color.g, code_background_color.b, code_background_color.a)
 			sdl3.RenderFillRect(renderer, &code_bg_rectangle)
 		}
 
@@ -1181,11 +1308,9 @@ markdown_render_visual_line :: proc(
 		case .Link:   atom_color = editor.syntax_type_foreground
 		}
 
-		markdown_draw_text(engine, atom.font, atom.text, current_x, y, atom_color)
+		markdown_draw_cached_text(atom.text_object, current_x, y, atom_color)
 
 		if atom.kind == .Link {
-			body_line_height := editor.markdown_fonts.body_line_height
-			if body_line_height <= 0 { body_line_height = editor.line_height }
 			underline_y := y + body_line_height - 2
 			sdl3.SetRenderDrawColorFloat(renderer, atom_color.r, atom_color.g, atom_color.b, atom_color.a)
 			sdl3.RenderLine(renderer, f32(current_x), f32(underline_y), f32(current_x + span_pixel_width - 1), f32(underline_y))
