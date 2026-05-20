@@ -1,0 +1,85 @@
+{
+	"// schema": "Per-project build + debug profiles. Placeholders: {project_root}, {build_name}, {platform}, ${workspaceFolder}.",
+
+	"build_profiles": [
+		{
+			"name": "debug",
+			"description": "Windows debug build (default target)",
+			"working_dir": "{project_root}",
+			"command_windows": ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/build.ps1", "-Target", "windows", "-Config", "debug"],
+			"command_linux":   ["bash", "scripts/build.sh", "windows", "debug"],
+			"command_macos":   ["bash", "scripts/build.sh", "windows", "debug"]
+		},
+		{
+			"name": "release",
+			"description": "Windows release build",
+			"working_dir": "{project_root}",
+			"command_windows": ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/build.ps1", "-Target", "windows", "-Config", "release"],
+			"command_linux":   ["bash", "scripts/build.sh", "windows", "release"],
+			"command_macos":   ["bash", "scripts/build.sh", "windows", "release"]
+		},
+		{
+			"name": "linux-debug",
+			"description": "Cross-build a Linux debug binary",
+			"working_dir": "{project_root}",
+			"command_windows": ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/build.ps1", "-Target", "linux", "-Config", "debug"],
+			"command_linux":   ["bash", "scripts/build.sh", "linux", "debug"],
+			"command_macos":   ["bash", "scripts/build.sh", "linux", "debug"]
+		},
+		{
+			"name": "linux-release",
+			"description": "Cross-build a Linux release binary",
+			"working_dir": "{project_root}",
+			"command_windows": ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/build.ps1", "-Target", "linux", "-Config", "release"],
+			"command_linux":   ["bash", "scripts/build.sh", "linux", "release"],
+			"command_macos":   ["bash", "scripts/build.sh", "linux", "release"]
+		},
+		{
+			"name": "macos-debug",
+			"description": "Cross-build a macOS debug binary",
+			"working_dir": "{project_root}",
+			"command_windows": ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/build.ps1", "-Target", "macos", "-Config", "debug"],
+			"command_linux":   ["bash", "scripts/build.sh", "macos", "debug"],
+			"command_macos":   ["bash", "scripts/build.sh", "macos", "debug"]
+		},
+		{
+			"name": "macos-release",
+			"description": "Cross-build a macOS release binary",
+			"working_dir": "{project_root}",
+			"command_windows": ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/build.ps1", "-Target", "macos", "-Config", "release"],
+			"command_linux":   ["bash", "scripts/build.sh", "macos", "release"],
+			"command_macos":   ["bash", "scripts/build.sh", "macos", "release"]
+		},
+		{
+			"name": "clean",
+			"description": "Wipe the out/ directory",
+			"working_dir": "{project_root}",
+			"command_windows": ["pwsh", "-NoProfile", "-Command", "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue out"],
+			"command_linux":   ["rm", "-rf", "out"],
+			"command_macos":   ["rm", "-rf", "out"]
+		}
+	],
+
+	"debug_profiles": [
+		{
+			"name":          "Debug Odit (Windows debug)",
+			"adapter":       "lldb",
+			"request":       "launch",
+			"program":       "{project_root}/out/windows/{build_name}/odit_self.exe",
+			"args":          [],
+			"cwd":           "{project_root}/out/windows/{build_name}",
+			"stop_on_entry": false,
+			"build_profile": "debug"
+		},
+		{
+			"name":          "Debug Odit (Windows release)",
+			"adapter":       "lldb",
+			"request":       "launch",
+			"program":       "{project_root}/out/windows/{build_name}/odit_self.exe",
+			"args":          [],
+			"cwd":           "{project_root}/out/windows/{build_name}",
+			"stop_on_entry": false,
+			"build_profile": "release"
+		}
+	]
+}

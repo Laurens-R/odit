@@ -59,7 +59,7 @@ editor_get_or_start_lsp :: proc(editor: ^Editor, language_id: string) -> ^lsp.Cl
 	return new_client
 }
 
-// Rewrite the executable token at the head of an LSP command line so a
+// Rewrite the executable token at the head of an LSP/DAP command line so a
 // relative path is checked under the editor's own lsp/ folder before being
 // handed off to PATH-search. Other tokens (CLI args to the server) are
 // passed through unchanged.
@@ -69,7 +69,11 @@ editor_get_or_start_lsp :: proc(editor: ^Editor, language_id: string) -> ^lsp.Cl
 //   * relative, exists under
 //     <exe_dir>/lsp/<token>   → rewrite to that absolute path
 //   * otherwise               → use as-is (CreateProcessW / exec searches PATH)
-@(private="file")
+//
+// Shared with the DAP integration — both lookups land in vendor/<plat>/lsp/
+// because that's where adapter binaries are staged. Despite the folder name,
+// it holds any stdio JSON-RPC tool (LSPs, DAP adapters, …).
+@(private)
 resolve_lsp_command_tokens :: proc(command_tokens: []string, allocator := context.temp_allocator) -> []string {
 	if len(command_tokens) == 0 { return command_tokens }
 	executable_token := command_tokens[0]

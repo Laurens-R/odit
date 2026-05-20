@@ -4,6 +4,7 @@ import "core:strings"
 import "vendor:sdl3"
 import "vendor:sdl3/ttf"
 
+import "../dap"
 import "../document"
 import "../lsp"
 import "../syntax"
@@ -127,6 +128,16 @@ TerminalPane :: struct {
 TerminalEntry :: struct {
 	terminal:       ^terminal.Terminal,
 	display_number: int,
+	// Task-runner bookkeeping. `is_build_job=true` marks a one-shot session
+	// spawned by the Tasks dialog so the per-frame poll knows to watch its
+	// child's exit code (rather than treating it as an interactive shell
+	// that lives until the user closes it). When a build-job terminal exits
+	// with code 0 *and* `pending_debug_profile_index >= 0`, the editor
+	// auto-starts the queued debug session.
+	is_build_job:                bool,
+	build_profile_name:          string, // owned; "" for interactive shells
+	pending_debug_profile_index: int,    // -1 = standalone build
+	build_exit_observed:         bool,   // set once exit has been handled — guards against double-firing
 }
 
 // Tagged union of all pane content kinds. Add variants here as new pane types
@@ -369,6 +380,43 @@ Editor :: struct {
 	//   - The F9 terminal spawns with it as the working directory.
 	//   - The status bar shows it at all times.
 	project_root:               string,
+
+	// Right-side debug panel (F7). Owns the breakpoint list and the DAP
+	// session snapshot. See debug.odin and dap_integration.odin.
+	debug_state:                DebugState,
+	breakpoint_color:           sdl3.FColor,
+	breakpoint_disabled_color:  sdl3.FColor,
+	debug_current_line_color:   sdl3.FColor, // background tint on the line where execution is paused
+
+	// Running DAP adapter processes, keyed by adapter id ("lldb", ...).
+	// `active_dap_client` aliases whichever entry is the one a session is
+	// running against (or `nil` when no session is active). Owned by this
+	// map; pointers freed in `editor_destroy`.
+	dap_clients:                map[string]^dap.Client,
+	active_dap_client:          ^dap.Client,
+
+	// Per-project build + debug profiles (loaded from
+	// `<project_root>/.odit/project.json`). Reloaded any time the project
+	// root changes — empty when there's no project root or no file.
+	project_config:              ProjectConfig,
+
+	// F7 tasks dialog. Build profiles run inside a fresh terminal session
+	// (see `editor_terminal_create_for_build`); the terminal entry is
+	// tagged as a build job so the per-frame poll knows to watch its child
+	// process and chain a queued debug launch when a build-then-debug
+	// pairing completes successfully.
+	show_tasks_dialog:           bool,
+	tasks_dialog:                TasksDialog,
+
+	// Selected index into `project_config.debug_profiles`. -1 means "no
+	// selection yet" — the Tasks dialog (F7) seeds it on activation.
+	active_debug_configuration_index: int,
+
+	// Conditional-breakpoint editor — opened by Shift+clicking the gutter.
+	// The dialog targets a frozen (file, line) tuple captured at open time
+	// so a pane swap mid-edit can't retarget the write.
+	show_breakpoint_condition:   bool,
+	breakpoint_condition_dialog: BreakpointConditionDialog,
 }
 
 CURSOR_BLINK_RATE :: 0.53 // seconds
@@ -456,6 +504,18 @@ editor_init :: proc(editor: ^Editor, text_engine: ^ttf.TextEngine, font: ^ttf.Fo
 	editor.syntax_preprocessor_foreground = sdl3.FColor{0.88, 0.55, 0.78, 1.0} // magenta
 	editor.syntax_symbol_foreground       = sdl3.FColor{0.95, 0.90, 0.55, 1.0} // pale yellow
 
+	editor.breakpoint_color           = sdl3.FColor{0.92, 0.35, 0.35, 1.0} // saturated red
+	editor.breakpoint_disabled_color  = sdl3.FColor{0.55, 0.40, 0.40, 1.0} // muted red
+	editor.debug_current_line_color   = sdl3.FColor{0.28, 0.22, 0.12, 1.0} // dim amber
+
+	debug_state_init(&editor.debug_state)
+	editor.dap_clients = make(map[string]^dap.Client)
+	// Sentinel — start_session asks the user to pick via F7 the first time
+	// when more than one debug profile is loaded.
+	editor.active_debug_configuration_index = -1
+
+	project_config_init(&editor.project_config)
+
 	syntax.init()
 }
 
@@ -474,6 +534,9 @@ editor_destroy :: proc(editor: ^Editor) {
 	git_history_dialog_destroy(&editor.git_history_dialog)
 	open_docs_dialog_destroy(&editor.open_docs_dialog)
 	terminal_picker_destroy(&editor.terminal_picker)
+	tasks_dialog_destroy(&editor.tasks_dialog)
+	project_config_destroy(&editor.project_config)
+	breakpoint_condition_dialog_destroy(&editor.breakpoint_condition_dialog)
 	hover_popup_destroy(&editor.hover_popup)
 	completion_popup_destroy(&editor.completion_popup)
 	signature_popup_destroy(&editor.signature_popup)
@@ -494,9 +557,15 @@ editor_destroy :: proc(editor: ^Editor) {
 			terminal.terminal_destroy(entry.terminal)
 			entry.terminal = nil
 		}
+		if len(entry.build_profile_name) > 0 {
+			delete(entry.build_profile_name)
+			entry.build_profile_name = ""
+		}
 	}
 	if cap(editor.terminals) > 0 { delete(editor.terminals) }
 	markdown_fonts_destroy(&editor.markdown_fonts)
+	editor_dap_destroy_all(editor)
+	debug_state_destroy(&editor.debug_state)
 	if len(editor.project_root) > 0 {
 		delete(editor.project_root)
 		editor.project_root = ""
@@ -782,6 +851,54 @@ editor_terminal_create_new :: proc(editor: ^Editor) {
 	}
 }
 
+// Spawn a one-shot terminal session running `command_line` instead of the
+// default interactive shell. Tagged as a build job so the per-frame poll in
+// `editor_dap_update` can watch its exit code and (when the build belongs
+// to a build-then-debug chain) auto-start the queued debug session on
+// success. Returns the new terminal pointer or nil on failure.
+@(private)
+editor_terminal_create_for_build :: proc(editor: ^Editor, command_line: string, working_directory: string, build_profile_name: string, pending_debug_profile_index: int) -> ^terminal.Terminal {
+	pane := &editor.panes[TERMINAL_PANE_INDEX]
+	pane_rectangle := pane.rectangle
+	if pane_rectangle.w == 0 || pane_rectangle.h == 0 {
+		pane_rectangle = sdl3.Rect{ x = 0, y = 0, w = 720, h = 480 }
+	}
+	character_width := editor.character_width;  if character_width <= 0 { character_width = 8 }
+	line_height     := editor.line_height;      if line_height     <= 0 { line_height     = 16 }
+
+	row_count    := max(i32(4),  (pane_rectangle.h - editor_title_bar_height(editor)) / line_height)
+	column_count := max(i32(10), pane_rectangle.w / character_width)
+
+	default_foreground := terminal.Color{ editor.foreground_color.r, editor.foreground_color.g, editor.foreground_color.b, editor.foreground_color.a }
+	default_background := terminal.Color{ editor.background_color.r, editor.background_color.g, editor.background_color.b, editor.background_color.a }
+
+	cwd := working_directory
+	if len(cwd) == 0 { cwd = editor.project_root }
+
+	new_terminal := terminal.terminal_new(row_count, column_count, default_foreground, default_background, cwd, command_line)
+	if new_terminal == nil { return nil }
+
+	editor.next_terminal_display_number += 1
+	append(&editor.terminals, TerminalEntry{
+		terminal                    = new_terminal,
+		display_number              = editor.next_terminal_display_number,
+		is_build_job                = true,
+		build_profile_name          = strings.clone(build_profile_name),
+		pending_debug_profile_index = pending_debug_profile_index,
+	})
+	editor.active_terminal_index = len(editor.terminals) - 1
+
+	if editor_is_terminal_visible(editor) {
+		if terminal_pane, is_terminal := &editor.panes[TERMINAL_PANE_INDEX].content.(TerminalPane); is_terminal {
+			terminal_pane.terminal = new_terminal
+		}
+		editor.active_pane_index = TERMINAL_PANE_INDEX
+	} else {
+		editor_terminal_show(editor)
+	}
+	return new_terminal
+}
+
 // Kill the active terminal session. If others remain, the next one in the
 // list becomes active and the visible pane (if any) swaps over to it. If the
 // list empties, pane[1] is restored from saved_content.
@@ -793,6 +910,9 @@ editor_terminal_destroy_active :: proc(editor: ^Editor) {
 	was_visible := editor_is_terminal_visible(editor)
 
 	doomed_terminal := editor.terminals[editor.active_terminal_index].terminal
+	if doomed_entry_name := editor.terminals[editor.active_terminal_index].build_profile_name; len(doomed_entry_name) > 0 {
+		delete(doomed_entry_name)
+	}
 	ordered_remove(&editor.terminals, editor.active_terminal_index)
 
 	// Clear the borrowed pointer in pane[1] *before* terminal_destroy so a
@@ -1037,7 +1157,7 @@ editor_needs_render :: proc(editor: ^Editor) -> bool {
 
 // True when a modal dialog (help, browse, future popups) currently owns input.
 editor_is_modal_open :: proc(editor: ^Editor) -> bool {
-	return editor.show_help || editor.show_browse || editor.show_symbols || editor.show_find_in_files || editor.show_replace_in_files || editor.show_save_as || editor.show_close_confirm || editor.show_git_history || editor.show_open_docs || editor.show_terminal_picker || editor.menu_bar.open_menu_index >= 0
+	return editor.show_help || editor.show_browse || editor.show_symbols || editor.show_find_in_files || editor.show_replace_in_files || editor.show_save_as || editor.show_close_confirm || editor.show_git_history || editor.show_open_docs || editor.show_terminal_picker || editor.show_tasks_dialog || editor.show_breakpoint_condition || editor.menu_bar.open_menu_index >= 0
 }
 
 // --- Project root ---------------------------------------------------------
@@ -1054,6 +1174,13 @@ editor_set_project_root :: proc(editor: ^Editor, path: string) {
 	if len(path) > 0 {
 		editor.project_root = strings.clone(path)
 	}
+	// Reload per-project profiles whenever the root moves — the new root
+	// might have its own `.odit/project.json`, and the old one's profiles
+	// shouldn't follow the user across projects.
+	project_config_reload(editor)
+	// Forget any prior debug selection — indices into `debug_profiles` are
+	// no longer meaningful against the new project's list.
+	editor.active_debug_configuration_index = -1
 }
 
 // True when `path` is the project root or sits inside it. Caller passes

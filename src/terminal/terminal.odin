@@ -158,7 +158,7 @@ TerminalSelection :: struct {
 // inherit the parent process's cwd; otherwise it must be an absolute path
 // (no expansion is performed here). Used by the editor to anchor the shell
 // at the project root when one is set.
-terminal_new :: proc(initial_rows, initial_columns: i32, default_foreground: Color, default_background: Color, working_directory: string = "") -> ^Terminal {
+terminal_new :: proc(initial_rows, initial_columns: i32, default_foreground: Color, default_background: Color, working_directory: string = "", command_line: string = "") -> ^Terminal {
 	resolved_rows := initial_rows;    if resolved_rows    < 4  { resolved_rows    = DEFAULT_ROW_COUNT }
 	resolved_columns := initial_columns; if resolved_columns < 10 { resolved_columns = DEFAULT_COLUMN_COUNT }
 
@@ -171,7 +171,7 @@ terminal_new :: proc(initial_rows, initial_columns: i32, default_foreground: Col
 	terminal.screen.default_background_color = default_background
 	screen_init(&terminal.screen, resolved_columns, resolved_rows)
 
-	if !pty_spawn(terminal, resolved_columns, resolved_rows, working_directory) {
+	if !pty_spawn(terminal, resolved_columns, resolved_rows, working_directory, command_line) {
 		screen_destroy(&terminal.screen)
 		free(terminal)
 		return nil
@@ -179,6 +179,16 @@ terminal_new :: proc(initial_rows, initial_columns: i32, default_foreground: Col
 
 	terminal.read_thread = thread.create_and_start_with_data(terminal, read_thread_proc)
 	return terminal
+}
+
+// Public wrapper around the per-platform exit check. Returns
+// `(true, exit_code)` once the underlying child process has terminated;
+// `(false, 0)` while it's still running. The editor's task runner polls
+// this each frame to detect when a build job has finished so it can chain
+// follow-up actions (start a debug session on success, surface failure).
+terminal_check_process_exit :: proc(terminal: ^Terminal) -> (exited: bool, exit_code: i32) {
+	if terminal == nil { return false, 0 }
+	return pty_check_process_exit(terminal)
 }
 
 terminal_destroy :: proc(terminal: ^Terminal) {

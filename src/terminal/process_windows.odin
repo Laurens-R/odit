@@ -63,15 +63,20 @@ foreign kernel32 {
 	DeleteProcThreadAttributeList :: proc(lp_attribute_list: rawptr) ---
 }
 
-// Spawn powershell.exe attached to a fresh pseudo-console sized columns x rows.
+// Spawn a process attached to a fresh pseudo-console sized columns x rows.
 // On success, `terminal.pty_state` is fully populated and ready for read/write.
 // On failure, everything is closed and the proc returns false; the caller
 // typically falls back to "no terminal".
 //
 // `working_directory` is passed to CreateProcessW as lpCurrentDirectory.
 // Pass "" to inherit the parent's cwd.
+//
+// `command_line` is the full command line string. Pass "" to launch the
+// default interactive shell (`powershell.exe -NoLogo`) — that's the F9
+// terminal path. Build / task runners pass an assembled command string
+// so the build output streams into the same PTY UI the user already knows.
 @(private)
-pty_spawn :: proc(terminal: ^Terminal, columns, rows: i32, working_directory: string = "") -> bool {
+pty_spawn :: proc(terminal: ^Terminal, columns, rows: i32, working_directory: string = "", command_line: string = "") -> bool {
 	pty_state := &terminal.pty_state
 	pty_state^ = PtyState{}
 
@@ -146,8 +151,11 @@ pty_spawn :: proc(terminal: ^Terminal, columns, rows: i32, working_directory: st
 	startup_info.lpAttributeList = pty_state.attribute_list
 
 	// Build the command line in a writable wide buffer — CreateProcessW
-	// requires lpCommandLine to be mutable.
-	command_line_wstring := win32.utf8_to_wstring(`powershell.exe -NoLogo`)
+	// requires lpCommandLine to be mutable. Empty `command_line` defaults
+	// to the interactive powershell shell (the existing F9 path).
+	effective_command_line := command_line
+	if len(effective_command_line) == 0 { effective_command_line = "powershell.exe -NoLogo" }
+	command_line_wstring := win32.utf8_to_wstring(effective_command_line)
 
 	// Optional working directory. Empty string → pass nil (inherit parent's cwd).
 	working_directory_wstring: win32.wstring = nil
@@ -224,6 +232,21 @@ pty_finalize :: proc(terminal: ^Terminal) {
 pty_resize :: proc(terminal: ^Terminal, columns, rows: i32) {
 	if terminal.pty_state.pseudo_console_handle == nil { return }
 	ResizePseudoConsole(terminal.pty_state.pseudo_console_handle, win32.COORD{ X = i16(columns), Y = i16(rows) })
+}
+
+// Non-blocking check on the child's process status. Returns
+// `(true, exit_code)` once the process has exited; `(false, 0)` while it's
+// still running. The Task runner polls this each frame to drive
+// build-then-debug chaining without stalling the UI thread.
+@(private)
+pty_check_process_exit :: proc(terminal: ^Terminal) -> (exited: bool, exit_code: i32) {
+	pty_state := &terminal.pty_state
+	if pty_state.process_handle == nil { return false, 0 }
+	wait_result := win32.WaitForSingleObject(pty_state.process_handle, 0)
+	if wait_result != win32.WAIT_OBJECT_0 { return false, 0 }
+	value: u32
+	if !win32.GetExitCodeProcess(pty_state.process_handle, &value) { return true, 1 }
+	return true, i32(value)
 }
 
 // Poll the output pipe instead of blocking on `ReadFile` directly.

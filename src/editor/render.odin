@@ -5,6 +5,7 @@ import "core:strings"
 import "vendor:sdl3"
 import "vendor:sdl3/ttf"
 
+import "../dap"
 import "../document"
 import "../lsp"
 import "../syntax"
@@ -74,6 +75,10 @@ editor_update :: proc(editor: ^Editor, delta_time: f64) {
 
 	// Drain LSP inbound messages + fire debounced didChange notifications.
 	editor_lsp_update(editor)
+
+	// Same idea for the DAP layer — pull adapter events and refresh the
+	// debug-panel snapshot so the renderer paints fresh state.
+	editor_dap_update(editor)
 
 	if editor.diff_state.active {
 		// Animate the shared diff scroll.
@@ -192,6 +197,12 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 	sdl3.SetRenderDrawColorFloat(renderer, editor.background_color.r, editor.background_color.g, editor.background_color.b, editor.background_color.a)
 	sdl3.RenderFillRect(renderer, &sdl3.FRect{0, 0, f32(window_width), f32(window_height)})
 
+	// The debug panel sits on the right edge of the window between the menu
+	// bar and status bar. Subtract its width before pane layout so the panes
+	// shrink to make room rather than rendering underneath it.
+	pane_area_width := window_width - debug_panel_width(editor)
+	if pane_area_width < 0 { pane_area_width = 0 }
+
 	// Compute per-pane rectangles. The divider sits at `split_ratio` of the
 	// total width and is clamped so neither pane can drop below a usable
 	// minimum (~10 character cells, falling back to 80 px if the font hasn't
@@ -199,10 +210,10 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 	// is `menu_bar_height` rather than 0.
 	visible_pane_count := editor_visible_pane_count(editor)
 	if visible_pane_count == 1 {
-		editor.panes[0].rectangle = sdl3.Rect{0, text_area_top, window_width, text_area_height}
+		editor.panes[0].rectangle = sdl3.Rect{0, text_area_top, pane_area_width, text_area_height}
 	} else {
 		divider_width: i32 = 2
-		usable_width := window_width - divider_width
+		usable_width := pane_area_width - divider_width
 
 		minimum_pane_width: i32 = 80
 		if editor.character_width > 0 { minimum_pane_width = editor.character_width * 10 }
@@ -330,6 +341,10 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 		render_string(editor, renderer, project_label, project_x, status_bar_y + 2, editor.status_bar_foreground)
 	}
 
+	// Debug panel — sidebar on the right edge. Drawn after the status bar so
+	// its 2-px left divider lines up with the editor pane boundary cleanly.
+	debug_panel_render(editor, renderer, window_width, window_height)
+
 	// Modal overlays render on top of everything else.
 	if editor.show_browse {
 		browse_render(editor, renderer, window_width, window_height)
@@ -360,6 +375,12 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 	}
 	if editor.show_terminal_picker {
 		terminal_picker_render(editor, renderer, window_width, window_height)
+	}
+	if editor.show_tasks_dialog {
+		tasks_dialog_render(editor, renderer, window_width, window_height)
+	}
+	if editor.show_breakpoint_condition {
+		breakpoint_condition_dialog_render(editor, renderer, window_width, window_height)
 	}
 
 	// LSP hover + completion + signature popups float above pane content
@@ -402,7 +423,9 @@ render_editor_pane :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pan
 
 	total_line_count := document.document_line_count(&editor_pane.document)
 	gutter_character_count := max(digit_count(total_line_count), 3)
-	gutter_width_pixels := i32(gutter_character_count + 1) * editor.character_width
+	// One leading char-width column reserved for the breakpoint dot, plus one
+	// trailing char-width of padding between the line number and the text.
+	gutter_width_pixels := i32(gutter_character_count + 2) * editor.character_width
 	editor_pane.gutter_width = gutter_width_pixels
 
 	view_clip_rectangle := sdl3.Rect{view_x, text_y, view_width, text_height}
@@ -413,6 +436,7 @@ render_editor_pane :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pan
 	} else {
 		find_render_highlights(editor, renderer, editor_pane, view_x, text_y, gutter_width_pixels, pane_index)
 		replace_render_highlights(editor, renderer, editor_pane, view_x, text_y, gutter_width_pixels, pane_index)
+		render_debug_current_line(editor, renderer, editor_pane, view_x, text_y, view_width)
 		render_editor_pane_normal(editor, renderer, editor_pane, view_x, text_y, is_active, gutter_character_count, gutter_width_pixels)
 
 		// LSP diagnostic squiggles overlay the text — same clip rect, so they
@@ -923,8 +947,72 @@ render_doc_line_into :: proc(
 		sdl3.SetRenderDrawColorFloat(renderer, editor.background_color.r, editor.background_color.g, editor.background_color.b, editor.background_color.a)
 		sdl3.RenderFillRect(renderer, &gutter_rectangle)
 	}
+	// Line number shifted right by one char-width so the leftmost column of
+	// the gutter is free for the breakpoint dot.
 	line_number_string := fmt.tprintf("%*d", gutter_character_count, line_index + 1)
-	render_string(editor, renderer, line_number_string, view_x + editor.padding_x, screen_y, editor.line_number_color)
+	render_string(editor, renderer, line_number_string, view_x + editor.padding_x + editor.character_width, screen_y, editor.line_number_color)
+
+	// Breakpoint dot — painted last so it sits on top of any prior fill.
+	render_breakpoint_marker(editor, renderer, editor_pane, view_x, screen_y, line_index)
+}
+
+// Background band on the line where execution is currently paused. Anchored
+// to the user-selected stack frame from the live DAP client and only painted
+// when the active pane's file matches the frame's source path. No-op when no
+// session is stopped.
+@(private="file")
+render_debug_current_line :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, editor_pane: ^EditorPane, view_x, text_y, view_width: i32) {
+	state := &editor.debug_state
+	if !state.is_stopped                    { return }
+	if len(editor_pane.file_path) == 0      { return }
+	frames := dap.client_stack_frames(editor.active_dap_client)
+	if len(frames) == 0                     { return }
+	frame_index := state.selected_stack_frame
+	if frame_index < 0 || frame_index >= len(frames) { return }
+	frame := frames[frame_index]
+	if len(frame.file_path) == 0            { return }
+	if !path_equals_ignore_case(frame.file_path, editor_pane.file_path) { return }
+	if frame.line == 0                      { return }
+
+	target_line := u32(frame.line) - 1 // adapter is 1-based; renderer wants 0-based
+	scroll_y_pixels := i32(editor_pane.scroll_y)
+	row_y := text_y + editor.padding_y + i32(target_line) * editor.line_height - scroll_y_pixels
+	if row_y + editor.line_height < text_y { return } // line scrolled past the top
+	if row_y >= text_y + i32(editor_pane.visible_lines) * editor.line_height { return } // past the bottom
+
+	band := sdl3.FRect{ f32(view_x), f32(row_y), f32(view_width), f32(editor.line_height) }
+	color := editor.debug_current_line_color
+	sdl3.SetRenderDrawColorFloat(renderer, color.r, color.g, color.b, color.a)
+	sdl3.RenderFillRect(renderer, &band)
+}
+
+// Paint the breakpoint indicator for `line_index` (if any) in the leftmost
+// char-width column of the gutter. No-op when the file has no breakpoints, or
+// for buffers without an on-disk path.
+@(private="file")
+render_breakpoint_marker :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, editor_pane: ^EditorPane, view_x, screen_y: i32, line_index: u32) {
+	if editor.diff_state.active        { return }
+	if len(editor_pane.file_path) == 0 { return }
+	found, enabled := breakpoint_at_line(editor, editor_pane.file_path, line_index)
+	if !found { return }
+	condition_text, _ := breakpoint_condition_at(editor, editor_pane.file_path, line_index)
+	has_condition := len(condition_text) > 0
+
+	dot_radius := f32(editor.line_height) * 0.30
+	dot_center_x := f32(view_x + editor.padding_x) + f32(editor.character_width) * 0.5
+	dot_center_y := f32(screen_y) + f32(editor.line_height) * 0.5
+	if enabled {
+		draw_filled_disc(renderer, dot_center_x, dot_center_y, dot_radius, editor.breakpoint_color)
+	} else {
+		draw_hollow_disc(renderer, dot_center_x, dot_center_y, dot_radius, editor.breakpoint_disabled_color)
+	}
+	// Conditional breakpoints get a small inset background-colored hole so
+	// the dot reads as an annulus rather than a plain disc — visible at a
+	// glance even at small font sizes.
+	if has_condition {
+		inset_radius := dot_radius * 0.42
+		draw_filled_disc(renderer, dot_center_x, dot_center_y, inset_radius, editor.background_color)
+	}
 }
 
 // Index of the Pane that contains `editor_pane` (so we can read its rect
@@ -1027,9 +1115,11 @@ render_wrapped_doc_line :: proc(
 		sdl3.RenderFillRect(renderer, &cursor_rectangle)
 	}
 
-	// Line number on the first visual row only.
+	// Line number on the first visual row only — shifted right by one char-
+	// width to leave room for the breakpoint dot in the leftmost column.
 	line_number_string := fmt.tprintf("%*d", gutter_character_count, line_index + 1)
-	render_string(editor, renderer, line_number_string, view_x + editor.padding_x, screen_y, editor.line_number_color)
+	render_string(editor, renderer, line_number_string, view_x + editor.padding_x + editor.character_width, screen_y, editor.line_number_color)
+	render_breakpoint_marker(editor, renderer, editor_pane, view_x, screen_y, line_index)
 
 	return visual_row_count
 }

@@ -91,6 +91,14 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 		terminal_picker_handle_event(editor, event)
 		return
 	}
+	if editor.show_tasks_dialog {
+		tasks_dialog_handle_event(editor, event)
+		return
+	}
+	if editor.show_breakpoint_condition {
+		breakpoint_condition_dialog_handle_event(editor, event)
+		return
+	}
 
 	// Find mode intercepts text + key events but lets mouse wheel and mouse
 	// buttons fall through (so the user can still scroll, and a click outside
@@ -164,6 +172,17 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 		}
 		if pressed_key == sdl3.K_F6 {
 			symbols_dialog_open(editor)
+			return
+		}
+		if pressed_key == sdl3.K_F7 {
+			// Shift+F7 toggles the debug panel; plain F7 opens the Tasks
+			// dialog over the project's build / debug profiles.
+			shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
+			if shift_held {
+				debug_panel_toggle(editor)
+			} else {
+				tasks_dialog_open(editor)
+			}
 			return
 		}
 		if pressed_key == sdl3.K_F8 {
@@ -315,6 +334,9 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 		if ctrl_held {
 			editor_zoom(editor, event.wheel.y)
 		} else {
+			// Debug panel claims the wheel when the cursor is over it so its
+			// scrollable sub-sections work like every other scroll viewport.
+			if debug_panel_handle_wheel(editor, event.wheel.mouse_x, event.wheel.mouse_y, event.wheel.y) { return }
 			pane_hit_index := editor_pane_at(editor, event.wheel.mouse_x, event.wheel.mouse_y)
 			if pane_hit_index >= 0 { editor.active_pane_index = pane_hit_index }
 			// Each pane content type can scroll its own way. For editor panes,

@@ -2,9 +2,6 @@
     "lsp": {
       "odin": {
         "command": ["ols.exe"]
-      },
-      "cpp": {
-        "command": ["clangd.exe"]
       }
     }
   }

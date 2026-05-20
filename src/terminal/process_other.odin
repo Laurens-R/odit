@@ -6,14 +6,16 @@ package terminal
 PtyState :: struct {}
 
 @(private)
-pty_spawn    :: proc(terminal: ^Terminal, columns, rows: i32, working_directory: string = "") -> bool { return false }
+pty_spawn               :: proc(terminal: ^Terminal, columns, rows: i32, working_directory: string = "", command_line: string = "") -> bool { return false }
 @(private)
-pty_close    :: proc(terminal: ^Terminal) {}
+pty_close               :: proc(terminal: ^Terminal) {}
 @(private)
-pty_finalize :: proc(terminal: ^Terminal) {}
+pty_finalize            :: proc(terminal: ^Terminal) {}
 @(private)
-pty_resize   :: proc(terminal: ^Terminal, columns, rows: i32) {}
+pty_resize              :: proc(terminal: ^Terminal, columns, rows: i32) {}
 @(private)
-pty_read     :: proc(terminal: ^Terminal, buffer: []u8) -> (int, bool) { return 0, false }
+pty_read                :: proc(terminal: ^Terminal, buffer: []u8) -> (int, bool) { return 0, false }
 @(private)
-pty_write    :: proc(terminal: ^Terminal, data: []u8) -> int { return 0 }
+pty_write               :: proc(terminal: ^Terminal, data: []u8) -> int { return 0 }
+@(private)
+pty_check_process_exit  :: proc(terminal: ^Terminal) -> (exited: bool, exit_code: i32) { return false, 0 }

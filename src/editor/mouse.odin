@@ -102,6 +102,11 @@ editor_mouse_down :: proc(editor: ^Editor, mouse_x: f32, mouse_y: f32, shift_hel
 		return
 	}
 
+	// Debug panel sits on the right edge and isn't a pane. Its hit-test
+	// returns true for any click landing inside, so we have to dispatch
+	// before the regular pane routing.
+	if debug_panel_handle_click(editor, mouse_x, mouse_y) { return }
+
 	// Find bar swallows clicks that land on it (so the user can poke at it
 	// without dismissing find). A click anywhere else closes find and falls
 	// through to normal click handling so the cursor still lands where they
@@ -320,6 +325,12 @@ divider_hit_test :: proc(editor: ^Editor, mouse_x, mouse_y: f32) -> bool {
 
 @(private="file")
 editor_pane_mouse_down :: proc(editor: ^Editor, pane: ^Pane, editor_pane: ^EditorPane, mouse_x: f32, mouse_y: f32, shift_held: bool, click_count: i32) {
+	// Gutter click → toggle a breakpoint at that line. Has to run before the
+	// regular cursor-placement path so the same gesture doesn't also reposition
+	// the text cursor. Shift+click in the gutter opens the conditional-bp
+	// editor for that line instead of toggling.
+	if editor_pane_gutter_toggle_breakpoint(editor, pane, editor_pane, mouse_x, mouse_y, shift_held) { return }
+
 	clicked_offset := screen_to_offset(editor, pane, editor_pane, mouse_x, mouse_y)
 
 	if shift_held {

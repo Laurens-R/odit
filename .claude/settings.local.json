@@ -25,7 +25,8 @@
       "Bash(where.exe ols *)",
       "Bash(ols --version)",
       "PowerShell(odin check *)",
-      "Bash(awk 'NR==147 {for\\(i=1;i<=length\\($0\\);i++\\) printf \"%d \", $i==\" \"?32:9; print \"\"}' /d/odit/src/editor/mouse.odin)"
+      "Bash(awk 'NR==147 {for\\(i=1;i<=length\\($0\\);i++\\) printf \"%d \", $i==\" \"?32:9; print \"\"}' /d/odit/src/editor/mouse.odin)",
+      "Bash(grep -v \"@\\(private\\)\\\\s*$\")"
     ]
   }
 }
