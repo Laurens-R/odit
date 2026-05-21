@@ -60,6 +60,7 @@ FindInFilesState :: struct {
 	clear_button_rectangle:  sdl3.FRect,
 	cancel_button_rectangle: sdl3.FRect,
 	results_list_rectangle:  sdl3.FRect,
+	results_scrollbar:       ui.Scrollbar,
 }
 
 // Caps to keep the search bounded. The recursive walk uses the same skip-list
@@ -679,6 +680,19 @@ find_in_files_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 	case .MOUSE_BUTTON_DOWN:
 		if event.button.button != sdl3.BUTTON_LEFT { return }
 		mouse_x, mouse_y := event.button.x, event.button.y
+
+		// Scrollbar hit-test first — a thumb grab inside the results-list
+		// rectangle should latch a drag, not select the row underneath.
+		if ui.scrollbar_thumb_hit(&state.results_scrollbar, mouse_x, mouse_y) {
+			ui.scrollbar_begin_thumb_drag(&state.results_scrollbar, mouse_y)
+			return
+		}
+		if ui.scrollbar_track_hit(&state.results_scrollbar, mouse_x, mouse_y) {
+			ui.scrollbar_begin_track_drag(&state.results_scrollbar)
+			find_in_files_apply_scrollbar_drag(editor, mouse_y)
+			return
+		}
+
 		switch {
 		case ui.point_in_rect(state.path_field_rectangle,    mouse_x, mouse_y):
 			state.focus = .PathInput
@@ -709,6 +723,21 @@ find_in_files_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 			}
 		}
 
+	case .MOUSE_BUTTON_UP:
+		if event.button.button == sdl3.BUTTON_LEFT {
+			if state.results_scrollbar.is_dragging {
+				ui.scrollbar_end_drag(&state.results_scrollbar)
+				editor_mark_dirty(editor)
+			}
+		}
+
+	case .MOUSE_MOTION:
+		if state.results_scrollbar.is_dragging {
+			find_in_files_apply_scrollbar_drag(editor, event.motion.y)
+		} else if ui.scrollbar_update_hover(&state.results_scrollbar, event.motion.x, event.motion.y) {
+			editor_mark_dirty(editor)
+		}
+
 	case .MOUSE_WHEEL:
 		// The result list is the only scrollable region in the dialog, so any
 		// wheel event while the modal is open targets it — no hit-test needed.
@@ -723,19 +752,32 @@ find_in_files_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 	}
 }
 
+// Translate a drag-motion mouse_y into a new row-based scroll_offset. The
+// widget speaks pixels; we divide by line_height and clamp to the legal
+// row range. Recomputing max_offset every motion keeps a re-search (which
+// can shrink the result set) from leaving the thumb pinned past the end.
+@(private="file")
+find_in_files_apply_scrollbar_drag :: proc(editor: ^Editor, mouse_y: f32) {
+	state := &editor.find_in_files
+	if editor.line_height <= 0 { return }
+	max_offset := max(0, len(state.results) - state.visible_row_count)
+	if max_offset == 0 { return }
+	max_scroll_pixels := f32(max_offset * int(editor.line_height))
+	new_scroll_pixels := ui.scrollbar_drag_to(&state.results_scrollbar, mouse_y, max_scroll_pixels)
+	new_offset := int(new_scroll_pixels / f32(editor.line_height) + 0.5)
+	if new_offset < 0          { new_offset = 0 }
+	if new_offset > max_offset { new_offset = max_offset }
+	state.scroll_offset = new_offset
+	editor_mark_dirty(editor)
+}
+
 // --- Rendering -----------------------------------------------------------
 
 @(private)
 find_in_files_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewport_width, viewport_height: i32) {
 	state := &editor.find_in_files
 
-	ui_context := ui.Context{
-		renderer        = renderer,
-		font            = editor.font,
-		engine          = editor.text_engine,
-		character_width = editor.character_width,
-		line_height     = editor.line_height,
-	}
+	ui_context := editor_make_ui_context(editor, renderer)
 	theme := ui.default_theme()
 
 	ui.draw_dim_overlay(&ui_context, viewport_width, viewport_height, theme.overlay)
@@ -809,6 +851,12 @@ find_in_files_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewport
 	if state.scroll_offset > max_scroll_offset { state.scroll_offset = max_scroll_offset }
 	if state.scroll_offset < 0                 { state.scroll_offset = 0 }
 
+	// Reserve a few pixels on the right for the scrollbar so rows don't run
+	// underneath it. The widget itself paints at content_x + content_width.
+	scrollbar_reservation: i32 = ui.SCROLLBAR_NARROW_WIDTH + 2
+	row_width := content_width - scrollbar_reservation
+	if row_width < editor.character_width { row_width = editor.character_width }
+
 	if len(state.results) == 0 {
 		empty_message: string
 		if len(state.query_buffer) == 0 {
@@ -823,10 +871,10 @@ find_in_files_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewport
 		// Layout math for column-aligned rows. `draw_list_row` indents the
 		// label by 8 px from the row's left edge; we knock another 8 px off
 		// the right for visual breathing room so a maxed-out row doesn't kiss
-		// the dialog border.
+		// the scrollbar.
 		label_indent_pixels: i32 = 8
 		right_margin_pixels: i32 = 8
-		usable_pixels := content_width - label_indent_pixels - right_margin_pixels
+		usable_pixels := row_width - label_indent_pixels - right_margin_pixels
 		if usable_pixels < editor.character_width { usable_pixels = editor.character_width }
 		max_chars_per_row := int(usable_pixels / editor.character_width)
 
@@ -852,8 +900,23 @@ find_in_files_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewport
 			combined_row := strings.concatenate({prefix_string, padding_string, result.snippet}, context.temp_allocator)
 			row_label := truncate_to_runes_with_ellipsis(combined_row, max_chars_per_row)
 
-			ui.draw_list_row(&ui_context, content_x, row_y_position, content_width, row_label, is_selected, theme)
+			ui.draw_list_row(&ui_context, content_x, row_y_position, row_width, row_label, is_selected, theme)
 		}
+	}
+
+	// Scrollbar — converts row-index scroll_offset into the widget's
+	// pixel-based model so the thumb sizing reflects total-rows vs visible.
+	total_rows := len(state.results)
+	if total_rows > 0 {
+		content_height_pixels := f32(total_rows * int(line_step))
+		viewport_height_pixels := f32(list_area_height)
+		current_scroll_pixels  := f32(state.scroll_offset * int(line_step))
+		ui.scrollbar_render(&ui_context, &state.results_scrollbar,
+			content_x + content_width, list_top_y, list_area_height,
+			viewport_height_pixels, content_height_pixels, current_scroll_pixels, theme)
+	} else {
+		state.results_scrollbar.track_rectangle = sdl3.FRect{}
+		state.results_scrollbar.thumb_rectangle = sdl3.FRect{}
 	}
 
 	// Footer: keybinding hint on the left, result count on the right.

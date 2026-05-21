@@ -388,13 +388,7 @@ git_history_dialog_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 git_history_dialog_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewport_width, viewport_height: i32) {
 	state := &editor.git_history_dialog
 
-	ui_context := ui.Context{
-		renderer        = renderer,
-		font            = editor.font,
-		engine          = editor.text_engine,
-		character_width = editor.character_width,
-		line_height     = editor.line_height,
-	}
+	ui_context := editor_make_ui_context(editor, renderer)
 	theme := ui.default_theme()
 
 	ui.draw_dim_overlay(&ui_context, viewport_width, viewport_height, theme.overlay)

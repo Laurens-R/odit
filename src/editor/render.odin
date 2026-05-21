@@ -112,6 +112,10 @@ editor_update :: proc(editor: ^Editor, delta_time: f64) {
 				}
 			case MarkdownPreviewPane:
 				markdown_preview_pane_update(editor, &content_value, delta_time)
+			case OutputPane:
+				// Read-only log view — no per-frame work; the renderer pulls
+				// from `editor.debug_output_lines` directly.
+				_ = content_value
 			}
 		}
 
@@ -262,6 +266,8 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 			}
 		case MarkdownPreviewPane:
 			markdown_preview_pane_render(editor, renderer, pane, &content_value, pane_is_active)
+		case OutputPane:
+			output_pane_render(editor, renderer, pane, &content_value, pane_is_active)
 		}
 	}
 
@@ -446,17 +452,11 @@ render_editor_pane :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pan
 
 	sdl3.SetRenderClipRect(renderer, nil)
 
-	// Scrollbar — content range and scroll value differ between modes.
-	// Width widens on hover / drag so it's actually grabbable; track + thumb
-	// rects come back from the painter so input handlers can hit-test them.
+	// Scrollbar — content range and scroll value differ between modes; both
+	// feed the shared `ui.Scrollbar` widget that owns layout + hit-test +
+	// drag for every pane in the app.
 	{
-		ui_context := ui.Context{
-			renderer        = renderer,
-			font            = editor.font,
-			engine          = editor.text_engine,
-			character_width = editor.character_width,
-			line_height     = editor.line_height,
-		}
+		ui_context := editor_make_ui_context(editor, renderer)
 		theme := ui.default_theme()
 
 		content_height_pixels, current_scroll_value: f32
@@ -468,13 +468,8 @@ render_editor_pane :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pan
 			current_scroll_value  = editor_pane.scroll_y
 		}
 
-		scrollbar_width: i32 = 6
-		if editor_pane.scrollbar.is_hovered || editor_pane.scrollbar.is_dragging { scrollbar_width = 14 }
-		scrollbar_x := view_x + view_width - scrollbar_width - 2
-
-		track_rectangle, thumb_rectangle := ui.draw_scrollbar(&ui_context, scrollbar_x, text_y, text_height, content_height_pixels, f32(text_height), current_scroll_value, scrollbar_width, theme)
-		editor_pane.scrollbar.track_rectangle = track_rectangle
-		editor_pane.scrollbar.thumb_rectangle = thumb_rectangle
+		ui.scrollbar_render(&ui_context, &editor_pane.scrollbar, view_x + view_width - 2, text_y, text_height,
+			f32(text_height), content_height_pixels, current_scroll_value, theme)
 	}
 
 	// Find / Replace bar — anchored to the pane bottom, painted after the
@@ -587,12 +582,10 @@ clamp_int :: #force_inline proc(value, low, high: int) -> int {
 	return value
 }
 
-// Vertical scrollbar for a terminal pane. Mirrors the editor pane's
-// scrollbar: 6 px wide normally, widens to 14 px on hover/drag, stored
-// track + thumb rectangles for mouse hit-testing. Content height is
-// (scrollback + live) * line_height; scroll value is measured from the top
-// of that virtual buffer so the thumb sits at the bottom when the user is
-// looking at the live shell.
+// Vertical scrollbar for a terminal pane. Forwards to the shared
+// `ui.Scrollbar` widget; the only terminal-specific bit is translating
+// `scroll_offset` (rows up from the live bottom) into a top-relative pixel
+// value the widget speaks.
 @(private="file")
 render_terminal_scrollbar :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pane, terminal_pane: ^TerminalPane) {
 	terminal_pointer := terminal_pane.terminal
@@ -610,32 +603,12 @@ render_terminal_scrollbar :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, pan
 	total_row_count  := scrollback_count + screen.rows
 	content_height   := f32(total_row_count) * f32(line_height)
 	viewport_height  := f32(screen.rows) * f32(line_height)
-	if content_height <= viewport_height {
-		terminal_pane.scrollbar.track_rectangle = sdl3.FRect{}
-		terminal_pane.scrollbar.thumb_rectangle = sdl3.FRect{}
-		return
-	}
+	current_scroll   := f32(scrollback_count - terminal_pointer.scroll_offset) * f32(line_height)
 
-	scrollbar_width: i32 = 6
-	if terminal_pane.scrollbar.is_hovered || terminal_pane.scrollbar.is_dragging { scrollbar_width = 14 }
-	scrollbar_x := pane.rectangle.x + pane.rectangle.w - scrollbar_width - 2
-
-	// Scroll value = distance from the top of the virtual buffer to the
-	// top of the viewport. `scroll_offset` is measured in rows *up* from
-	// the live bottom; convert.
-	scroll_value := f32(scrollback_count - terminal_pointer.scroll_offset) * f32(line_height)
-
-	ui_context := ui.Context{
-		renderer        = renderer,
-		font            = editor.font,
-		engine          = editor.text_engine,
-		character_width = editor.character_width,
-		line_height     = editor.line_height,
-	}
+	ui_context := editor_make_ui_context(editor, renderer)
 	theme := ui.default_theme()
-	track_rectangle, thumb_rectangle := ui.draw_scrollbar(&ui_context, scrollbar_x, track_area_top, track_area_height, content_height, viewport_height, scroll_value, scrollbar_width, theme)
-	terminal_pane.scrollbar.track_rectangle = track_rectangle
-	terminal_pane.scrollbar.thumb_rectangle = thumb_rectangle
+	ui.scrollbar_render(&ui_context, &terminal_pane.scrollbar, pane.rectangle.x + pane.rectangle.w - 2, track_area_top, track_area_height,
+		viewport_height, content_height, current_scroll, theme)
 }
 
 // Tinted strip at the top of an editor pane showing the document's file name

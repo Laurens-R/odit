@@ -83,8 +83,14 @@ other_items := [?]HelpItem{
 	{"F5",            "Render markdown preview in the opposite pane"},
 	{"F6",            "Open symbol picker (jump to function / type / etc.)"},
 	{"F7",            "Open the Tasks dialog (build profiles + debug launches)"},
-	{"Shift+F7",      "Toggle the debugger panel (stack, variables, breakpoints)"},
+	{"Shift+F7",      "Toggle the debugger panel + output pane (treated as one unit)"},
+	{"F10",           "Debug: step over (no-op when no session is running)"},
+	{"F11",           "Debug: step into"},
 	{"Shift+gutter",  "Set or edit a conditional breakpoint on the clicked line"},
+	{"Mouse drag",    "In the Debug Output pane: select text"},
+	{"Ctrl+C",        "In the Debug Output pane: copy selection to clipboard"},
+	{"Ctrl+A",        "In the Debug Output pane: select all"},
+	{"Esc",           "In the Debug Output pane: clear the current selection"},
 	{"Ctrl+P",        "In file browser: set current directory as project root"},
 	{"Ctrl+R",        "In file browser: rename the highlighted entry"},
 	{"Ctrl+N",        "In file browser: create a new empty file"},
@@ -131,13 +137,7 @@ help_close :: proc(editor: ^Editor) {
 
 @(private)
 help_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewport_width, viewport_height: i32) {
-	ui_context := ui.Context{
-		renderer        = renderer,
-		font            = editor.font,
-		engine          = editor.text_engine,
-		character_width = editor.character_width,
-		line_height     = editor.line_height,
-	}
+	ui_context := editor_make_ui_context(editor, renderer)
 	theme := ui.default_theme()
 
 	// Dim everything behind the dialog.
@@ -171,7 +171,7 @@ help_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewport_width, v
 
 	total_content_height := help_content_height(line_step)
 
-	origin_x, origin_y, scroll_view := ui.scroll_view_begin(&ui_context, viewport_rectangle, &editor.help_scroll, total_content_height)
+	origin_x, origin_y, scroll_view := ui.scroll_view_begin(&ui_context, &editor.help_scrollbar, viewport_rectangle, &editor.help_scroll, total_content_height)
 
 	ui.draw_text(&ui_context, "Welcome to odit — a terminal-inspired text editor.", origin_x, origin_y, theme.text_foreground)
 	origin_y += line_step
@@ -240,4 +240,59 @@ help_scroll_to_top :: proc(editor: ^Editor) {
 help_scroll_to_bottom :: proc(editor: ^Editor) {
 	// Use a sentinel large value; render clamps to the actual max.
 	editor.help_scroll = 1 << 30
+}
+
+// --- Mouse interactions on the scrollbar ---------------------------------
+//
+// The help dialog modal owns its event handling and doesn't go through the
+// main editor mouse dispatch, so the central `ui.Scrollbar` widget needs
+// explicit forwarding for hover + thumb-drag + track-click. Same shape as
+// the debug-panel section scrollbar handling.
+
+@(private)
+help_handle_mouse_motion :: proc(editor: ^Editor, mouse_x, mouse_y: f32) {
+	if editor.help_scrollbar.is_dragging {
+		help_apply_scrollbar_drag(editor, mouse_y)
+		return
+	}
+	if ui.scrollbar_update_hover(&editor.help_scrollbar, mouse_x, mouse_y) {
+		editor_mark_dirty(editor)
+	}
+}
+
+@(private)
+help_handle_mouse_down :: proc(editor: ^Editor, mouse_x, mouse_y: f32) {
+	if ui.scrollbar_thumb_hit(&editor.help_scrollbar, mouse_x, mouse_y) {
+		ui.scrollbar_begin_thumb_drag(&editor.help_scrollbar, mouse_y)
+		return
+	}
+	if ui.scrollbar_track_hit(&editor.help_scrollbar, mouse_x, mouse_y) {
+		ui.scrollbar_begin_track_drag(&editor.help_scrollbar)
+		help_apply_scrollbar_drag(editor, mouse_y)
+		return
+	}
+}
+
+@(private)
+help_handle_mouse_up :: proc(editor: ^Editor) {
+	if editor.help_scrollbar.is_dragging {
+		ui.scrollbar_end_drag(&editor.help_scrollbar)
+		editor_mark_dirty(editor)
+	}
+}
+
+// Recover content height from the last-rendered track/thumb ratio so we
+// don't have to re-run `help_content_height` here — track/thumb were sized
+// from it on the previous frame, and the inverse gives us the original.
+@(private="file")
+help_apply_scrollbar_drag :: proc(editor: ^Editor, mouse_y: f32) {
+	track := editor.help_scrollbar.track_rectangle
+	thumb := editor.help_scrollbar.thumb_rectangle
+	if track.h <= 0 || thumb.h <= 0 { return }
+	content_height := track.h * track.h / thumb.h
+	max_scroll := content_height - track.h
+	if max_scroll < 0 { max_scroll = 0 }
+	new_scroll := ui.scrollbar_drag_to(&editor.help_scrollbar, mouse_y, max_scroll)
+	editor.help_scroll = i32(new_scroll)
+	editor_mark_dirty(editor)
 }

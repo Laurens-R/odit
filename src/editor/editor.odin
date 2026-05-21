@@ -64,7 +64,7 @@ EditorPane :: struct {
 	// handlers in `mouse.odin` read those rects to hit-test hover and
 	// drag. `is_hovered` widens the next paint; `is_dragging` locks scroll
 	// updates onto the thumb under the cursor.
-	scrollbar:       ScrollbarState,
+	scrollbar:       ui.Scrollbar,
 
 	// Selection
 	selection_active:  bool,
@@ -95,17 +95,6 @@ EditorPane :: struct {
 	lsp_last_edit_time:   f64,
 }
 
-// Per-pane scrollbar interaction state. Track + thumb rects are rewritten
-// every frame by the renderer; the rest persists between frames so hover /
-// drag survive across event ticks.
-ScrollbarState :: struct {
-	track_rectangle: sdl3.FRect,
-	thumb_rectangle: sdl3.FRect,
-	is_hovered:      bool,
-	is_dragging:     bool,
-	drag_delta_y:    f32, // y-offset within the thumb at drag start
-}
-
 // A pane that hosts an embedded terminal emulator instead of a document.
 // The terminal owns a child shell process, a read thread, and a cell-grid
 // screen — see the `terminal` package. We store a pointer rather than the
@@ -117,7 +106,7 @@ ScrollbarState :: struct {
 // pointer for rendering/input dispatch.
 TerminalPane :: struct {
 	terminal:  ^terminal.Terminal,
-	scrollbar: ScrollbarState,
+	scrollbar: ui.Scrollbar,
 }
 
 // One entry in the editor's multi-terminal list. `display_number` is a
@@ -146,6 +135,7 @@ PaneContent :: union {
 	EditorPane,
 	TerminalPane,
 	MarkdownPreviewPane,
+	OutputPane,
 }
 
 // A pane is a generic container that owns a screen rectangle and one piece of
@@ -187,7 +177,15 @@ Editor :: struct {
 	// SetCursor calls each frame.
 	cursor_default:   ^sdl3.Cursor,
 	cursor_resize_ew: ^sdl3.Cursor,
+	cursor_resize_ns: ^sdl3.Cursor,
 	current_cursor:   ^sdl3.Cursor,
+
+	// Last-seen mouse position from the SDL event stream. Threaded into
+	// every `ui.Context` (via `editor_make_ui_context`) so generic UI
+	// primitives — buttons, list rows — can auto-detect hover without
+	// callers having to track it themselves.
+	last_mouse_x:    f32,
+	last_mouse_y:    f32,
 
 	// Per-render TTF text cache. The editor renders many short strings
 	// (one per syntax token) every frame, most of which repeat from one
@@ -223,6 +221,7 @@ Editor :: struct {
 	// Modal UI
 	show_help:       bool,
 	help_scroll:     i32,
+	help_scrollbar:  ui.Scrollbar,
 	show_browse:     bool,
 	browse_state:    BrowseState,
 
@@ -417,6 +416,11 @@ Editor :: struct {
 	// so a pane swap mid-edit can't retarget the write.
 	show_breakpoint_condition:   bool,
 	breakpoint_condition_dialog: BreakpointConditionDialog,
+
+	// Shared scrolling log for the debug-output pane. Owned line strings;
+	// trimmed at DEBUG_OUTPUT_MAX_LINES. The OutputPane in pane[1] reads
+	// from this buffer, so opening / closing the pane never loses history.
+	debug_output_lines:          [dynamic]string,
 }
 
 CURSOR_BLINK_RATE :: 0.53 // seconds
@@ -445,6 +449,7 @@ editor_init :: proc(editor: ^Editor, text_engine: ^ttf.TextEngine, font: ^ttf.Fo
 	// renders as the familiar double-headed left/right arrow.
 	editor.cursor_default   = sdl3.CreateSystemCursor(.DEFAULT)
 	editor.cursor_resize_ew = sdl3.CreateSystemCursor(.EW_RESIZE)
+	editor.cursor_resize_ns = sdl3.CreateSystemCursor(.NS_RESIZE)
 	editor.current_cursor   = editor.cursor_default
 	if editor.cursor_default != nil { _ = sdl3.SetCursor(editor.cursor_default) }
 
@@ -517,6 +522,10 @@ editor_init :: proc(editor: ^Editor, text_engine: ^ttf.TextEngine, font: ^ttf.Fo
 	project_config_init(&editor.project_config)
 
 	syntax.init()
+
+	// Restore the last-used project root (if any) so reopening the editor
+	// drops the user straight back into the project they were working in.
+	editor_persistence_load(editor)
 }
 
 editor_destroy :: proc(editor: ^Editor) {
@@ -566,6 +575,7 @@ editor_destroy :: proc(editor: ^Editor) {
 	markdown_fonts_destroy(&editor.markdown_fonts)
 	editor_dap_destroy_all(editor)
 	debug_state_destroy(&editor.debug_state)
+	debug_output_destroy(editor)
 	if len(editor.project_root) > 0 {
 		delete(editor.project_root)
 		editor.project_root = ""
@@ -573,6 +583,7 @@ editor_destroy :: proc(editor: ^Editor) {
 	syntax.destroy()
 	if editor.cursor_default   != nil { sdl3.DestroyCursor(editor.cursor_default)   }
 	if editor.cursor_resize_ew != nil { sdl3.DestroyCursor(editor.cursor_resize_ew) }
+	if editor.cursor_resize_ns != nil { sdl3.DestroyCursor(editor.cursor_resize_ns) }
 	ui.text_cache_destroy(&editor.text_cache)
 }
 
@@ -603,6 +614,10 @@ pane_content_destroy :: proc(pane_content: ^PaneContent) {
 		content_value.terminal = nil
 	case MarkdownPreviewPane:
 		markdown_preview_pane_destroy(&content_value)
+	case OutputPane:
+		// Log buffer is owned by Editor.debug_output_lines, not the pane —
+		// pane teardown just drops the scroll state struct.
+		_ = content_value
 	}
 }
 
@@ -630,6 +645,23 @@ editor_pane_destroy_in_place :: proc(editor_pane: ^EditorPane) {
 @(private)
 editor_title_bar_height :: proc(editor: ^Editor) -> i32 {
 	return editor.line_height + 6
+}
+
+// Build a `ui.Context` populated with the editor's font metrics + the last
+// known mouse position. Every place that used to construct the same struct
+// literal inline now goes through this helper so the mouse fields are
+// always present (otherwise hover-aware widgets would silently no-op).
+@(private)
+editor_make_ui_context :: proc(editor: ^Editor, renderer: ^sdl3.Renderer) -> ui.Context {
+	return ui.Context{
+		renderer        = renderer,
+		font            = editor.font,
+		engine          = editor.text_engine,
+		character_width = editor.character_width,
+		line_height     = editor.line_height,
+		mouse_x         = editor.last_mouse_x,
+		mouse_y         = editor.last_mouse_y,
+	}
 }
 
 // Pixel height reserved for the find bar at the bottom of a pane when find
@@ -1181,6 +1213,8 @@ editor_set_project_root :: proc(editor: ^Editor, path: string) {
 	// Forget any prior debug selection — indices into `debug_profiles` are
 	// no longer meaningful against the new project's list.
 	editor.active_debug_configuration_index = -1
+	// Persist the new root so the next session can resume here.
+	editor_persistence_save(editor)
 }
 
 // True when `path` is the project root or sits inside it. Caller passes

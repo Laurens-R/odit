@@ -260,13 +260,7 @@ save_as_dialog_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 save_as_dialog_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewport_width, viewport_height: i32) {
 	state := &editor.save_as_dialog
 
-	ui_context := ui.Context{
-		renderer        = renderer,
-		font            = editor.font,
-		engine          = editor.text_engine,
-		character_width = editor.character_width,
-		line_height     = editor.line_height,
-	}
+	ui_context := editor_make_ui_context(editor, renderer)
 	theme := ui.default_theme()
 
 	ui.draw_dim_overlay(&ui_context, viewport_width, viewport_height, theme.overlay)
@@ -450,13 +444,7 @@ close_confirm_discard_and_close :: proc(editor: ^Editor) {
 close_confirm_dialog_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewport_width, viewport_height: i32) {
 	state := &editor.close_confirm_dialog
 
-	ui_context := ui.Context{
-		renderer        = renderer,
-		font            = editor.font,
-		engine          = editor.text_engine,
-		character_width = editor.character_width,
-		line_height     = editor.line_height,
-	}
+	ui_context := editor_make_ui_context(editor, renderer)
 	theme := ui.default_theme()
 
 	ui.draw_dim_overlay(&ui_context, viewport_width, viewport_height, theme.overlay)

@@ -340,13 +340,7 @@ completion_popup_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewp
 	pane := &editor.panes[popup.pane_index]
 	editor_pane := pane_as_editor(pane); if editor_pane == nil { return }
 
-	ui_context := ui.Context{
-		renderer        = renderer,
-		font            = editor.font,
-		engine          = editor.text_engine,
-		character_width = editor.character_width,
-		line_height     = editor.line_height,
-	}
+	ui_context := editor_make_ui_context(editor, renderer)
 	theme := ui.default_theme()
 
 	// Filter and decide what's visible.

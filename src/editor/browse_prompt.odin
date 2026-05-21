@@ -330,13 +330,7 @@ browse_prompt_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewport
 	prompt := &editor.browse_state.prompt_state
 	if prompt.kind == .None { return }
 
-	ui_context := ui.Context{
-		renderer        = renderer,
-		font            = editor.font,
-		engine          = editor.text_engine,
-		character_width = editor.character_width,
-		line_height     = editor.line_height,
-	}
+	ui_context := editor_make_ui_context(editor, renderer)
 	theme := ui.default_theme()
 
 	// Extra dim layer over the browse modal so the prompt visually dominates.

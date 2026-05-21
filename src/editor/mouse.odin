@@ -17,12 +17,16 @@ set_cursor :: proc(editor: ^Editor, target_cursor: ^sdl3.Cursor) {
 }
 
 // Pick a cursor shape based on what (mouse_x, mouse_y) is over right now
-// plus the active drag state. EW-resize on the divider hot-zone or whenever
-// a divider drag is in progress; default arrow otherwise.
+// plus the active drag state. EW-resize on the pane-split divider or the
+// debug-panel left edge; NS-resize on a debug-section divider; default
+// arrow otherwise.
 @(private)
 editor_update_cursor :: proc(editor: ^Editor, mouse_x, mouse_y: f32) {
-	if editor.divider_dragging || divider_hit_test(editor, mouse_x, mouse_y) {
+	debug_wants_ew, debug_wants_ns := debug_panel_handle_cursor_kind(editor, mouse_x, mouse_y)
+	if editor.divider_dragging || divider_hit_test(editor, mouse_x, mouse_y) || debug_wants_ew {
 		set_cursor(editor, editor.cursor_resize_ew)
+	} else if debug_wants_ns {
+		set_cursor(editor, editor.cursor_resize_ns)
 	} else {
 		set_cursor(editor, editor.cursor_default)
 	}
@@ -135,172 +139,150 @@ editor_mouse_down :: proc(editor: ^Editor, mouse_x: f32, mouse_y: f32, shift_hel
 	case EditorPane:
 		// Scrollbar takes priority over text selection — clicking the thumb
 		// (or anywhere on the track) latches a drag instead of moving the
-		// cursor. Track-but-not-thumb is a page-jump for now (sets target
-		// scroll, smooth animator handles the rest).
-		if scrollbar_thumb_hit(&content_value.scrollbar, mouse_x, mouse_y) {
-			content_value.scrollbar.is_dragging  = true
-			content_value.scrollbar.drag_delta_y = mouse_y - content_value.scrollbar.thumb_rectangle.y
+		// cursor. Track click jumps to that position and then drags.
+		if ui.scrollbar_thumb_hit(&content_value.scrollbar, mouse_x, mouse_y) {
+			ui.scrollbar_begin_thumb_drag(&content_value.scrollbar, mouse_y)
 			return
 		}
-		if ui.point_in_rect(content_value.scrollbar.track_rectangle, mouse_x, mouse_y) {
-			scrollbar_jump_to(editor, &content_value, mouse_y)
-			content_value.scrollbar.is_dragging = true
-			// Center the thumb under the cursor for the rest of the drag.
-			content_value.scrollbar.drag_delta_y = content_value.scrollbar.thumb_rectangle.h / 2
+		if ui.scrollbar_track_hit(&content_value.scrollbar, mouse_x, mouse_y) {
+			ui.scrollbar_begin_track_drag(&content_value.scrollbar)
+			scrollbar_apply_to_editor_pane(editor, &content_value, mouse_y)
 			return
 		}
 		editor_pane_mouse_down(editor, pane, &content_value, mouse_x, mouse_y, shift_held, click_count)
 
 	case TerminalPane:
 		if content_value.terminal == nil { return }
-		// Scrollbar wins over selection. Clicking the thumb latches a drag;
-		// clicking the track jumps to that position and then drags.
-		if scrollbar_thumb_hit(&content_value.scrollbar, mouse_x, mouse_y) {
-			content_value.scrollbar.is_dragging  = true
-			content_value.scrollbar.drag_delta_y = mouse_y - content_value.scrollbar.thumb_rectangle.y
+		if ui.scrollbar_thumb_hit(&content_value.scrollbar, mouse_x, mouse_y) {
+			ui.scrollbar_begin_thumb_drag(&content_value.scrollbar, mouse_y)
 			return
 		}
-		if ui.point_in_rect(content_value.scrollbar.track_rectangle, mouse_x, mouse_y) {
-			content_value.scrollbar.is_dragging  = true
-			content_value.scrollbar.drag_delta_y = content_value.scrollbar.thumb_rectangle.h / 2
-			scrollbar_apply_to_terminal(&content_value, mouse_y)
+		if ui.scrollbar_track_hit(&content_value.scrollbar, mouse_x, mouse_y) {
+			ui.scrollbar_begin_track_drag(&content_value.scrollbar)
+			scrollbar_apply_to_terminal_pane(&content_value, mouse_y)
 			return
 		}
-		// Mouse-down inside the body begins a text selection. The title
-		// strip is skipped so clicking the title bar doesn't start a
-		// selection at row 0.
 		title_bar_height := editor_title_bar_height(editor)
 		if mouse_y < f32(pane.rectangle.y + title_bar_height) { return }
 		terminal.terminal_mouse_down(content_value.terminal, mouse_x, mouse_y)
 
 	case MarkdownPreviewPane:
-		if scrollbar_thumb_hit(&content_value.scrollbar, mouse_x, mouse_y) {
-			content_value.scrollbar.is_dragging  = true
-			content_value.scrollbar.drag_delta_y = mouse_y - content_value.scrollbar.thumb_rectangle.y
+		if ui.scrollbar_thumb_hit(&content_value.scrollbar, mouse_x, mouse_y) {
+			ui.scrollbar_begin_thumb_drag(&content_value.scrollbar, mouse_y)
 			return
 		}
-		if ui.point_in_rect(content_value.scrollbar.track_rectangle, mouse_x, mouse_y) {
-			content_value.scrollbar.is_dragging  = true
-			content_value.scrollbar.drag_delta_y = content_value.scrollbar.thumb_rectangle.h / 2
-			scrollbar_apply_to_markdown(&content_value, mouse_y)
+		if ui.scrollbar_track_hit(&content_value.scrollbar, mouse_x, mouse_y) {
+			ui.scrollbar_begin_track_drag(&content_value.scrollbar)
+			scrollbar_apply_to_markdown_pane(&content_value, mouse_y)
 			return
 		}
+
+	case OutputPane:
+		if ui.scrollbar_thumb_hit(&content_value.scrollbar, mouse_x, mouse_y) {
+			ui.scrollbar_begin_thumb_drag(&content_value.scrollbar, mouse_y)
+			return
+		}
+		if ui.scrollbar_track_hit(&content_value.scrollbar, mouse_x, mouse_y) {
+			ui.scrollbar_begin_track_drag(&content_value.scrollbar)
+			scrollbar_apply_to_output_pane(editor, &content_value, mouse_y)
+			return
+		}
+		title_bar_height := editor_title_bar_height(editor)
+		if mouse_y < f32(pane.rectangle.y + title_bar_height) { return }
+		output_pane_mouse_down(editor, &content_value, pane, mouse_x, mouse_y)
 	}
 }
 
-// Hit-test the scrollbar thumb. We pad the thumb a couple of pixels
-// horizontally so a hover near the edge still latches the drag. Generic
-// over the pane content type — every kind shares the same ScrollbarState.
+// --- Pane-specific scroll setters -----------------------------------------
+//
+// The shared `ui.Scrollbar` widget knows nothing about each pane's storage
+// units — these helpers translate its drag output (a pixel scroll value in
+// `[0, max_scroll]`) into whatever the pane actually stores: editor pane
+// pixel scroll + animated target, terminal pane rows-from-bottom offset,
+// markdown preview pixel scroll, output pane integer pixel scroll +
+// sticky-to-bottom flag.
+
 @(private="file")
-scrollbar_thumb_hit :: proc(scrollbar: ^ScrollbarState, mouse_x, mouse_y: f32) -> bool {
-	thumb_rectangle := scrollbar.thumb_rectangle
-	if thumb_rectangle.w <= 0 || thumb_rectangle.h <= 0 { return false }
-	horizontal_padding: f32 = 2
-	return mouse_x >= thumb_rectangle.x - horizontal_padding && mouse_x < thumb_rectangle.x + thumb_rectangle.w + horizontal_padding &&
-	       mouse_y >= thumb_rectangle.y                      && mouse_y < thumb_rectangle.y + thumb_rectangle.h
-}
-
-// Common travel-fraction math: given the current mouse_y and a saved
-// drag_delta_y (mouse-y offset within the thumb at drag start), return how
-// far along the track we are in [0, 1]. Returns -1 when there's no track to
-// drag against (degenerate scrollbar).
-@(private="file")
-scrollbar_travel_fraction :: proc(scrollbar: ^ScrollbarState, mouse_y: f32) -> f32 {
-	track_rectangle := scrollbar.track_rectangle
-	thumb_rectangle := scrollbar.thumb_rectangle
-	if track_rectangle.h <= 0 || thumb_rectangle.h <= 0 { return -1 }
-	travel_distance := track_rectangle.h - thumb_rectangle.h
-	if travel_distance <= 0 { return 0 }
-	target_thumb_y := clamp(mouse_y - scrollbar.drag_delta_y, track_rectangle.y, track_rectangle.y + travel_distance)
-	return (target_thumb_y - track_rectangle.y) / travel_distance
-}
-
-// Apply a drag position to a terminal pane's scroll_offset. fraction = 0
-// scrolls to the top of scrollback; fraction = 1 snaps to the live bottom.
-@(private="file")
-scrollbar_apply_to_terminal :: proc(terminal_pane: ^TerminalPane, mouse_y: f32) {
-	if terminal_pane.terminal == nil { return }
-	fraction := scrollbar_travel_fraction(&terminal_pane.scrollbar, mouse_y)
-	if fraction < 0 { return }
-	scrollback_count := i32(len(terminal_pane.terminal.screen.scrollback_rows))
-	// fraction == 0 means viewport-top = 0 = max scrollback => scroll_offset = scrollback_count.
-	// fraction == 1 means viewport at live bottom => scroll_offset = 0.
-	new_offset := i32(f32(scrollback_count) * (1.0 - fraction) + 0.5)
-	if new_offset < 0                 { new_offset = 0 }
-	if new_offset > scrollback_count  { new_offset = scrollback_count }
-	terminal_pane.terminal.scroll_offset = new_offset
-}
-
-// Apply a drag position to a markdown preview pane's scroll_y_target. The
-// renderer stashes `last_max_scroll_pixels` each frame so we can map the
-// travel fraction to the actual clamp range without re-laying-out blocks.
-@(private="file")
-scrollbar_apply_to_markdown :: proc(preview_pane: ^MarkdownPreviewPane, mouse_y: f32) {
-	fraction := scrollbar_travel_fraction(&preview_pane.scrollbar, mouse_y)
-	if fraction < 0 { return }
-	max_scroll_pixels := preview_pane.last_max_scroll_pixels
-	if max_scroll_pixels <= 0 { return }
-	preview_pane.scroll_y_target = fraction * max_scroll_pixels
-	preview_pane.scroll_y        = preview_pane.scroll_y_target
-}
-
-// Translate a mouse-y on the track into a scroll value and apply it. Used
-// both by drag-motion and by track-click-to-jump.
-@(private="file")
-scrollbar_jump_to :: proc(editor: ^Editor, editor_pane: ^EditorPane, mouse_y: f32) {
-	track_rectangle := editor_pane.scrollbar.track_rectangle
-	thumb_rectangle := editor_pane.scrollbar.thumb_rectangle
-	if track_rectangle.h <= 0 || thumb_rectangle.h <= 0 || editor.line_height == 0 { return }
-
-	travel_distance := track_rectangle.h - thumb_rectangle.h
-	target_thumb_y := clamp(mouse_y - editor_pane.scrollbar.drag_delta_y, track_rectangle.y, track_rectangle.y + travel_distance)
-	travel_fraction := f32(0)
-	if travel_distance > 0 { travel_fraction = (target_thumb_y - track_rectangle.y) / travel_distance }
-
-	total_line_count := f32(document.document_line_count(&editor_pane.document))
-
+scrollbar_apply_to_editor_pane :: proc(editor: ^Editor, editor_pane: ^EditorPane, mouse_y: f32) {
+	if editor.line_height <= 0 { return }
 	if editor.diff_state.active {
 		diff_row_count := f32(len(editor.diff_state.rows))
 		content_height  := diff_row_count * f32(editor.line_height)
 		viewport_height := f32(editor_pane.visible_lines) * f32(editor.line_height)
 		max_scroll := max(f32(0), content_height - viewport_height)
-		editor.diff_state.scroll_y        = travel_fraction * max_scroll
-		editor.diff_state.scroll_y_target = editor.diff_state.scroll_y
+		new_scroll := ui.scrollbar_drag_to(&editor_pane.scrollbar, mouse_y, max_scroll)
+		editor.diff_state.scroll_y        = new_scroll
+		editor.diff_state.scroll_y_target = new_scroll
 		return
 	}
-
+	total_line_count := f32(document.document_line_count(&editor_pane.document))
 	content_height  := total_line_count * f32(editor.line_height)
 	viewport_height := f32(editor_pane.visible_lines) * f32(editor.line_height)
 	max_scroll := max(f32(0), content_height - viewport_height)
-	editor_pane.scroll_y        = travel_fraction * max_scroll
-	editor_pane.scroll_y_target = editor_pane.scroll_y
-	if editor.line_height > 0 { editor_pane.scroll_line = u32(editor_pane.scroll_y / f32(editor.line_height)) }
+	new_scroll := ui.scrollbar_drag_to(&editor_pane.scrollbar, mouse_y, max_scroll)
+	editor_pane.scroll_y        = new_scroll
+	editor_pane.scroll_y_target = new_scroll
+	editor_pane.scroll_line     = u32(new_scroll / f32(editor.line_height))
+}
+
+@(private="file")
+scrollbar_apply_to_terminal_pane :: proc(terminal_pane: ^TerminalPane, mouse_y: f32) {
+	if terminal_pane.terminal == nil { return }
+	line_height := terminal_pane.terminal.line_height
+	if line_height <= 0 { return }
+	screen := &terminal_pane.terminal.screen
+	scrollback_count := i32(len(screen.scrollback_rows))
+	content_height  := f32(scrollback_count + screen.rows) * f32(line_height)
+	viewport_height := f32(screen.rows) * f32(line_height)
+	max_scroll := max(f32(0), content_height - viewport_height)
+	new_scroll := ui.scrollbar_drag_to(&terminal_pane.scrollbar, mouse_y, max_scroll)
+	// Convert top-relative pixel scroll into rows-up-from-the-live-bottom.
+	new_offset := scrollback_count - i32(new_scroll / f32(line_height) + 0.5)
+	if new_offset < 0                { new_offset = 0 }
+	if new_offset > scrollback_count { new_offset = scrollback_count }
+	terminal_pane.terminal.scroll_offset = new_offset
+}
+
+@(private="file")
+scrollbar_apply_to_markdown_pane :: proc(preview_pane: ^MarkdownPreviewPane, mouse_y: f32) {
+	max_scroll := preview_pane.last_max_scroll_pixels
+	if max_scroll <= 0 { return }
+	new_scroll := ui.scrollbar_drag_to(&preview_pane.scrollbar, mouse_y, max_scroll)
+	preview_pane.scroll_y_target = new_scroll
+	preview_pane.scroll_y        = new_scroll
+}
+
+@(private="file")
+scrollbar_apply_to_output_pane :: proc(editor: ^Editor, output_pane: ^OutputPane, mouse_y: f32) {
+	if editor.line_height <= 0 { return }
+	line_count := i32(len(editor.debug_output_lines))
+	body_h := editor.panes[TERMINAL_PANE_INDEX].rectangle.h - editor_title_bar_height(editor)
+	if body_h <= 0 { return }
+	content_height := f32(line_count * editor.line_height)
+	max_scroll := max(f32(0), content_height - f32(body_h))
+	new_scroll := ui.scrollbar_drag_to(&output_pane.scrollbar, mouse_y, max_scroll)
+	output_pane.scroll_y         = i32(new_scroll)
+	output_pane.sticky_to_bottom = output_pane.scroll_y >= i32(max_scroll)
 }
 
 // Update the per-pane scrollbar hover flag from the current mouse position.
 // Called on every MOUSE_MOTION so the next frame paints a widened scrollbar
 // while the cursor is over it. Walks all pane content kinds that own a
-// `scrollbar: ScrollbarState`.
+// `ui.Scrollbar`.
 @(private)
 editor_scrollbar_update_hover :: proc(editor: ^Editor, mouse_x, mouse_y: f32) {
+	debug_panel_update_hover(editor, mouse_x, mouse_y)
 	for pane_index in 0..<editor_visible_pane_count(editor) {
 		#partial switch &content_value in editor.panes[pane_index].content {
 		case EditorPane:
-			scrollbar_set_hover(editor, &content_value.scrollbar, mouse_x, mouse_y)
+			if ui.scrollbar_update_hover(&content_value.scrollbar, mouse_x, mouse_y) { editor_mark_dirty(editor) }
 		case TerminalPane:
-			scrollbar_set_hover(editor, &content_value.scrollbar, mouse_x, mouse_y)
+			if ui.scrollbar_update_hover(&content_value.scrollbar, mouse_x, mouse_y) { editor_mark_dirty(editor) }
 		case MarkdownPreviewPane:
-			scrollbar_set_hover(editor, &content_value.scrollbar, mouse_x, mouse_y)
+			if ui.scrollbar_update_hover(&content_value.scrollbar, mouse_x, mouse_y) { editor_mark_dirty(editor) }
+		case OutputPane:
+			if ui.scrollbar_update_hover(&content_value.scrollbar, mouse_x, mouse_y) { editor_mark_dirty(editor) }
 		}
-	}
-}
-
-@(private="file")
-scrollbar_set_hover :: proc(editor: ^Editor, scrollbar: ^ScrollbarState, mouse_x, mouse_y: f32) {
-	is_over_track := ui.point_in_rect(scrollbar.track_rectangle, mouse_x, mouse_y)
-	if is_over_track != scrollbar.is_hovered {
-		scrollbar.is_hovered = is_over_track
-		editor_mark_dirty(editor)
 	}
 }
 
@@ -383,6 +365,15 @@ is_word_byte :: proc(byte_value: u8) -> bool {
 
 @(private)
 editor_mouse_drag :: proc(editor: ^Editor, mouse_x: f32, mouse_y: f32) {
+	// Debug-panel resize handles take top priority once latched — needs the
+	// live window width, but mouse_drag doesn't carry it. Read it back from
+	// the active panes (their cumulative width + the panel width).
+	if debug_panel_is_dragging(&editor.debug_state) {
+		window_width := editor.panes[0].rectangle.w + debug_panel_width(editor)
+		if editor.split_active { window_width += editor.panes[1].rectangle.w + 2 }
+		if debug_panel_handle_drag(editor, mouse_x, mouse_y, window_width) { return }
+	}
+
 	// Scrollbar drag takes top priority — once latched, every motion event
 	// just maps to a new scroll position until the user releases the
 	// button. Each pane content type stores its own scrollbar state.
@@ -390,19 +381,25 @@ editor_mouse_drag :: proc(editor: ^Editor, mouse_x: f32, mouse_y: f32) {
 		#partial switch &content_value in editor.panes[pane_index].content {
 		case EditorPane:
 			if content_value.scrollbar.is_dragging {
-				scrollbar_jump_to(editor, &content_value, mouse_y)
+				scrollbar_apply_to_editor_pane(editor, &content_value, mouse_y)
 				editor_mark_dirty(editor)
 				return
 			}
 		case TerminalPane:
 			if content_value.scrollbar.is_dragging {
-				scrollbar_apply_to_terminal(&content_value, mouse_y)
+				scrollbar_apply_to_terminal_pane(&content_value, mouse_y)
 				editor_mark_dirty(editor)
 				return
 			}
 		case MarkdownPreviewPane:
 			if content_value.scrollbar.is_dragging {
-				scrollbar_apply_to_markdown(&content_value, mouse_y)
+				scrollbar_apply_to_markdown_pane(&content_value, mouse_y)
+				editor_mark_dirty(editor)
+				return
+			}
+		case OutputPane:
+			if content_value.scrollbar.is_dragging {
+				scrollbar_apply_to_output_pane(editor, &content_value, mouse_y)
 				editor_mark_dirty(editor)
 				return
 			}
@@ -443,6 +440,12 @@ editor_mouse_drag :: proc(editor: ^Editor, mouse_x: f32, mouse_y: f32) {
 				editor_mark_dirty(editor)
 				return
 			}
+		case OutputPane:
+			if content_value.selection.is_dragging {
+				editor.active_pane_index = pane_index
+				output_pane_mouse_drag(editor, &content_value, pane, mouse_x, mouse_y)
+				return
+			}
 		}
 	}
 }
@@ -461,18 +464,22 @@ editor_pane_mouse_drag :: proc(editor: ^Editor, pane: ^Pane, editor_pane: ^Edito
 @(private)
 editor_mouse_up :: proc(editor: ^Editor, mouse_x, mouse_y: f32) {
 	editor.divider_dragging = false
+	debug_panel_handle_mouse_up(editor)
 	for pane_index in 0..<len(editor.panes) {
 		#partial switch &content_value in editor.panes[pane_index].content {
 		case EditorPane:
-			content_value.mouse_dragging         = false
-			content_value.scrollbar.is_dragging  = false
+			content_value.mouse_dragging = false
+			ui.scrollbar_end_drag(&content_value.scrollbar)
 		case TerminalPane:
-			content_value.scrollbar.is_dragging  = false
+			ui.scrollbar_end_drag(&content_value.scrollbar)
 			if content_value.terminal != nil {
 				terminal.terminal_mouse_up(content_value.terminal, mouse_x, mouse_y)
 			}
 		case MarkdownPreviewPane:
-			content_value.scrollbar.is_dragging  = false
+			ui.scrollbar_end_drag(&content_value.scrollbar)
+		case OutputPane:
+			ui.scrollbar_end_drag(&content_value.scrollbar)
+			output_pane_mouse_up(editor, &content_value)
 		}
 	}
 	// Update cursor based on the release position so it snaps back to the

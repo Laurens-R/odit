@@ -1,5 +1,6 @@
 package dap
 
+import "core:fmt"
 import "core:strings"
 import "core:sync"
 import "core:thread"
@@ -143,6 +144,14 @@ Client :: struct {
 	// outside this module). Replaced wholesale per `setBreakpoints` response.
 	verified_breakpoints: map[string][dynamic]VerifiedBreakpoint,
 
+	// Editor-side breakpoint cache. The editor flushes its current
+	// per-file lists right after spawn (when the adapter hasn't yet sent
+	// its `initialized` event), so we stash them here and replay during
+	// `finalize_configuration` — otherwise breakpoints get silently
+	// dropped. Owned: each key is a cloned path; each value owns its
+	// SourceBreakpoint entries (the `condition` field in particular).
+	cached_breakpoints: map[string][dynamic]SourceBreakpoint,
+
 	// Adapter stdout/stderr text — surfaces from `output` events. Capped to
 	// a few KB by the editor so it doesn't grow unbounded.
 	output_log: [dynamic]u8,
@@ -210,11 +219,21 @@ client_destroy :: proc(client: ^Client) {
 	}
 	delete(client.verified_breakpoints)
 
+	for file_path, bp_list in client.cached_breakpoints {
+		for bp in bp_list { if len(bp.condition) > 0 { delete(bp.condition) } }
+		if cap(bp_list) > 0 { delete(bp_list) }
+		delete(file_path)
+	}
+	delete(client.cached_breakpoints)
+
 	free(client)
 }
 
 // Pull inbound messages off the queue and dispatch each one. Called from the
-// main loop once per frame.
+// main loop once per frame. Also drains stderr and watches for unexpected
+// process exit — without those, an adapter that crashes before sending its
+// `initialize` response would leave the editor waiting forever with no
+// diagnostic in the output log.
 client_poll :: proc(client: ^Client) {
 	if client == nil { return }
 	for {
@@ -223,6 +242,72 @@ client_poll :: proc(client: ^Client) {
 		defer delete(payload)
 		dispatch_message(client, payload)
 	}
+
+	drain_stderr(client)
+	check_unexpected_exit(client)
+}
+
+@(private)
+drain_stderr :: proc(client: ^Client) {
+	scratch: [4096]u8
+	for {
+		bytes_read, ok := process_read_stderr(&client.process_state, scratch[:])
+		if !ok || bytes_read == 0 { return }
+		// Tag the chunk so the user can tell at a glance which stream it
+		// came from. lldb-dap normally only writes JSON to stdout, so any
+		// stderr bytes are almost always diagnostic output worth flagging.
+		append_output(client, "[stderr] ")
+		append_output(client, string(scratch[:bytes_read]))
+		if scratch[bytes_read - 1] != '\n' { append_output(client, "\n") }
+	}
+}
+
+@(private)
+check_unexpected_exit :: proc(client: ^Client) {
+	if client.exited { return }
+	exited, exit_code := process_check_exit(&client.process_state)
+	if !exited { return }
+	client.exited     = true
+	client.exit_code  = exit_code
+	client.is_running = false
+	client.is_stopped = false
+	// Surface a synthetic notice so the editor's output pane shows the
+	// failure instead of silently going idle. The `terminated`/`exited`
+	// event handlers don't run when the adapter dies before sending them.
+	append_output(client, format_unexpected_exit_notice(exit_code))
+}
+
+// Translate a Win32 exit code into a human-friendly explanation. The handful
+// of NT status values listed here are the ones we've actually seen people hit
+// with lldb-dap on Windows; everything else falls through to a generic note.
+@(private="file")
+format_unexpected_exit_notice :: proc(exit_code: i32) -> string {
+	switch u32(exit_code) {
+	case 0xC0000135:
+		return fmt.tprintf(
+			"[dap] adapter failed to start (exit 0x%08X: STATUS_DLL_NOT_FOUND)\n" +
+			"      lldb-dap.exe was found, but Windows couldn't load one of its DLLs (typically liblldb.dll or a VC++ runtime).\n" +
+			"      Fix: download the full LLVM release from https://github.com/llvm/llvm-project/releases (the LLVM-*-win64.exe installer), make sure its bin/ directory is on PATH, and confirm liblldb.dll sits next to lldb-dap.exe.\n" +
+			"      Workaround: point settings.json directly at a known-good binary — `\"dap\": { \"lldb\": { \"command\": [\"C:/Program Files/LLVM/bin/lldb-dap.exe\"] } }`.\n",
+			u32(exit_code))
+	case 0xC0000139:
+		return fmt.tprintf(
+			"[dap] adapter failed to start (exit 0x%08X: STATUS_ENTRYPOINT_NOT_FOUND)\n" +
+			"      A required DLL was found but is the wrong version (mismatched LLVM/clang install). Reinstall LLVM from a single release.\n",
+			u32(exit_code))
+	case 0xC0000142:
+		return fmt.tprintf(
+			"[dap] adapter failed to start (exit 0x%08X: STATUS_DLL_INIT_FAILED)\n" +
+			"      One of the adapter's DLLs failed during initialization — usually a Visual C++ Redistributable mismatch.\n",
+			u32(exit_code))
+	case 0xC0000005:
+		return fmt.tprintf(
+			"[dap] adapter crashed (exit 0x%08X: ACCESS_VIOLATION) — likely a bug in lldb-dap itself or an incompatibility with the target binary.\n",
+			u32(exit_code))
+	case 0:
+		return "[dap] adapter exited cleanly without producing any DAP traffic — check that the command in settings.json actually points at lldb-dap (and not, say, lldb itself).\n"
+	}
+	return fmt.tprintf("[dap] adapter process exited unexpectedly (code %d / 0x%08X) — check the command in settings.json (dap.<adapter>.command).\n", exit_code, u32(exit_code))
 }
 
 // --- Public requests ------------------------------------------------------
@@ -248,10 +333,43 @@ client_launch :: proc(client: ^Client, arguments_json: string, request_command: 
 }
 
 // Set the full breakpoint list for `file_path`. DAP replaces, never merges —
-// send all breakpoints for the file in one call.
+// send all breakpoints for the file in one call. Always cached (so we can
+// replay during `finalize_configuration` if the editor flushed before the
+// adapter's initialized event arrived). If we're already past that event,
+// the request is also dispatched right away so the adapter sees in-session
+// edits immediately.
 client_set_breakpoints :: proc(client: ^Client, file_path: string, breakpoints: []SourceBreakpoint) {
-	if client == nil || !client.is_initialized { return }
-	send_set_breakpoints_request(client, file_path, breakpoints)
+	if client == nil || len(file_path) == 0 { return }
+	cache_breakpoints(client, file_path, breakpoints)
+	if client.got_initialized_event {
+		send_set_breakpoints_request(client, file_path, breakpoints)
+	}
+}
+
+@(private)
+cache_breakpoints :: proc(client: ^Client, file_path: string, breakpoints: []SourceBreakpoint) {
+	// Drop the previous cache entry for this path (case-insensitive lookup
+	// matches the verified_breakpoints map's convention) before swapping in
+	// the new list. Owned strings — caller's `condition` slices are cloned.
+	for existing_key in client.cached_breakpoints {
+		if path_equals_case_insensitive(existing_key, file_path) {
+			previous_list := client.cached_breakpoints[existing_key]
+			for entry in previous_list { if len(entry.condition) > 0 { delete(entry.condition) } }
+			if cap(previous_list) > 0 { delete(previous_list) }
+			delete_key(&client.cached_breakpoints, existing_key)
+			delete(existing_key)
+			break
+		}
+	}
+	if len(breakpoints) == 0 { return }
+
+	new_list: [dynamic]SourceBreakpoint
+	new_list.allocator = context.allocator
+	for bp in breakpoints {
+		condition_clone := len(bp.condition) > 0 ? strings.clone(bp.condition) : ""
+		append(&new_list, SourceBreakpoint{ line = bp.line, condition = condition_clone })
+	}
+	client.cached_breakpoints[strings.clone(file_path)] = new_list
 }
 
 client_continue   :: proc(client: ^Client) { if client != nil { send_step_request(client, "continue", .Continue) } }

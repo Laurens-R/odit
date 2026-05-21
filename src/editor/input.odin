@@ -3,6 +3,7 @@ package editor
 import "vendor:sdl3"
 import "vendor:sdl3/ttf"
 
+import "../dap"
 import "../document"
 import "../terminal"
 import "../ui"
@@ -15,6 +16,19 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 	#partial switch event.type {
 	case .KEY_DOWN, .KEY_UP, .TEXT_INPUT:
 		editor.last_keystroke_time = editor.clock
+	}
+
+	// Stamp the last-known mouse position *before* any modal short-circuits
+	// — otherwise hover-aware UI primitives (buttons, scrollbars) inside
+	// modal dialogs would never see fresh coordinates and would stay frozen
+	// at whatever the cursor was when the modal opened.
+	#partial switch event.type {
+	case .MOUSE_MOTION:
+		editor.last_mouse_x = event.motion.x
+		editor.last_mouse_y = event.motion.y
+	case .MOUSE_BUTTON_DOWN, .MOUSE_BUTTON_UP:
+		editor.last_mouse_x = event.button.x
+		editor.last_mouse_y = event.button.y
 	}
 
 	// Any user input is reason enough to repaint next frame. Cheap and
@@ -52,6 +66,16 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 			}
 		case .MOUSE_WHEEL:
 			help_scroll_by(editor, -i32(event.wheel.y * f32(editor.line_height) * 3))
+		case .MOUSE_MOTION:
+			help_handle_mouse_motion(editor, event.motion.x, event.motion.y)
+		case .MOUSE_BUTTON_DOWN:
+			if event.button.button == sdl3.BUTTON_LEFT {
+				help_handle_mouse_down(editor, event.button.x, event.button.y)
+			}
+		case .MOUSE_BUTTON_UP:
+			if event.button.button == sdl3.BUTTON_LEFT {
+				help_handle_mouse_up(editor)
+			}
 		}
 		return
 	}
@@ -189,6 +213,16 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 			diff_toggle(editor)
 			return
 		}
+		if pressed_key == sdl3.K_F10 {
+			// Step over the next source line. No-op when no active session,
+			// so it's safe to mash even when no debugger is attached.
+			dap.client_step_over(editor.active_dap_client)
+			return
+		}
+		if pressed_key == sdl3.K_F11 {
+			dap.client_step_in(editor.active_dap_client)
+			return
+		}
 		if pressed_key == sdl3.K_F9 {
 			shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
 			switch {
@@ -247,11 +281,16 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 			return
 		}
 		if ctrl_held && pressed_key == sdl3.K_F4 {
-			// In a terminal pane Ctrl+F4 kills the active terminal session
-			// (and rolls over to the next one, or hides if it was the last).
-			// Anywhere else it's the regular close-active-file flow.
+			// Ctrl+F4 closes whatever is in the active pane. Terminal panes
+			// kill the active session; the output pane is intentionally
+			// off-limits here — it's grouped with the right-side debug
+			// panel and the only way to dismiss the pair is Shift+F7, so
+			// the two halves can't drift out of sync. Everything else
+			// falls back to the regular close-active-file flow.
 			if _, is_terminal_pane := editor.panes[editor.active_pane_index].content.(TerminalPane); is_terminal_pane {
 				editor_terminal_destroy_active(editor)
+			} else if _, is_output_pane := editor.panes[editor.active_pane_index].content.(OutputPane); is_output_pane {
+				// no-op: use Shift+F7 to toggle the debug UI as a unit.
 			} else {
 				editor_close_active_file(editor)
 			}
@@ -325,6 +364,8 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 			}
 		case MarkdownPreviewPane:
 			markdown_preview_handle_key(editor, &content_value, event)
+		case OutputPane:
+			output_pane_handle_key(editor, &content_value, event)
 		}
 
 	case .MOUSE_WHEEL:
@@ -358,6 +399,8 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 				}
 			case MarkdownPreviewPane:
 				markdown_preview_pane_scroll(editor, &content_value, -i32(event.wheel.y * 3))
+			case OutputPane:
+				output_pane_scroll(editor, &content_value, -i32(event.wheel.y * 3))
 			}
 		}
 

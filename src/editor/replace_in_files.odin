@@ -75,6 +75,7 @@ ReplaceInFilesState :: struct {
 	cancel_button_rectangle:        sdl3.FRect,
 	results_list_rectangle:         sdl3.FRect,
 	completion_ok_button_rectangle: sdl3.FRect,
+	results_scrollbar:              ui.Scrollbar,
 }
 
 // Caps parallel the find-in-files dialog's. Intentionally separate constants
@@ -781,6 +782,19 @@ replace_in_files_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 	case .MOUSE_BUTTON_DOWN:
 		if event.button.button != sdl3.BUTTON_LEFT { return }
 		mouse_x, mouse_y := event.button.x, event.button.y
+
+		// Scrollbar hit-test first — a thumb grab on top of the results
+		// list should latch a drag, not select the row underneath.
+		if ui.scrollbar_thumb_hit(&state.results_scrollbar, mouse_x, mouse_y) {
+			ui.scrollbar_begin_thumb_drag(&state.results_scrollbar, mouse_y)
+			return
+		}
+		if ui.scrollbar_track_hit(&state.results_scrollbar, mouse_x, mouse_y) {
+			ui.scrollbar_begin_track_drag(&state.results_scrollbar)
+			replace_in_files_apply_scrollbar_drag(editor, mouse_y)
+			return
+		}
+
 		switch {
 		case ui.point_in_rect(state.path_field_rectangle,           mouse_x, mouse_y):
 			state.focus = .PathInput
@@ -823,6 +837,21 @@ replace_in_files_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 			}
 		}
 
+	case .MOUSE_BUTTON_UP:
+		if event.button.button == sdl3.BUTTON_LEFT {
+			if state.results_scrollbar.is_dragging {
+				ui.scrollbar_end_drag(&state.results_scrollbar)
+				editor_mark_dirty(editor)
+			}
+		}
+
+	case .MOUSE_MOTION:
+		if state.results_scrollbar.is_dragging {
+			replace_in_files_apply_scrollbar_drag(editor, event.motion.y)
+		} else if ui.scrollbar_update_hover(&state.results_scrollbar, event.motion.x, event.motion.y) {
+			editor_mark_dirty(editor)
+		}
+
 	case .MOUSE_WHEEL:
 		if state.visible_row_count > 0 && len(state.results) > 0 {
 			scroll_delta := -int(event.wheel.y * 3)
@@ -835,19 +864,32 @@ replace_in_files_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 	}
 }
 
+// Translate a drag-motion mouse_y into a new row-based scroll_offset. The
+// widget speaks pixels; we divide by line_height and clamp to the legal
+// row range. Recomputing max_offset every motion keeps a re-search (which
+// can shrink the result set) from leaving the thumb pinned past the end.
+@(private="file")
+replace_in_files_apply_scrollbar_drag :: proc(editor: ^Editor, mouse_y: f32) {
+	state := &editor.replace_in_files
+	if editor.line_height <= 0 { return }
+	max_offset := max(0, len(state.results) - state.visible_row_count)
+	if max_offset == 0 { return }
+	max_scroll_pixels := f32(max_offset * int(editor.line_height))
+	new_scroll_pixels := ui.scrollbar_drag_to(&state.results_scrollbar, mouse_y, max_scroll_pixels)
+	new_offset := int(new_scroll_pixels / f32(editor.line_height) + 0.5)
+	if new_offset < 0          { new_offset = 0 }
+	if new_offset > max_offset { new_offset = max_offset }
+	state.scroll_offset = new_offset
+	editor_mark_dirty(editor)
+}
+
 // --- Rendering -----------------------------------------------------------
 
 @(private)
 replace_in_files_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewport_width, viewport_height: i32) {
 	state := &editor.replace_in_files
 
-	ui_context := ui.Context{
-		renderer        = renderer,
-		font            = editor.font,
-		engine          = editor.text_engine,
-		character_width = editor.character_width,
-		line_height     = editor.line_height,
-	}
+	ui_context := editor_make_ui_context(editor, renderer)
 	theme := ui.default_theme()
 
 	ui.draw_dim_overlay(&ui_context, viewport_width, viewport_height, theme.overlay)
@@ -926,6 +968,12 @@ replace_in_files_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewp
 	if computed_visible_rows < 1 { computed_visible_rows = 1 }
 	state.visible_row_count = computed_visible_rows
 
+	// Reserve a few pixels on the right for the scrollbar. Rows render in
+	// `row_width` so a maxed-out row doesn't run underneath the thumb.
+	scrollbar_reservation: i32 = ui.SCROLLBAR_NARROW_WIDTH + 2
+	row_width := content_width - scrollbar_reservation
+	if row_width < editor.character_width { row_width = editor.character_width }
+
 	state.results_list_rectangle = sdl3.FRect{f32(content_x), f32(list_top_y), f32(content_width), f32(list_area_height)}
 
 	max_scroll_offset := max(0, len(state.results) - computed_visible_rows)
@@ -943,7 +991,21 @@ replace_in_files_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewp
 			ui.draw_text(&ui_context, empty_message, content_x + 8, list_top_y, theme.dim_foreground)
 		}
 	} else {
-		replace_in_files_render_result_rows(editor, &ui_context, content_x, list_top_y, content_width, line_step, computed_visible_rows, theme)
+		replace_in_files_render_result_rows(editor, &ui_context, content_x, list_top_y, row_width, line_step, computed_visible_rows, theme)
+	}
+
+	// Scrollbar — same row-index → pixel translation as find-in-files.
+	total_rows := len(state.results)
+	if total_rows > 0 {
+		content_height_pixels  := f32(total_rows * int(line_step))
+		viewport_height_pixels := f32(list_area_height)
+		current_scroll_pixels  := f32(state.scroll_offset * int(line_step))
+		ui.scrollbar_render(&ui_context, &state.results_scrollbar,
+			content_x + content_width, list_top_y, list_area_height,
+			viewport_height_pixels, content_height_pixels, current_scroll_pixels, theme)
+	} else {
+		state.results_scrollbar.track_rectangle = sdl3.FRect{}
+		state.results_scrollbar.thumb_rectangle = sdl3.FRect{}
 	}
 
 	// Footer hints (left) + counters (right).

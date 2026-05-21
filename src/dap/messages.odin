@@ -30,6 +30,25 @@ ingest_initialize_response :: proc(client: ^Client, body: json.Value) {
 	if v, ok := body_object["supportsConfigurationDoneRequest"]; ok {
 		client.supports_configuration_done_request = json_to_bool(v)
 	}
+
+	// Send the queued launch / attach IMMEDIATELY now that the adapter has
+	// acknowledged initialize. Per the VS Code DAP convention (and what
+	// lldb-dap expects) the order is:
+	//   initialize → response → launch → initialized event → setBreakpoints
+	//   → setExceptionBreakpoints → configurationDone → launch response.
+	// Sending `launch` after `configurationDone` (the previous design) made
+	// lldb-dap sit idle because configurationDone is the trigger that starts
+	// the inferior — by the time launch arrived there was nothing left to
+	// configure.
+	if len(client.queued_launch_arguments_json) > 0 {
+		args := client.queued_launch_arguments_json
+		client.queued_launch_arguments_json = ""
+		defer delete(args)
+		request_command := client.queued_launch_request_command
+		client.queued_launch_request_command = ""
+		defer if len(request_command) > 0 { delete(request_command) }
+		send_launch_or_attach_request(client, request_command, args)
+	}
 }
 
 // --- Launch / attach ------------------------------------------------------
@@ -61,22 +80,18 @@ send_set_exception_breakpoints_request :: proc(client: ^Client) {
 }
 
 // Public helper used by the editor right after the `initialized` event fires.
-// Sends the breakpoint flush + exception filter + configurationDone in the
-// canonical order, and then the queued launch (if any).
+// Canonical DAP configuration phase: flush every cached breakpoint, then
+// the exception filter, then configurationDone — which is what actually
+// kicks the adapter into starting the inferior. `launch` itself was sent
+// earlier (right after the initialize response), so it isn't sent here.
 @(private)
 finalize_configuration :: proc(client: ^Client) {
+	for file_path, breakpoint_list in client.cached_breakpoints {
+		send_set_breakpoints_request(client, file_path, breakpoint_list[:])
+	}
 	send_set_exception_breakpoints_request(client)
 	if client.supports_configuration_done_request {
 		send_configuration_done_request(client)
-	}
-	if len(client.queued_launch_arguments_json) > 0 {
-		args := client.queued_launch_arguments_json
-		client.queued_launch_arguments_json = ""
-		defer delete(args)
-		request_command := client.queued_launch_request_command
-		client.queued_launch_request_command = ""
-		defer if len(request_command) > 0 { delete(request_command) }
-		send_launch_or_attach_request(client, request_command, args)
 	}
 }
 

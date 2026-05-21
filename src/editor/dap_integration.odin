@@ -14,6 +14,12 @@ import "../dap"
 // adapter failed to spawn.
 @(private)
 editor_dap_start_session :: proc(editor: ^Editor) -> ^dap.Client {
+	// Surface the output pane up front so every status message, spawn error,
+	// and adapter chatter is visible from the first frame. Idempotent if
+	// already showing; covers every return path below without each one
+	// having to remember to call it.
+	editor_output_pane_show(editor)
+
 	// Re-running while a session is alive: pretend the Run button means
 	// Continue instead, so a quick second tap doesn't spawn a parallel
 	// adapter against the same inferior.
@@ -57,6 +63,37 @@ editor_dap_start_session :: proc(editor: ^Editor) -> ^dap.Client {
 	working_directory := project_expand_placeholders(config.working_dir, editor, config.build_profile)
 	if len(working_directory) == 0 { working_directory = editor.project_root }
 
+	// Log the exact command we're about to hand to CreateProcessW (and the
+	// working directory) — bare-name tokens get resolved by Win32 itself,
+	// which can find a different binary than the user's shell PATH lookup.
+	// Surfacing both lets the user compare against `where.exe lldb-dap` and
+	// catch stale shims, Scoop/Chocolatey wrappers, or wrong-architecture
+	// copies before chasing red herrings. Also resolve the first token via
+	// SearchPathW (same lookup semantics CreateProcessW uses with a NULL
+	// application name) so the user can confirm WHICH binary on PATH gets
+	// picked — this is the editor's view, not the shell's.
+	{
+		command_builder: strings.Builder
+		strings.builder_init(&command_builder, 0, 64, context.temp_allocator)
+		for token, token_index in resolved_tokens {
+			if token_index > 0 { strings.write_byte(&command_builder, ' ') }
+			strings.write_string(&command_builder, token)
+		}
+		debug_status_set(editor, fmt.tprintf("Spawning DAP adapter: %s", strings.to_string(command_builder)))
+		if len(working_directory) > 0 {
+			debug_status_set(editor, fmt.tprintf("  adapter cwd: %s", working_directory))
+		}
+		// Pre-resolve the executable path so the user sees exactly which
+		// binary the editor's process will load. Differs from a shell
+		// `where.exe` lookup when the editor's PATH or CWD differs.
+		resolved_executable := dap.process_resolve_executable(resolved_tokens[0], context.temp_allocator)
+		if len(resolved_executable) > 0 {
+			debug_status_set(editor, fmt.tprintf("  resolves to: %s", resolved_executable))
+		} else {
+			debug_status_set(editor, "  resolves to: <not found via SearchPathW — CreateProcessW will attempt its own lookup>")
+		}
+	}
+
 	// Discard any exited client cached against the same adapter id so a
 	// second Run press isn't reusing a dead handle (and we don't leak the
 	// previous Client struct).
@@ -93,14 +130,34 @@ editor_dap_start_session :: proc(editor: ^Editor) -> ^dap.Client {
 	// next change-induced flush corrects the picture anyway.
 	editor_dap_flush_all_breakpoints(editor)
 
+	// Log the expanded values rather than the raw template — the JSON above
+	// already went out with placeholders substituted, so showing the raw
+	// `config.program` here would be misleading. cwd / args are surfaced too
+	// because mismatches in those are the second-most-common launch failure.
+	expanded_program := project_expand_placeholders(config.program,     editor, config.build_profile)
+	expanded_cwd     := project_expand_placeholders(config.working_dir, editor, config.build_profile)
+	if len(expanded_cwd) == 0 { expanded_cwd = editor.project_root }
 	if request_command == "attach" {
 		if config.pid > 0 {
 			debug_status_set(editor, fmt.tprintf("Attaching to pid %d", config.pid))
 		} else {
-			debug_status_set(editor, fmt.tprintf("Attaching to: %s", config.program))
+			debug_status_set(editor, fmt.tprintf("Attaching to: %s", expanded_program))
+			if config.wait_for { debug_status_set(editor, "  (waiting for the process to launch)") }
 		}
 	} else {
-		debug_status_set(editor, fmt.tprintf("Launching: %s", config.program))
+		debug_status_set(editor, fmt.tprintf("Launching: %s", expanded_program))
+		if len(expanded_cwd) > 0 {
+			debug_status_set(editor, fmt.tprintf("  cwd:  %s", expanded_cwd))
+		}
+		if len(config.args) > 0 {
+			args_builder: strings.Builder
+			strings.builder_init(&args_builder, 0, 64, context.temp_allocator)
+			for argument, argument_index in config.args {
+				if argument_index > 0 { strings.write_byte(&args_builder, ' ') }
+				strings.write_string(&args_builder, project_expand_placeholders(argument, editor, config.build_profile))
+			}
+			debug_status_set(editor, fmt.tprintf("  args: %s", strings.to_string(args_builder)))
+		}
 	}
 	editor_mark_dirty(editor)
 	return client
@@ -151,14 +208,14 @@ editor_dap_update :: proc(editor: ^Editor) {
 	client := editor.active_dap_client
 	if client == nil { return }
 
-	// Drain any output text the adapter has buffered into the debug status
-	// strip. Keep just the last ~256 bytes so a chatty inferior doesn't push
-	// useful text out of view.
+	// Drain adapter stdout/stderr straight into the scrolling output log so
+	// the user can read multi-line errors (and inferior output) instead of
+	// just the truncated header strip. `debug_output_append` splits the
+	// chunk on newlines and owns each line.
 	if output_bytes := dap.client_drain_output(client); output_bytes != nil {
 		defer delete(output_bytes)
 		if len(output_bytes) > 0 {
-			debug_status_set(editor, string(output_bytes))
-			editor_mark_dirty(editor)
+			debug_output_append(editor, string(output_bytes))
 		}
 	}
 
@@ -328,18 +385,10 @@ dap_write_json_string :: proc(builder: ^strings.Builder, text: string) {
 
 // --- Status line ----------------------------------------------------------
 
-// Replace the debug-panel status text. Owned by `debug_state.status_message`;
-// caller hands us a non-owned string. Trimmed to a single line to fit the
-// status strip.
+// Push a status message into the shared debug-output log. The Debug Output
+// pane (pane[1]) shows the scrolling history; the right-side debug panel no
+// longer carries a one-liner because it overflows the panel width.
 @(private)
 debug_status_set :: proc(editor: ^Editor, message: string) {
-	state := &editor.debug_state
-	trimmed := strings.trim_right_space(message)
-	// Keep just the first line so multi-line stderr doesn't push the rest
-	// of the panel down.
-	if newline_index := strings.index_byte(trimmed, '\n'); newline_index >= 0 {
-		trimmed = trimmed[:newline_index]
-	}
-	if len(state.status_message) > 0 { delete(state.status_message) }
-	state.status_message = strings.clone(trimmed)
+	debug_output_append(editor, strings.trim_right_space(message))
 }

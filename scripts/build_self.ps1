@@ -23,7 +23,7 @@ $odinTargetByPlatform = @{
 $odinTarget = $odinTargetByPlatform[$Target]
 
 $outputDirectory = Join-Path 'out' (Join-Path $Target $Config)
-$executableName  = if ($Target -eq 'windows') { 'odit.exe' } else { 'odit' }
+$executableName  = if ($Target -eq 'windows') { 'odit_self.exe' } else { 'odit_self' }
 $outputBinary    = Join-Path $outputDirectory $executableName
 
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null

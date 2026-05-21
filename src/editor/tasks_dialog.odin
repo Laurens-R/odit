@@ -213,10 +213,13 @@ tasks_poll_terminal_build_exits :: proc(editor: ^Editor) {
 
 		// Build-then-debug chain. Only fire on a clean exit; on failure the
 		// terminal stays visible so the user can inspect the error output
-		// before deciding what to do next.
+		// before deciding what to do next. Swap pane[1] from the build
+		// terminal to the Debug Output pane *before* the DAP spawn so the
+		// adapter's first messages appear in the right place.
 		if pending >= 0 && exit_code == 0 {
 			editor.active_debug_configuration_index = pending
 			editor.debug_state.panel_visible = true
+			editor_output_pane_show(editor)
 			editor_dap_start_session(editor)
 		}
 	}
@@ -275,13 +278,7 @@ tasks_dialog_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 tasks_dialog_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewport_width, viewport_height: i32) {
 	dialog := &editor.tasks_dialog
 
-	ui_context := ui.Context{
-		renderer        = renderer,
-		font            = editor.font,
-		engine          = editor.text_engine,
-		character_width = editor.character_width,
-		line_height     = editor.line_height,
-	}
+	ui_context := editor_make_ui_context(editor, renderer)
 	theme := ui.default_theme()
 
 	ui.draw_dim_overlay(&ui_context, viewport_width, viewport_height, theme.overlay)

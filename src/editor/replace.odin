@@ -359,13 +359,7 @@ replace_render_bar :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pan
 	sdl3.SetRenderDrawColorFloat(renderer, editor.cursor_color.r, editor.cursor_color.g, editor.cursor_color.b, 1.0)
 	sdl3.RenderFillRect(renderer, &stripe_rectangle)
 
-	ui_context := ui.Context{
-		renderer        = renderer,
-		font            = editor.font,
-		engine          = editor.text_engine,
-		character_width = editor.character_width,
-		line_height     = editor.line_height,
-	}
+	ui_context := editor_make_ui_context(editor, renderer)
 	theme := ui.default_theme()
 
 	// Two rows: Search on top, Replace under it. Use the wider of the two

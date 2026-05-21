@@ -8,6 +8,22 @@ import win32 "core:sys/windows"
 // stdio JSON-RPC the LSP layer already drives. The two implementations are
 // intentionally near-duplicates so each package can evolve independently.
 
+// Direct binding for SearchPathW — the Odin win32 package doesn't expose it.
+// Used by `process_resolve_executable` to surface which binary CreateProcessW
+// would actually pick on PATH, for diagnostic output.
+foreign import kernel32 "system:Kernel32.lib"
+@(default_calling_convention="system")
+foreign kernel32 {
+	SearchPathW :: proc(
+		lpPath:        win32.LPCWSTR,
+		lpFileName:    win32.LPCWSTR,
+		lpExtension:   win32.LPCWSTR,
+		nBufferLength: win32.DWORD,
+		lpBuffer:      win32.LPWSTR,
+		lpFilePart:    ^win32.LPWSTR,
+	) -> win32.DWORD ---
+}
+
 ProcessState :: struct {
 	process_handle: win32.HANDLE,
 	thread_handle:  win32.HANDLE,
@@ -105,10 +121,23 @@ process_finalize :: proc(state: ^ProcessState) {
 
 @(private)
 process_read :: proc(state: ^ProcessState, buffer: []u8) -> (bytes_read: int, ok: bool) {
-	if state.stdout_read == nil { return 0, false }
+	return process_read_pipe(state.stdout_read, buffer)
+}
+
+// Non-blocking stderr drain. Used by the editor's per-frame DAP update so
+// adapter spawn errors (e.g. "lldb not found on PATH") show up in the debug
+// output log instead of silently disappearing.
+@(private)
+process_read_stderr :: proc(state: ^ProcessState, buffer: []u8) -> (bytes_read: int, ok: bool) {
+	return process_read_pipe_nonblocking(state.stderr_read, buffer)
+}
+
+@(private="file")
+process_read_pipe :: proc(handle: win32.HANDLE, buffer: []u8) -> (bytes_read: int, ok: bool) {
+	if handle == nil { return 0, false }
 
 	bytes_available: u32
-	if !win32.PeekNamedPipe(state.stdout_read, nil, 0, nil, &bytes_available, nil) {
+	if !win32.PeekNamedPipe(handle, nil, 0, nil, &bytes_available, nil) {
 		return 0, false
 	}
 	if bytes_available == 0 {
@@ -120,10 +149,48 @@ process_read :: proc(state: ^ProcessState, buffer: []u8) -> (bytes_read: int, ok
 	if to_read > bytes_available { to_read = bytes_available }
 
 	actually_read: u32
-	if !win32.ReadFile(state.stdout_read, raw_data(buffer), to_read, &actually_read, nil) {
+	if !win32.ReadFile(handle, raw_data(buffer), to_read, &actually_read, nil) {
 		return 0, false
 	}
 	return int(actually_read), true
+}
+
+// Same as the stdout reader except it doesn't sleep on an empty pipe — caller
+// is the main thread and shouldn't stall the frame on idle stderr.
+@(private="file")
+process_read_pipe_nonblocking :: proc(handle: win32.HANDLE, buffer: []u8) -> (bytes_read: int, ok: bool) {
+	if handle == nil { return 0, false }
+
+	bytes_available: u32
+	if !win32.PeekNamedPipe(handle, nil, 0, nil, &bytes_available, nil) {
+		// Pipe closed (peer exited and we already drained the buffer). Treat
+		// as a clean EOF — not an error.
+		return 0, true
+	}
+	if bytes_available == 0 { return 0, true }
+
+	to_read := u32(len(buffer))
+	if to_read > bytes_available { to_read = bytes_available }
+
+	actually_read: u32
+	if !win32.ReadFile(handle, raw_data(buffer), to_read, &actually_read, nil) {
+		return 0, true
+	}
+	return int(actually_read), true
+}
+
+// Non-blocking exit poll on the child process. Mirrors the terminal layer's
+// `terminal_check_process_exit` so the editor can detect an adapter that died
+// before it ever spoke DAP — without that, the DAP layer would otherwise sit
+// waiting forever for an `initialize` response that never arrives.
+@(private)
+process_check_exit :: proc(state: ^ProcessState) -> (exited: bool, exit_code: i32) {
+	if state.process_handle == nil { return false, 0 }
+	wait_result := win32.WaitForSingleObject(state.process_handle, 0)
+	if wait_result != win32.WAIT_OBJECT_0 { return false, 0 }
+	value: u32
+	if !win32.GetExitCodeProcess(state.process_handle, &value) { return true, 1 }
+	return true, i32(value)
 }
 
 @(private)
@@ -134,6 +201,26 @@ process_write :: proc(state: ^ProcessState, data: []u8) -> int {
 		return 0
 	}
 	return int(written)
+}
+
+// Resolve a bare command token to the absolute path Win32 would pick, using
+// the same search-path semantics CreateProcessW does. Returns "" when
+// SearchPathW can't find anything. Owned in `allocator`.
+process_resolve_executable :: proc(command_token: string, allocator := context.allocator) -> string {
+	if len(command_token) == 0 { return "" }
+	command_token_wstring := win32.utf8_to_wstring(command_token)
+	default_extension     := win32.utf8_to_wstring(".exe")
+
+	// First call: probe required buffer length. SearchPathW returns the
+	// number of TCHARs needed *including* the trailing null.
+	required_length := SearchPathW(nil, command_token_wstring, default_extension, 0, nil, nil)
+	if required_length == 0 { return "" }
+	buffer := make([]u16, int(required_length), context.temp_allocator)
+	final_length := SearchPathW(nil, command_token_wstring, default_extension, required_length, raw_data(buffer), nil)
+	if final_length == 0 { return "" }
+	resolved_utf8, conversion_error := win32.wstring_to_utf8_alloc(cast(win32.wstring)raw_data(buffer), int(final_length), allocator)
+	if conversion_error != nil { return "" }
+	return resolved_utf8
 }
 
 @(private="file")

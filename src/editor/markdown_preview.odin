@@ -66,7 +66,7 @@ MarkdownPreviewPane :: struct {
 	scroll_y:         f32,
 	scroll_y_target:  f32,
 	visible_lines:    u32,
-	scrollbar:        ScrollbarState,
+	scrollbar:        ui.Scrollbar,
 
 	// Stashed by the renderer each frame so the scrollbar drag handler can
 	// reuse the same clamp range without re-running the layout pass to
@@ -1451,26 +1451,10 @@ markdown_preview_pane_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, 
 	{
 		full_content_height := f32(total_content_height + vertical_padding * 2)
 		viewport_height_f   := f32(text_area_h)
-		if full_content_height > viewport_height_f {
-			scrollbar_width: i32 = 6
-			if content.scrollbar.is_hovered || content.scrollbar.is_dragging { scrollbar_width = 14 }
-			scrollbar_x := view_x + view_w - scrollbar_width - 2
-
-			ui_context := ui.Context{
-				renderer        = renderer,
-				font            = editor.font,
-				engine          = editor.text_engine,
-				character_width = editor.character_width,
-				line_height     = editor.line_height,
-			}
-			theme := ui.default_theme()
-			track_rectangle, thumb_rectangle := ui.draw_scrollbar(&ui_context, scrollbar_x, text_origin_y, text_area_h, full_content_height, viewport_height_f, content.scroll_y, scrollbar_width, theme)
-			content.scrollbar.track_rectangle = track_rectangle
-			content.scrollbar.thumb_rectangle = thumb_rectangle
-		} else {
-			content.scrollbar.track_rectangle = sdl3.FRect{}
-			content.scrollbar.thumb_rectangle = sdl3.FRect{}
-		}
+		ui_context := editor_make_ui_context(editor, renderer)
+		theme := ui.default_theme()
+		ui.scrollbar_render(&ui_context, &content.scrollbar, view_x + view_w - 2, text_origin_y, text_area_h,
+			viewport_height_f, full_content_height, content.scroll_y, theme)
 	}
 }
 

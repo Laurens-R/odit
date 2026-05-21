@@ -6,7 +6,7 @@
 			"name": "debug",
 			"description": "Windows debug build (default target)",
 			"working_dir": "{project_root}",
-			"command_windows": ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/build.ps1", "-Target", "windows", "-Config", "debug"],
+			"command_windows": ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/build_self.ps1", "-Target", "windows", "-Config", "debug"],
 			"command_linux":   ["bash", "scripts/build.sh", "windows", "debug"],
 			"command_macos":   ["bash", "scripts/build.sh", "windows", "debug"]
 		},
@@ -14,7 +14,7 @@
 			"name": "release",
 			"description": "Windows release build",
 			"working_dir": "{project_root}",
-			"command_windows": ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/build.ps1", "-Target", "windows", "-Config", "release"],
+			"command_windows": ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/build_self.ps1", "-Target", "windows", "-Config", "release"],
 			"command_linux":   ["bash", "scripts/build.sh", "windows", "release"],
 			"command_macos":   ["bash", "scripts/build.sh", "windows", "release"]
 		},
@@ -22,7 +22,7 @@
 			"name": "linux-debug",
 			"description": "Cross-build a Linux debug binary",
 			"working_dir": "{project_root}",
-			"command_windows": ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/build.ps1", "-Target", "linux", "-Config", "debug"],
+			"command_windows": ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/build_self.ps1", "-Target", "linux", "-Config", "debug"],
 			"command_linux":   ["bash", "scripts/build.sh", "linux", "debug"],
 			"command_macos":   ["bash", "scripts/build.sh", "linux", "debug"]
 		},
@@ -30,7 +30,7 @@
 			"name": "linux-release",
 			"description": "Cross-build a Linux release binary",
 			"working_dir": "{project_root}",
-			"command_windows": ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/build.ps1", "-Target", "linux", "-Config", "release"],
+			"command_windows": ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/build_self.ps1", "-Target", "linux", "-Config", "release"],
 			"command_linux":   ["bash", "scripts/build.sh", "linux", "release"],
 			"command_macos":   ["bash", "scripts/build.sh", "linux", "release"]
 		},
@@ -38,7 +38,7 @@
 			"name": "macos-debug",
 			"description": "Cross-build a macOS debug binary",
 			"working_dir": "{project_root}",
-			"command_windows": ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/build.ps1", "-Target", "macos", "-Config", "debug"],
+			"command_windows": ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/build_self.ps1", "-Target", "macos", "-Config", "debug"],
 			"command_linux":   ["bash", "scripts/build.sh", "macos", "debug"],
 			"command_macos":   ["bash", "scripts/build.sh", "macos", "debug"]
 		},
@@ -46,7 +46,7 @@
 			"name": "macos-release",
 			"description": "Cross-build a macOS release binary",
 			"working_dir": "{project_root}",
-			"command_windows": ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/build.ps1", "-Target", "macos", "-Config", "release"],
+			"command_windows": ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/build_self.ps1", "-Target", "macos", "-Config", "release"],
 			"command_linux":   ["bash", "scripts/build.sh", "macos", "release"],
 			"command_macos":   ["bash", "scripts/build.sh", "macos", "release"]
 		},
