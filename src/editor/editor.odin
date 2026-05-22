@@ -225,6 +225,16 @@ Editor :: struct {
 	clock:                f64,
 	last_keystroke_time:  f64,
 
+	// Render-rate counter for the debug-build FPS readout in the status bar.
+	// Ticked from `editor_record_frame_presented` (called by main.odin right
+	// after `sdl3.RenderPresent`), so the number reflects frames actually
+	// pushed to the screen — not loop iterations, which would be pinned at
+	// ~60 by main.odin's sleep regardless of whether anything redrew. A dip
+	// here is real and indicates a slow render path.
+	fps_window_seconds:   f64,
+	fps_window_frames:    i32,
+	fps_last_value:       i32,
+
 	// Modal UI
 	show_help:       bool,
 	help_scroll:     i32,
@@ -545,6 +555,11 @@ editor_init :: proc(editor: ^Editor, text_engine: ^ttf.TextEngine, font: ^ttf.Fo
 	// Restore the last-used project root (if any) so reopening the editor
 	// drops the user straight back into the project they were working in.
 	editor_persistence_load(editor)
+
+	// macOS: install the native NSMenu at the top of the screen, fed from
+	// the same `MENUS` table the in-app strip uses on Windows/Linux. The
+	// in-app strip is force-hidden on Darwin, so this is the only menu.
+	when ODIN_OS == .Darwin { editor_install_native_menu(editor) }
 }
 
 editor_destroy :: proc(editor: ^Editor) {
@@ -1259,6 +1274,31 @@ editor_mark_dirty :: proc(editor: ^Editor) {
 // Drop the dirty flag — called by the main loop right after `editor_render`.
 editor_mark_clean :: proc(editor: ^Editor) {
 	editor.needs_redraw = false
+}
+
+// Tally one rendered frame for the status-bar FPS readout. Called by the
+// main loop right after `sdl3.RenderPresent` with the seconds elapsed since
+// the previous render-or-skip tick. Aggregated over a ~0.5s window so the
+// displayed number doesn't flicker on every frame, and re-marks dirty when
+// the value changes so the next paint reflects the new reading.
+//
+// `delta_time` is the same per-loop-iteration delta the main loop already
+// computes; what makes this useful (vs. just counting iterations in
+// `editor_update`) is that we only get called on frames that actually
+// painted, so the rate drops when the render path stalls instead of being
+// pinned at 60 by main.odin's sleep.
+editor_record_frame_presented :: proc(editor: ^Editor, delta_time: f64) {
+	editor.fps_window_seconds += delta_time
+	editor.fps_window_frames  += 1
+	if editor.fps_window_seconds >= 0.5 {
+		new_fps := i32(f64(editor.fps_window_frames) / editor.fps_window_seconds + 0.5)
+		if new_fps != editor.fps_last_value {
+			editor.fps_last_value = new_fps
+			when ODIN_DEBUG { editor_mark_dirty(editor) }
+		}
+		editor.fps_window_seconds = 0
+		editor.fps_window_frames  = 0
+	}
 }
 
 // True when this frame must be drawn. Wraps the flag so the main loop never

@@ -27,6 +27,16 @@ Node :: struct {
 	left_size:       u32, // total byte length in the left subtree
 	left_newlines:   u32, // total newline count in the left subtree
 	size_self:       u32, // piece.length cached
+
+	// Newline byte offsets within this piece (relative to piece.start),
+	// sorted ascending. Built lazily on the first newline-position lookup
+	// and dropped whenever `piece` is mutated (insert/delete splits or
+	// trims). With this in place, `piecetree_line_start` and
+	// `piecetree_offset_to_line` become O(log piece_newlines) per piece
+	// instead of O(piece_bytes) — the difference between "freshly loaded
+	// 1-piece file lookups are linear in line number" and "lookups are
+	// genuinely O(log n)". `nil` means "not yet computed".
+	newline_offsets: []u32,
 }
 
 PieceTree :: struct {
@@ -131,6 +141,7 @@ piecetree_insert :: proc(piece_tree: ^PieceTree, offset: u32, text_to_insert: st
 		// Modify target to be the left portion
 		target_node.piece = left_piece
 		target_node.size_self = left_piece.length
+		node_invalidate_newline_cache(target_node)
 
 		// Insert new piece after target
 		new_node := node_create(new_piece, nil)
@@ -177,6 +188,7 @@ piecetree_delete :: proc(piece_tree: ^PieceTree, offset: u32, length_to_delete: 
 			target_node.piece.length -= bytes_to_remove
 			target_node.piece.newline_count -= removed_newline_count
 			target_node.size_self = target_node.piece.length
+			node_invalidate_newline_cache(target_node)
 			node_update_metadata_up(target_node)
 		} else if local_offset + bytes_to_remove == target_node.piece.length {
 			// Trim from the end
@@ -185,6 +197,7 @@ piecetree_delete :: proc(piece_tree: ^PieceTree, offset: u32, length_to_delete: 
 			target_node.piece.length = local_offset
 			target_node.piece.newline_count -= removed_newline_count
 			target_node.size_self = target_node.piece.length
+			node_invalidate_newline_cache(target_node)
 			node_update_metadata_up(target_node)
 		} else {
 			// Remove from the middle — split into two pieces
@@ -206,6 +219,7 @@ piecetree_delete :: proc(piece_tree: ^PieceTree, offset: u32, length_to_delete: 
 			target_node.piece.length = local_offset
 			target_node.piece.newline_count = left_newline_count
 			target_node.size_self = target_node.piece.length
+			node_invalidate_newline_cache(target_node)
 			node_update_metadata_up(target_node)
 
 			right_node := node_create(right_piece, nil)
@@ -300,18 +314,14 @@ piecetree_line_start :: proc(piece_tree: ^PieceTree, line_index: u32) -> u32 {
 			accumulated_offset += current_node.left_size
 
 			if newlines_to_skip <= current_node.piece.newline_count {
-				// The target newline is within this piece
-				piece_data := piece_get_bytes(piece_tree, &current_node.piece)
-				newlines_found: u32 = 0
-				for byte_index: u32 = 0; byte_index < current_node.piece.length; byte_index += 1 {
-					if piece_data[byte_index] == '\n' {
-						newlines_found += 1
-						if newlines_found == newlines_to_skip {
-							return accumulated_offset + byte_index + 1
-						}
-					}
-				}
-				return accumulated_offset + current_node.piece.length
+				// The target newline is within this piece. The cached
+				// `newline_offsets` slice is already sorted, so the
+				// (newlines_to_skip)th newline is just the (i-1)th entry —
+				// O(1) once the cache is populated, O(piece_bytes) on the
+				// first hit for this piece (amortised across all future
+				// queries against it).
+				newline_offsets := node_newline_offsets(piece_tree, current_node)
+				return accumulated_offset + newline_offsets[newlines_to_skip - 1] + 1
 			}
 
 			newlines_to_skip -= current_node.piece.newline_count
@@ -342,13 +352,21 @@ piecetree_offset_to_line :: proc(piece_tree: ^PieceTree, offset: u32) -> u32 {
 			remaining_offset -= current_node.left_size
 
 			if remaining_offset <= current_node.size_self {
-				// Count newlines within this piece up to `remaining_offset`
-				piece_data := piece_get_bytes(piece_tree, &current_node.piece)
-				for byte_index: u32 = 0; byte_index < remaining_offset; byte_index += 1 {
-					if piece_data[byte_index] == '\n' {
-						current_line += 1
+				// Count newlines strictly before `remaining_offset`. Binary
+				// search over the sorted cache for the first entry >=
+				// remaining_offset — its index *is* the count.
+				newline_offsets := node_newline_offsets(piece_tree, current_node)
+				low: int = 0
+				high: int = len(newline_offsets)
+				for low < high {
+					middle := (low + high) / 2
+					if newline_offsets[middle] < remaining_offset {
+						low = middle + 1
+					} else {
+						high = middle
 					}
 				}
+				current_line += u32(low)
 				return current_line
 			}
 
@@ -359,6 +377,40 @@ piecetree_offset_to_line :: proc(piece_tree: ^PieceTree, offset: u32) -> u32 {
 	}
 
 	return current_line
+}
+
+// Build (or return the cached) sorted list of newline byte offsets within
+// `node`'s piece, relative to piece.start. The first call after a piece
+// mutation pays O(piece_bytes); subsequent calls are O(1). Callers must
+// invoke `node_invalidate_newline_cache` whenever `node.piece` changes.
+@(private="file")
+node_newline_offsets :: proc(piece_tree: ^PieceTree, node: ^Node) -> []u32 {
+	if node.newline_offsets != nil || node.piece.newline_count == 0 {
+		return node.newline_offsets
+	}
+	piece_data := piece_get_bytes(piece_tree, &node.piece)
+	offsets := make([]u32, node.piece.newline_count)
+	found: u32 = 0
+	for byte_index: u32 = 0; byte_index < node.piece.length; byte_index += 1 {
+		if piece_data[byte_index] == '\n' {
+			offsets[found] = byte_index
+			found += 1
+			if found == node.piece.newline_count { break }
+		}
+	}
+	node.newline_offsets = offsets
+	return node.newline_offsets
+}
+
+// Drop the cached newline-offset slice for a node. Called by every site
+// that mutates `node.piece` (insert/delete splits and trims) so the next
+// newline query rebuilds against the new piece contents.
+@(private="file")
+node_invalidate_newline_cache :: proc(node: ^Node) {
+	if node.newline_offsets != nil {
+		delete(node.newline_offsets)
+		node.newline_offsets = nil
+	}
 }
 
 // Get the text content of a specific line (0-indexed), without the trailing newline.
@@ -413,6 +465,7 @@ node_destroy_recursive :: proc(node_to_destroy: ^Node) {
 	}
 	node_destroy_recursive(node_to_destroy.left)
 	node_destroy_recursive(node_to_destroy.right)
+	if node_to_destroy.newline_offsets != nil { delete(node_to_destroy.newline_offsets) }
 	free(node_to_destroy)
 }
 
@@ -627,6 +680,7 @@ tree_delete_node :: proc(piece_tree: ^PieceTree, node_to_delete: ^Node) {
 		tree_fix_delete(piece_tree, fix_node, fix_parent)
 	}
 
+	if node_to_delete.newline_offsets != nil { delete(node_to_delete.newline_offsets) }
 	free(node_to_delete)
 }
 

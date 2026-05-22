@@ -35,7 +35,9 @@
       "Bash(ls /Users/laurens/Projects/odit/odit.json ~/.config/odit/settings.json 2>&1; echo ---; ls /Applications/Xcode.app/Contents/Developer/usr/bin/lldb-dap /Library/Developer/CommandLineTools/usr/bin/lldb-dap 2>&1)",
       "Read(//Applications/Xcode.app/Contents/Developer/usr/bin/**)",
       "Bash(mkdir -p ~/.config/odit)",
-      "Bash(/Users/laurens/Projects/odit/vendor/macos/lsp/ols --version)"
+      "Bash(/Users/laurens/Projects/odit/vendor/macos/lsp/ols --version)",
+      "Read(//opt/homebrew/share/odin/vendor/**)",
+      "Read(//usr/local/**)"
     ],
     "additionalDirectories": [
       "/Users/laurens/.config/odit"

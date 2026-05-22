@@ -136,6 +136,16 @@ PROPORTIONAL_FONT_CANDIDATES := [?][3]string{
 @(private="file")
 MONOSPACE_FALLBACK_PATH :: "font.ttf"
 
+// Bundled proportional font for the markdown preview. Staged into the
+// build output by `scripts/build.{sh,ps1}` (sits in `vendor/md.ttf` →
+// next to the binary at runtime). When present, this trumps the
+// PROPORTIONAL_FONT_CANDIDATES probe below so the preview is consistent
+// across machines instead of inheriting whatever the OS happens to ship.
+// Single-file font: we point regular/bold/italic at it and let SDL_ttf
+// synthesise the variants via BOLD / ITALIC style flags.
+@(private="file")
+MARKDOWN_BUNDLED_FONT_PATH :: "md.ttf"
+
 // Extra pixels added between visual lines within a Paragraph / ListItem /
 // BlockQuote so body text doesn't feel cramped. Headings keep their own
 // `heading_line_height` which already breathes; code blocks stay tight.
@@ -200,31 +210,50 @@ markdown_fonts_ensure_loaded :: proc(fonts: ^MarkdownFonts) {
 	body_size       := MARKDOWN_BODY_FONT_SIZE * scale
 	probe_size      := body_size
 
-	// Discover which proportional triple is installed. Probe at the
-	// scaled body size so a font that opens fine at default 16 px but
-	// can't be sized higher (vanishingly rare) still picks correctly.
+	// Bundled md.ttf trumps system fonts so the preview looks the same on
+	// every machine. When it loads, it's the only file we open: bold and
+	// italic point at the same handle path with the matching style flag
+	// synthesised by SDL_ttf. Falls through to the per-OS triples below if
+	// it isn't present (development build / file missing).
+	bundled_probe := ttf.OpenFont(strings.clone_to_cstring(MARKDOWN_BUNDLED_FONT_PATH, context.temp_allocator), probe_size)
+	use_bundled_font := bundled_probe != nil
+	if bundled_probe != nil { ttf.CloseFont(bundled_probe) }
+
 	chosen_regular_path: string
 	chosen_bold_path:    string
 	chosen_italic_path:  string
-	for triple in PROPORTIONAL_FONT_CANDIDATES {
-		probe := ttf.OpenFont(strings.clone_to_cstring(triple[0], context.temp_allocator), probe_size)
-		if probe != nil {
-			ttf.CloseFont(probe)
-			chosen_regular_path = triple[0]
-			chosen_bold_path    = triple[1]
-			chosen_italic_path  = triple[2]
-			break
+
+	if !use_bundled_font {
+		// Discover which proportional triple is installed. Probe at the
+		// scaled body size so a font that opens fine at default 16 px but
+		// can't be sized higher (vanishingly rare) still picks correctly.
+		for triple in PROPORTIONAL_FONT_CANDIDATES {
+			probe := ttf.OpenFont(strings.clone_to_cstring(triple[0], context.temp_allocator), probe_size)
+			if probe != nil {
+				ttf.CloseFont(probe)
+				chosen_regular_path = triple[0]
+				chosen_bold_path    = triple[1]
+				chosen_italic_path  = triple[2]
+				break
+			}
 		}
 	}
 
 	regular_paths: []string
 	bold_paths:    []string
 	italic_paths:  []string
-	if len(chosen_regular_path) > 0 {
-		regular_paths = []string{chosen_regular_path,                              MONOSPACE_FALLBACK_PATH}
-		bold_paths    = []string{chosen_bold_path,    chosen_regular_path,         MONOSPACE_FALLBACK_PATH}
-		italic_paths  = []string{chosen_italic_path,  chosen_regular_path,         MONOSPACE_FALLBACK_PATH}
-	} else {
+	switch {
+	case use_bundled_font:
+		// Single-file font: open the same file for every slot and rely on
+		// the style-flag fixup below to bold/italic.
+		regular_paths = []string{MARKDOWN_BUNDLED_FONT_PATH,                          MONOSPACE_FALLBACK_PATH}
+		bold_paths    = []string{MARKDOWN_BUNDLED_FONT_PATH,                          MONOSPACE_FALLBACK_PATH}
+		italic_paths  = []string{MARKDOWN_BUNDLED_FONT_PATH,                          MONOSPACE_FALLBACK_PATH}
+	case len(chosen_regular_path) > 0:
+		regular_paths = []string{chosen_regular_path,                                 MONOSPACE_FALLBACK_PATH}
+		bold_paths    = []string{chosen_bold_path,    chosen_regular_path,            MONOSPACE_FALLBACK_PATH}
+		italic_paths  = []string{chosen_italic_path,  chosen_regular_path,            MONOSPACE_FALLBACK_PATH}
+	case:
 		// No proportional font found at all — fall back to the bundled
 		// monospace font with style flags so we still get a usable preview.
 		regular_paths = []string{MONOSPACE_FALLBACK_PATH}
@@ -237,18 +266,17 @@ markdown_fonts_ensure_loaded :: proc(fonts: ^MarkdownFonts) {
 	fonts.body_italic = markdown_open_font_from_paths(italic_paths,  body_size)
 
 	// When the bold/italic file didn't actually resolve to a true variant
-	// (i.e. we fell back to the regular path), force the style flags so the
-	// glyphs still render the way the user expects.
-	if fonts.body_bold != nil && len(chosen_bold_path) == 0 {
-		ttf.SetFontStyle(fonts.body_bold, {.BOLD})
-	}
-	if fonts.body_italic != nil && len(chosen_italic_path) == 0 {
-		ttf.SetFontStyle(fonts.body_italic, {.ITALIC})
-	}
+	// (single-file md.ttf, or system probe found only a regular face),
+	// force the style flags so the glyphs still render the way the user
+	// expects.
+	bold_is_synthetic   := use_bundled_font || len(chosen_bold_path)   == 0
+	italic_is_synthetic := use_bundled_font || len(chosen_italic_path) == 0
+	if fonts.body_bold   != nil && bold_is_synthetic   { ttf.SetFontStyle(fonts.body_bold,   {.BOLD})   }
+	if fonts.body_italic != nil && italic_is_synthetic { ttf.SetFontStyle(fonts.body_italic, {.ITALIC}) }
 
 	for level_index in 0..<6 {
 		fonts.heading[level_index] = markdown_open_font_from_paths(bold_paths, MARKDOWN_HEADING_SIZES[level_index] * scale)
-		if fonts.heading[level_index] != nil && len(chosen_bold_path) == 0 {
+		if fonts.heading[level_index] != nil && bold_is_synthetic {
 			ttf.SetFontStyle(fonts.heading[level_index], {.BOLD})
 		}
 	}

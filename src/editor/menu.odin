@@ -212,8 +212,14 @@ MenuBarState :: struct {
 //   * A dropdown is open right now (a click on a title with no Alt at all
 //     is enough to surface the bar; releasing Alt while a menu is open
 //     also keeps it visible).
+//
+// On macOS the in-app menu is always hidden — the native NSMenu installed
+// by `editor_install_native_menu` (see `menu_macos.odin`) is the only menu
+// surface. Suppressing the in-app strip here also short-circuits the Alt
+// poll and event handlers, since their only purpose is to drive the strip.
 @(private)
 menu_bar_is_visible :: proc(menu_bar: ^MenuBarState) -> bool {
+	when ODIN_OS == .Darwin { return false }
 	if menu_bar.open_menu_index >= 0 { return true }
 	return menu_bar.alt_held && !menu_bar.alt_press_consumed
 }
@@ -236,6 +242,7 @@ menu_bar_init :: proc(menu_bar: ^MenuBarState) {
 //                   composed rule in `menu_bar_is_visible`.
 @(private)
 menu_bar_poll_alt_state :: proc(editor: ^Editor) {
+	when ODIN_OS == .Darwin { return }
 	current_modifiers := sdl3.GetModState()
 	alt_currently_held := .LALT in current_modifiers || .RALT in current_modifiers
 	if alt_currently_held != editor.menu_bar.alt_held {
@@ -316,6 +323,8 @@ menu_bar_open :: proc(editor: ^Editor, menu_index: int) {
 // proc reports false and the caller proceeds normally.
 @(private)
 menu_bar_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) -> bool {
+	when ODIN_OS == .Darwin { return false }
+
 	menu_bar := &editor.menu_bar
 
 	#partial switch event.type {

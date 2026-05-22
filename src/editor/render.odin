@@ -285,6 +285,12 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 	sdl3.SetRenderDrawColorFloat(renderer, editor.status_bar_background.r, editor.status_bar_background.g, editor.status_bar_background.b, editor.status_bar_background.a)
 	sdl3.RenderFillRect(renderer, &sdl3.FRect{0, f32(status_bar_y), f32(window_width), f32(status_bar_height)})
 
+	// FPS readout for debug builds — prefixed onto whatever per-pane text
+	// the active content produces below. Release builds get an empty prefix
+	// so the status line stays identical to what users see in production.
+	fps_prefix: string
+	when ODIN_DEBUG { fps_prefix = fmt.tprintf("[%d fps] ", editor.fps_last_value) }
+
 	status_text: string
 	#partial switch &content_value in editor_active_pane(editor).content {
 	case EditorPane:
@@ -308,7 +314,8 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 			lsp_indicator = fmt.tprintf("LSP: %dE %dW | ", error_count, warning_count)
 		}
 
-		status_text = fmt.tprintf("%s%s%s%sLn %d, Col %d | %d lines | %d bytes  %s",
+		status_text = fmt.tprintf("%s%s%s%s%sLn %d, Col %d | %d lines | %d bytes  %s",
+			fps_prefix,
 			diff_tag,
 			pane_tag,
 			dirty_indicator,
@@ -319,6 +326,11 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 			document.document_length(&content_value.document),
 			hint_text,
 		)
+	}
+	// Fall back to just the FPS prefix when the active pane didn't produce a
+	// status line (terminal panes) so the readout is still visible.
+	when ODIN_DEBUG {
+		if len(status_text) == 0 { status_text = fps_prefix }
 	}
 	if len(status_text) > 0 {
 		render_string(editor, renderer, status_text, editor.padding_x, status_bar_y + 2, editor.status_bar_foreground)

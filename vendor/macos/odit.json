@@ -1,4 +1,7 @@
 {
+    "dap": {
+      "lldb": { "command": ["/Applications/Xcode.app/Contents/Developer/usr/bin/lldb-dap"] }
+    },
     "lsp": {
       "odin": {
         "command": ["ols"]

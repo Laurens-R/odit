@@ -1,6 +1,9 @@
 package main
 
+import "core:bytes"
 import "core:fmt"
+import "core:image"
+import "core:image/png"
 import "core:time"
 import "vendor:sdl3"
 import "vendor:sdl3/ttf"
@@ -36,6 +39,11 @@ init_sdl :: proc() -> bool {
 		return false
 	}
 
+	// Window / taskbar icon. Sourced from `vendor/icon/icon.bmp` (staged
+	// to `<exe_dir>/icon/icon.bmp` by the build scripts). Best-effort:
+	// failure here is a missing-file cosmetic glitch, not a startup blocker.
+	try_apply_window_icon()
+
 	text_engine = ttf.CreateRendererTextEngine(renderer)
 	if text_engine == nil {
 		sdl3.Log("Couldn't create text engine.")
@@ -50,6 +58,51 @@ init_sdl :: proc() -> bool {
 	}
 
 	return true
+}
+
+// Load the bundled PNG icon (if present) and hand it to SDL. Decoded with
+// core:image/png so we don't have to ship SDL_image as a runtime dep —
+// PNG is the only image format we care about here, and core handles it
+// fine. Silently skipped when the file is absent; the OS shows its
+// generic placeholder.
+try_apply_window_icon :: proc() {
+	// `icon/icon.png` is the build-staged location (`vendor/icon/icon.png`
+	// → `out/<target>/<config>/icon/icon.png`); `icon.png` is checked as a
+	// convenience for users who drop the file next to the binary directly.
+	candidate_paths := []string{
+		"icon/icon.png",
+		"icon.png",
+	}
+	for path in candidate_paths {
+		// `alpha_add_if_missing` guarantees a 4-channel RGBA8 result so
+		// the surface format below always matches; PNGs without an alpha
+		// channel get an opaque one synthesised.
+		decoded_image, decode_error := png.load_from_file(path, image.Options{.alpha_add_if_missing})
+		if decode_error != nil || decoded_image == nil { continue }
+		defer image.destroy(decoded_image)
+
+		if decoded_image.channels != 4 || decoded_image.depth != 8 { continue }
+
+		pixel_bytes := bytes.buffer_to_bytes(&decoded_image.pixels)
+		// SDL.RGBA32 is the memory-order alias (handles endianness for us)
+		// so the byte layout from core:image/png lines up regardless of
+		// host platform.
+		icon_surface := sdl3.CreateSurfaceFrom(
+			i32(decoded_image.width),
+			i32(decoded_image.height),
+			.RGBA32,
+			raw_data(pixel_bytes),
+			i32(decoded_image.width * 4),
+		)
+		if icon_surface == nil { continue }
+
+		_ = sdl3.SetWindowIcon(window, icon_surface)
+		// SetWindowIcon copies the pixel data into the window's own
+		// storage, so we can drop the surface (and the pixel buffer via
+		// the deferred image.destroy) immediately.
+		sdl3.DestroySurface(icon_surface)
+		return
+	}
 }
 
 try_load_font :: proc() -> ^ttf.Font {
@@ -163,6 +216,10 @@ main :: proc() {
 
 			sdl3.RenderPresent(renderer)
 			editor.editor_mark_clean(&editor_state)
+			// Status-bar FPS readout. Hooked here (not in editor_update) so it
+			// measures actual presented frames rather than loop iterations —
+			// otherwise the number would just track main.odin's sleep budget.
+			editor.editor_record_frame_presented(&editor_state, delta_time)
 		}
 
 		// Release every per-frame temp_allocator alloc — line displays,
@@ -172,7 +229,6 @@ main :: proc() {
 		// spilling into the heap as a permanent leak.
 		free_all(context.temp_allocator)
 
-		// Cap at ~60fps to avoid burning CPU
-		sdl3.Delay(16)
+		sdl3.Delay(1)
 	}
 }
