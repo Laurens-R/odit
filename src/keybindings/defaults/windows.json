@@ -1,0 +1,56 @@
+{
+  "// schema": "Each entry binds a key + modifier combination to an Action enum value (see keybindings.odin). Modifier names: Ctrl, Shift, Alt, Gui (Win key). Key names: letters A-Z, digits 0-9, F1-F24, or one of Space/Tab/Return/Escape/Backspace/Delete/Left/Right/Up/Down/Home/End/PageUp/PageDown. Renaming an Action is a breaking change for this file.",
+
+  "bindings": [
+    { "key": "Q",   "modifiers": ["Ctrl"],            "action": "Quit" },
+
+    { "key": "F1",  "modifiers": [],                  "action": "Help" },
+    { "key": "F2",  "modifiers": [],                  "action": "FileBrowser" },
+    { "key": "F3",  "modifiers": [],                  "action": "GitHistory" },
+    { "key": "F4",  "modifiers": [],                  "action": "OpenDocs" },
+    { "key": "F5",  "modifiers": [],                  "action": "MarkdownPreview" },
+    { "key": "F6",  "modifiers": [],                  "action": "Symbols" },
+    { "key": "F7",  "modifiers": [],                  "action": "Tasks" },
+    { "key": "F7",  "modifiers": ["Shift"],           "action": "ToggleDebugPanel" },
+    { "key": "F8",  "modifiers": [],                  "action": "ToggleDiff" },
+    { "key": "F9",  "modifiers": [],                  "action": "ToggleTerminal" },
+    { "key": "F9",  "modifiers": ["Ctrl"],            "action": "NewTerminal" },
+    { "key": "F9",  "modifiers": ["Ctrl","Shift"],    "action": "PickTerminal" },
+    { "key": "F10", "modifiers": [],                  "action": "StepOver" },
+    { "key": "F11", "modifiers": [],                  "action": "StepIn" },
+
+    { "key": "S",   "modifiers": ["Ctrl"],            "action": "SaveFile" },
+    { "key": "S",   "modifiers": ["Ctrl","Shift"],    "action": "SaveFileAs" },
+    { "key": "F4",  "modifiers": ["Ctrl"],            "action": "CloseFile" },
+
+    { "key": "F",   "modifiers": ["Ctrl"],            "action": "FindToggle" },
+    { "key": "F",   "modifiers": ["Ctrl","Shift"],    "action": "FindInFiles" },
+    { "key": "R",   "modifiers": ["Ctrl"],            "action": "ReplaceToggle" },
+    { "key": "R",   "modifiers": ["Ctrl","Shift"],    "action": "ReplaceInFiles" },
+
+    { "key": "Tab",   "modifiers": ["Ctrl"],          "action": "SwapPanes" },
+    { "key": "Left",  "modifiers": ["Ctrl"],          "action": "FocusLeftPane" },
+    { "key": "Right", "modifiers": ["Ctrl"],          "action": "FocusRightPane" },
+    { "key": "Left",  "modifiers": ["Ctrl","Shift"],  "action": "MoveToLeftPane" },
+    { "key": "Right", "modifiers": ["Ctrl","Shift"],  "action": "MoveToRightPane" },
+    { "key": "W",   "modifiers": ["Ctrl"],            "action": "ToggleWrap" },
+
+    { "key": "K",     "modifiers": ["Ctrl"],          "action": "Hover" },
+    { "key": "Space", "modifiers": ["Ctrl"],          "action": "TriggerCompletion" },
+
+    { "key": "Z",   "modifiers": ["Ctrl"],            "action": "Undo" },
+    { "key": "Z",   "modifiers": ["Ctrl","Shift"],    "action": "Redo" },
+    { "key": "Y",   "modifiers": ["Ctrl"],            "action": "Redo" },
+    { "key": "A",   "modifiers": ["Ctrl"],            "action": "SelectAll" },
+    { "key": "C",   "modifiers": ["Ctrl"],            "action": "Copy" },
+    { "key": "V",   "modifiers": ["Ctrl"],            "action": "Paste" },
+
+    { "key": "C",   "modifiers": ["Ctrl","Shift"],    "action": "TerminalCopy" },
+    { "key": "V",   "modifiers": ["Ctrl","Shift"],    "action": "TerminalPaste" },
+
+    { "key": "R",   "modifiers": ["Ctrl"],            "action": "BrowseRename" },
+    { "key": "N",   "modifiers": ["Ctrl"],            "action": "BrowseNewFile" },
+    { "key": "Z",   "modifiers": ["Ctrl"],            "action": "BrowseUndo" },
+    { "key": "P",   "modifiers": ["Ctrl"],            "action": "BrowseSetProjectRoot" }
+  ]
+}

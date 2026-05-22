@@ -1,1 +1,16 @@
-{}
+{
+  "$schema": "https://raw.githubusercontent.com/DanielGavin/ols/master/misc/ols.schema.json",
+  "odin_command": "/Users/laurens/Projects/odin/odin",
+  "enable_format": true,
+  "enable_hover": true,
+  "enable_snippets": true,
+  "enable_semantic_tokens": true,
+  "enable_document_symbols": true,
+  "enable_inlay_hints": true,
+  "enable_procedure_context": true,
+  "enable_procedure_snippet": true,
+  "enable_fake_methods": true,
+  "enable_auto_import": true,
+  "enable_references": true,
+  "enable_rename": true
+}

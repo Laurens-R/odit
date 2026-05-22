@@ -20,6 +20,26 @@
 			"cwd": "${workspaceFolder}\\out\\windows\\release",
 			"console": "integratedTerminal",
 			"preLaunchTask": "Build: Windows (release)"
+		},
+		{
+			"name": "Debug odit (macOS)",
+			"type": "lldb",
+			"request": "launch",
+			"program": "${workspaceFolder}/out/macos/debug/odit",
+			"args": [],
+			"cwd": "${workspaceFolder}/out/macos/debug",
+			"console": "integratedTerminal",
+			"preLaunchTask": "Build: macOS (debug)"
+		},
+		{
+			"name": "Run odit (macOS release)",
+			"type": "lldb",
+			"request": "launch",
+			"program": "${workspaceFolder}/out/macos/release/odit",
+			"args": [],
+			"cwd": "${workspaceFolder}/out/macos/release",
+			"console": "integratedTerminal",
+			"preLaunchTask": "Build: macOS (release)"
 		}
 	]
 }

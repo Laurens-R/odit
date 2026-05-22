@@ -6,6 +6,7 @@ import "vendor:sdl3/ttf"
 
 import "../dap"
 import "../document"
+import "../keybindings"
 import "../lsp"
 import "../syntax"
 import "../terminal"
@@ -163,6 +164,12 @@ Editor :: struct {
 	panes:             [2]Pane,
 	active_pane_index: int,  // 0 or 1
 	split_active:      bool, // when false, only panes[0] is rendered (full width)
+
+	// Active keybinding table. Populated from the per-platform default JSON
+	// (`src/keybindings/defaults/<os>.json`) at startup; consulted by
+	// `editor_handle_event` and a couple of modal handlers to map raw
+	// (key, modifier) chords to named `keybindings.Action` values.
+	keybindings: keybindings.Bindings,
 
 	// Split divider position when `split_active`. Stored as a fraction of
 	// the full window width (left pane share), so the layout adapts to
@@ -445,6 +452,16 @@ editor_init :: proc(editor: ^Editor, text_engine: ^ttf.TextEngine, font: ^ttf.Fo
 	editor.split_active = false
 	editor.split_ratio  = 0.5 // default 50/50 when the split is opened
 
+	// Load shortcut bindings from the platform-appropriate embedded JSON.
+	// Failure means the embedded defaults are malformed (only happens
+	// during dev when editing the JSON) — fail loud rather than silently
+	// running with an empty table.
+	if !keybindings.bindings_load_defaults(&editor.keybindings) {
+		// Empty table is the only safe fallback — every shortcut will resolve
+		// to `.None`, callers will fall through to default key handling.
+		editor.keybindings.entries = make([dynamic]keybindings.Binding)
+	}
+
 	// Cache the two cursors we ever swap between. `EW_RESIZE` is the
 	// closest system cursor to a "grab the column divider" indicator; SDL3
 	// doesn't expose a dedicated grab/grabbing shape, and on Windows it
@@ -587,6 +604,7 @@ editor_destroy :: proc(editor: ^Editor) {
 	if editor.cursor_resize_ew != nil { sdl3.DestroyCursor(editor.cursor_resize_ew) }
 	if editor.cursor_resize_ns != nil { sdl3.DestroyCursor(editor.cursor_resize_ns) }
 	ui.text_cache_destroy(&editor.text_cache)
+	keybindings.bindings_destroy(&editor.keybindings)
 }
 
 // Per-content cleanup. Add cases here as new content types are introduced.

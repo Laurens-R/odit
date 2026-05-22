@@ -6,6 +6,7 @@ import "vendor:sdl3"
 import "vendor:sdl3/ttf"
 
 import "editor"
+import "keybindings"
 
 window:        ^sdl3.Window
 renderer:      ^sdl3.Renderer
@@ -117,9 +118,12 @@ main :: proc() {
 			case .QUIT:
 				is_running = false
 			case .KEY_DOWN:
-				key_modifiers := sdl_event.key.mod
-				ctrl_held := .LCTRL in key_modifiers || .RCTRL in key_modifiers
-				if ctrl_held && sdl_event.key.key == sdl3.K_Q {
+				// Quit is the only shortcut main.odin handles directly — the
+				// editor can't service it itself because that would leave the
+				// outer event loop running with a torn-down editor. Looking it
+				// up through the same keybindings table keeps the JSON the
+				// single source of truth.
+				if keybindings.lookup(&editor_state.keybindings, sdl_event.key.key, sdl_event.key.mod) == .Quit {
 					is_running = false
 				} else {
 					editor.editor_handle_event(&editor_state, &sdl_event)

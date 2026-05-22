@@ -5,6 +5,7 @@ import "vendor:sdl3/ttf"
 
 import "../dap"
 import "../document"
+import "../keybindings"
 import "../terminal"
 import "../ui"
 
@@ -169,113 +170,15 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 		}
 
 	case .KEY_DOWN:
-		// Global hotkeys checked before pane dispatch.
-		pressed_key := event.key.key
+		// Global hotkeys checked before pane dispatch. Chord→action mapping
+		// is driven by the keybindings table loaded at startup from
+		// `src/keybindings/defaults/<os>.json` — edit that file to remap
+		// shortcuts. Escape-based modal dismissals and the completion-popup
+		// passthrough below stay raw-key so the JSON can't accidentally
+		// rebind them out of existence.
+		pressed_key   := event.key.key
 		key_modifiers := event.key.mod
-		ctrl_held := .LCTRL in key_modifiers || .RCTRL in key_modifiers
 
-		if pressed_key == sdl3.K_F1 {
-			help_toggle(editor)
-			return
-		}
-		if pressed_key == sdl3.K_F2 {
-			browse_open(editor)
-			return
-		}
-		if pressed_key == sdl3.K_F3 {
-			git_history_dialog_open(editor)
-			return
-		}
-		if pressed_key == sdl3.K_F4 && !ctrl_held {
-			open_docs_dialog_open(editor)
-			return
-		}
-		if pressed_key == sdl3.K_F5 {
-			markdown_preview_open(editor)
-			return
-		}
-		if pressed_key == sdl3.K_F6 {
-			symbols_dialog_open(editor)
-			return
-		}
-		if pressed_key == sdl3.K_F7 {
-			// Shift+F7 toggles the debug panel; plain F7 opens the Tasks
-			// dialog over the project's build / debug profiles.
-			shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
-			if shift_held {
-				debug_panel_toggle(editor)
-			} else {
-				tasks_dialog_open(editor)
-			}
-			return
-		}
-		if pressed_key == sdl3.K_F8 {
-			diff_toggle(editor)
-			return
-		}
-		if pressed_key == sdl3.K_F10 {
-			// Step over the next source line. No-op when no active session,
-			// so it's safe to mash even when no debugger is attached.
-			dap.client_step_over(editor.active_dap_client)
-			return
-		}
-		if pressed_key == sdl3.K_F11 {
-			dap.client_step_in(editor.active_dap_client)
-			return
-		}
-		if pressed_key == sdl3.K_F9 {
-			shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
-			switch {
-			case ctrl_held && shift_held:
-				// Ctrl+Shift+F9 — picker over all open terminal sessions.
-				terminal_picker_open(editor)
-			case ctrl_held:
-				// Ctrl+F9 — always spawn a new session and activate it.
-				editor_terminal_create_new(editor)
-			case:
-				// Plain F9 — show/hide toggle (creates first session if none).
-				editor_toggle_terminal(editor)
-			}
-			return
-		}
-		if ctrl_held && pressed_key == sdl3.K_TAB {
-			find_close(editor)
-			replace_close(editor, false)
-			editor_focus_other_pane(editor)
-			return
-		}
-		// Pane navigation:
-		//   Ctrl+Left/Right       → focus the left / right pane.
-		//   Ctrl+Shift+Left/Right → move the active pane's content over.
-		// Both override the word-by-word cursor movement that would
-		// otherwise be conventional on those modifier combos — the user
-		// explicitly asked for the pane-focus binding.
-		if ctrl_held && pressed_key == sdl3.K_LEFT {
-			shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
-			find_close(editor)
-			replace_close(editor, false)
-			if shift_held { editor_move_active_to_pane(editor, 0) } else { editor_focus_pane(editor, 0) }
-			return
-		}
-		if ctrl_held && pressed_key == sdl3.K_RIGHT {
-			shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
-			find_close(editor)
-			replace_close(editor, false)
-			if shift_held { editor_move_active_to_pane(editor, 1) } else { editor_focus_pane(editor, 1) }
-			return
-		}
-		if ctrl_held && pressed_key == sdl3.K_W {
-			editor_toggle_wrap(editor)
-			return
-		}
-		if ctrl_held && pressed_key == sdl3.K_K {
-			hover_popup_request_at_cursor(editor)
-			return
-		}
-		if ctrl_held && pressed_key == sdl3.K_SPACE {
-			completion_popup_trigger_at_cursor(editor)
-			return
-		}
 		if pressed_key == sdl3.K_ESCAPE && editor.hover_popup.is_visible {
 			hover_popup_close(editor)
 			return
@@ -285,68 +188,13 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 			return
 		}
 
+		if editor_dispatch_shortcut(editor, pressed_key, key_modifiers) { return }
+
 		// Completion popup intercepts navigation + Enter/Tab while open. It
 		// passes text-input events through so the user can keep typing —
 		// the filter is updated via the consume_text hook below.
 		if editor.completion_popup.is_visible {
 			if completion_popup_handle_key(editor, event) { return }
-		}
-		if ctrl_held && pressed_key == sdl3.K_S {
-			shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
-			if shift_held {
-				editor_save_as_active_file(editor)
-			} else {
-				editor_save_active_file(editor)
-			}
-			return
-		}
-		if ctrl_held && pressed_key == sdl3.K_F4 {
-			// Ctrl+F4 closes whatever is in the active pane. Terminal panes
-			// kill the active session; the output pane is intentionally
-			// off-limits here — it's grouped with the right-side debug
-			// panel and the only way to dismiss the pair is Shift+F7, so
-			// the two halves can't drift out of sync. Everything else
-			// falls back to the regular close-active-file flow.
-			if _, is_terminal_pane := editor.panes[editor.active_pane_index].content.(TerminalPane); is_terminal_pane {
-				editor_terminal_destroy_active(editor)
-			} else if _, is_output_pane := editor.panes[editor.active_pane_index].content.(OutputPane); is_output_pane {
-				// no-op: use Shift+F7 to toggle the debug UI as a unit.
-			} else {
-				editor_close_active_file(editor)
-			}
-			return
-		}
-		if ctrl_held && pressed_key == sdl3.K_F {
-			shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
-			if shift_held {
-				// Ctrl+Shift+F opens the find-in-files dialog.
-				find_in_files_open(editor)
-				return
-			}
-			// Toggle: a second Ctrl+F closes the bar. Otherwise open on the
-			// active pane (no-op when the active pane isn't an editor).
-			if find_active(editor) {
-				find_close(editor)
-			} else {
-				find_open(editor)
-			}
-			return
-		}
-		if ctrl_held && pressed_key == sdl3.K_R {
-			shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
-			if shift_held {
-				// Ctrl+Shift+R opens the replace-in-files dialog (mirrors the
-				// Ctrl+Shift+F find-in-files dialog).
-				replace_in_files_open(editor)
-				return
-			}
-			// Toggle replace bar. Cancels any in-progress preview if already open.
-			if replace_active(editor) {
-				replace_close(editor, false)
-			} else {
-				replace_open(editor)
-			}
-			return
 		}
 
 		// Route remaining keys to the active pane.
@@ -355,26 +203,35 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 			editor_handle_key(editor, event)
 		case TerminalPane:
 			if content_value.terminal != nil {
-				shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
-				// Ctrl+Shift+C / Ctrl+Shift+V are the terminal's copy/paste —
-				// plain Ctrl+C goes through to the shell as SIGINT, so we
-				// can't shadow it. Page Up/Down with no modifiers scroll
-				// scrollback rather than sending PgUp/PgDn to the shell.
-				if ctrl_held && shift_held && pressed_key == sdl3.K_C {
+				// TerminalCopy / TerminalPaste are configurable (defaults to
+				// Ctrl+Shift+C / Ctrl+Shift+V) — plain Ctrl+C has to keep
+				// going through to the shell as SIGINT, so we can't shadow
+				// it. Page Up/Down with no modifiers scroll scrollback rather
+				// than sending PgUp/PgDn to the shell; those stay raw-key
+				// since they're terminal-specific scroll affordances, not
+				// general shortcuts.
+				#partial switch keybindings.lookup(&editor.keybindings, pressed_key, key_modifiers, .Global) {
+				case .TerminalCopy:
 					terminal.terminal_copy_selection_to_clipboard(content_value.terminal)
 					return
-				}
-				if ctrl_held && shift_held && pressed_key == sdl3.K_V {
+				case .TerminalPaste:
 					terminal.terminal_paste_from_clipboard(content_value.terminal)
 					return
 				}
-				if !ctrl_held && !shift_held && pressed_key == sdl3.K_PAGEUP {
+				// "Bare" = no Ctrl/Shift/Alt/Gui. Lock keys (Num/Caps/Scroll)
+				// don't change whether Page Up should scroll scrollback.
+				ctrl_held  := .LCTRL  in key_modifiers || .RCTRL  in key_modifiers
+				shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
+				alt_held   := .LALT   in key_modifiers || .RALT   in key_modifiers
+				gui_held   := .LGUI   in key_modifiers || .RGUI   in key_modifiers
+				bare_keypress := !ctrl_held && !shift_held && !alt_held && !gui_held
+				if bare_keypress && pressed_key == sdl3.K_PAGEUP {
 					if terminal.terminal_scroll(content_value.terminal, i32(content_value.terminal.screen.rows - 1)) {
 						editor_mark_dirty(editor)
 					}
 					return
 				}
-				if !ctrl_held && !shift_held && pressed_key == sdl3.K_PAGEDOWN {
+				if bare_keypress && pressed_key == sdl3.K_PAGEDOWN {
 					if terminal.terminal_scroll(content_value.terminal, -i32(content_value.terminal.screen.rows - 1)) {
 						editor_mark_dirty(editor)
 					}
@@ -443,6 +300,86 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 	}
 }
 
+// Resolve `(key, modifiers)` against the active keybindings table and run
+// the matching action. Returns true when an action fired (caller should
+// stop processing the event); false when the chord wasn't bound to anything
+// the editor cares about at the global scope. Modal-internal handlers
+// (browse, find, …) do their own scoped lookups elsewhere.
+//
+// Some actions still consult raw modifier state to decide between
+// sub-behaviors (e.g. `CloseFile` cleans up a terminal pane instead of
+// closing a document) — that pane-aware branching used to live inline in
+// the if-chain and stays here so we don't have to invent per-content
+// Action variants just to express it.
+@(private="file")
+editor_dispatch_shortcut :: proc(editor: ^Editor, pressed_key: sdl3.Keycode, key_modifiers: sdl3.Keymod) -> bool {
+	action := keybindings.lookup(&editor.keybindings, pressed_key, key_modifiers, .Global)
+
+	#partial switch action {
+	case .Help:               help_toggle(editor)
+	case .FileBrowser:        browse_open(editor)
+	case .GitHistory:         git_history_dialog_open(editor)
+	case .OpenDocs:           open_docs_dialog_open(editor)
+	case .MarkdownPreview:    markdown_preview_open(editor)
+	case .Symbols:            symbols_dialog_open(editor)
+	case .Tasks:              tasks_dialog_open(editor)
+	case .ToggleDebugPanel:   debug_panel_toggle(editor)
+	case .ToggleDiff:         diff_toggle(editor)
+	case .StepOver:           dap.client_step_over(editor.active_dap_client)
+	case .StepIn:             dap.client_step_in(editor.active_dap_client)
+	case .ToggleTerminal:     editor_toggle_terminal(editor)
+	case .NewTerminal:        editor_terminal_create_new(editor)
+	case .PickTerminal:       terminal_picker_open(editor)
+	case .SwapPanes:
+		find_close(editor)
+		replace_close(editor, false)
+		editor_focus_other_pane(editor)
+	case .FocusLeftPane:
+		find_close(editor); replace_close(editor, false); editor_focus_pane(editor, 0)
+	case .FocusRightPane:
+		find_close(editor); replace_close(editor, false); editor_focus_pane(editor, 1)
+	case .MoveToLeftPane:
+		find_close(editor); replace_close(editor, false); editor_move_active_to_pane(editor, 0)
+	case .MoveToRightPane:
+		find_close(editor); replace_close(editor, false); editor_move_active_to_pane(editor, 1)
+	case .ToggleWrap:         editor_toggle_wrap(editor)
+	case .Hover:              hover_popup_request_at_cursor(editor)
+	case .TriggerCompletion:  completion_popup_trigger_at_cursor(editor)
+	case .SaveFile:           editor_save_active_file(editor)
+	case .SaveFileAs:         editor_save_as_active_file(editor)
+	case .CloseFile:
+		// Closes whatever is in the active pane. Terminal panes kill the
+		// active session; the output pane is intentionally off-limits — it's
+		// grouped with the right-side debug panel and the only way to
+		// dismiss the pair is the ToggleDebugPanel shortcut, so the two
+		// halves can't drift out of sync.
+		if _, is_terminal_pane := editor.panes[editor.active_pane_index].content.(TerminalPane); is_terminal_pane {
+			editor_terminal_destroy_active(editor)
+		} else if _, is_output_pane := editor.panes[editor.active_pane_index].content.(OutputPane); is_output_pane {
+			return true // no-op, but still consume the chord
+		} else {
+			editor_close_active_file(editor)
+		}
+	case .FindToggle:
+		// Toggle: a second press closes the bar. No-op when the active pane
+		// isn't an editor.
+		if find_active(editor) { find_close(editor) } else { find_open(editor) }
+	case .FindInFiles:        find_in_files_open(editor)
+	case .ReplaceToggle:
+		if replace_active(editor) { replace_close(editor, false) } else { replace_open(editor) }
+	case .ReplaceInFiles:     replace_in_files_open(editor)
+	case .None:
+		return false
+	case:
+		// An action that the global scope doesn't service (e.g. .Quit is
+		// handled by `main.odin`; per-pane actions like .Copy/.Paste fall
+		// through to `editor_handle_key`). Treat as unhandled so the caller
+		// can keep going.
+		return false
+	}
+	return true
+}
+
 @(private="file")
 editor_handle_key :: proc(editor: ^Editor, event: ^sdl3.Event) {
 	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return }
@@ -460,27 +397,30 @@ editor_handle_key :: proc(editor: ^Editor, event: ^sdl3.Event) {
 	// Diff mode is read-only — block edits/undo/redo/paste.
 	is_diff_mode := editor.diff_state.active
 
-	if ctrl_held {
-		switch pressed_key {
-		case sdl3.K_Z:
-			if is_diff_mode { return }
-			if shift_held { editor_redo_active(editor) } else { editor_undo_active(editor) }
-			return
-		case sdl3.K_Y:
-			if is_diff_mode { return }
-			editor_redo_active(editor)
-			return
-		case sdl3.K_A:
-			// Select all (future)
-			return
-		case sdl3.K_C:
-			clipboard_copy(editor)
-			return
-		case sdl3.K_V:
-			if is_diff_mode { return }
-			clipboard_paste(editor)
-			return
-		}
+	// Edit shortcuts inside an editor pane (undo/redo/copy/paste/select-all)
+	// route through the same keybindings table the global handler uses, so
+	// rebinding Ctrl+Z in `defaults/<os>.json` Just Works here too. Every
+	// other action either fired at the global scope or doesn't apply here;
+	// `#partial switch` lets us list only the ones we care about.
+	#partial switch keybindings.lookup(&editor.keybindings, pressed_key, key_modifiers, .Global) {
+	case .Undo:
+		if is_diff_mode { return }
+		editor_undo_active(editor)
+		return
+	case .Redo:
+		if is_diff_mode { return }
+		editor_redo_active(editor)
+		return
+	case .Copy:
+		clipboard_copy(editor)
+		return
+	case .Paste:
+		if is_diff_mode { return }
+		clipboard_paste(editor)
+		return
+	case .SelectAll:
+		// Select all (future)
+		return
 	}
 
 	switch pressed_key {

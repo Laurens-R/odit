@@ -238,6 +238,32 @@
 			"problemMatcher": []
 		},
 		{
+			"label": "Run: macOS (debug)",
+			"type": "shell",
+			"osx": {
+				"command": "${workspaceFolder}/out/macos/debug/odit"
+			},
+			"linux": {
+				"command": "${workspaceFolder}/out/macos/debug/odit"
+			},
+			"options": { "cwd": "${workspaceFolder}/out/macos/debug" },
+			"dependsOn": ["Build: macOS (debug)"],
+			"problemMatcher": []
+		},
+		{
+			"label": "Run: macOS (release)",
+			"type": "shell",
+			"osx": {
+				"command": "${workspaceFolder}/out/macos/release/odit"
+			},
+			"linux": {
+				"command": "${workspaceFolder}/out/macos/release/odit"
+			},
+			"options": { "cwd": "${workspaceFolder}/out/macos/release" },
+			"dependsOn": ["Build: macOS (release)"],
+			"problemMatcher": []
+		},
+		{
 			"label": "Clean",
 			"type": "shell",
 			"windows": {

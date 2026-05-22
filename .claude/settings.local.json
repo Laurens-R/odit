@@ -26,7 +26,19 @@
       "Bash(ols --version)",
       "PowerShell(odin check *)",
       "Bash(awk 'NR==147 {for\\(i=1;i<=length\\($0\\);i++\\) printf \"%d \", $i==\" \"?32:9; print \"\"}' /d/odit/src/editor/mouse.odin)",
-      "Bash(grep -v \"@\\(private\\)\\\\s*$\")"
+      "Bash(grep -v \"@\\(private\\)\\\\s*$\")",
+      "Bash(bash scripts/build.sh macos debug)",
+      "Bash(ls /Users/laurens/Projects/odin/odin 2>&1; which odin; echo \"PATH=$PATH\")",
+      "Read(//Users/laurens/Projects/odin/**)",
+      "Bash(cat /Users/laurens/Projects/odit/.vscode/tasks.json 2>&1 | head -40; echo ---; ls ~/.zshenv ~/.zprofile ~/.zshrc 2>&1)",
+      "Read(//Users/laurens/**)",
+      "Bash(ls /Users/laurens/Projects/odit/odit.json ~/.config/odit/settings.json 2>&1; echo ---; ls /Applications/Xcode.app/Contents/Developer/usr/bin/lldb-dap /Library/Developer/CommandLineTools/usr/bin/lldb-dap 2>&1)",
+      "Read(//Applications/Xcode.app/Contents/Developer/usr/bin/**)",
+      "Bash(mkdir -p ~/.config/odit)",
+      "Bash(/Users/laurens/Projects/odit/vendor/macos/lsp/ols --version)"
+    ],
+    "additionalDirectories": [
+      "/Users/laurens/.config/odit"
     ]
   }
 }

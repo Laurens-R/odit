@@ -1,3 +1,4 @@
 *.exe
 *.pdb
 out/
+*.DS_Store*

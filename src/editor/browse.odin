@@ -7,6 +7,7 @@ import "core:slice"
 import "core:strings"
 import "vendor:sdl3"
 
+import "../keybindings"
 import "../ui"
 
 @(private)
@@ -459,16 +460,17 @@ browse_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 	case .KEY_DOWN:
 		pressed_key   := event.key.key
 		key_modifiers := event.key.mod
-		ctrl_held := .LCTRL in key_modifiers || .RCTRL in key_modifiers
 
-		// Ctrl-prefixed actions: rename, new file, undo last fs change, set project root.
-		if ctrl_held {
-			switch pressed_key {
-			case sdl3.K_R: browse_prompt_open_rename(editor); return
-			case sdl3.K_N: browse_prompt_open_new_file(editor); return
-			case sdl3.K_Z: browse_undo(editor); return
-			case sdl3.K_P: browse_set_project_root_to_current(editor); return
-			}
+		// Browse-scoped shortcuts: rename, new file, undo last fs change,
+		// set project root. Looked up with `.Browse` so they can share
+		// chords (Ctrl+R, Ctrl+Z, Ctrl+P) with global actions without
+		// fighting them — `editor_handle_event` already short-circuits to
+		// us while the browser is open, so the global bindings can't fire.
+		#partial switch keybindings.lookup(&editor.keybindings, pressed_key, key_modifiers, .Browse) {
+		case .BrowseRename:           browse_prompt_open_rename(editor); return
+		case .BrowseNewFile:          browse_prompt_open_new_file(editor); return
+		case .BrowseUndo:             browse_undo(editor); return
+		case .BrowseSetProjectRoot:   browse_set_project_root_to_current(editor); return
 		}
 
 		switch pressed_key {

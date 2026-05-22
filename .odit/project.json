@@ -39,16 +39,16 @@
 			"description": "Cross-build a macOS debug binary",
 			"working_dir": "{project_root}",
 			"command_windows": ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/build_self.ps1", "-Target", "macos", "-Config", "debug"],
-			"command_linux":   ["bash", "scripts/build.sh", "macos", "debug"],
-			"command_macos":   ["bash", "scripts/build.sh", "macos", "debug"]
+			"command_linux":   ["bash", "scripts/build_self.sh", "macos", "debug"],
+			"command_macos":   ["bash", "scripts/build_self.sh", "macos", "debug"]
 		},
 		{
 			"name": "macos-release",
 			"description": "Cross-build a macOS release binary",
 			"working_dir": "{project_root}",
 			"command_windows": ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/build_self.ps1", "-Target", "macos", "-Config", "release"],
-			"command_linux":   ["bash", "scripts/build.sh", "macos", "release"],
-			"command_macos":   ["bash", "scripts/build.sh", "macos", "release"]
+			"command_linux":   ["bash", "scripts/build_self.sh", "macos", "release"],
+			"command_macos":   ["bash", "scripts/build_self.sh", "macos", "release"]
 		},
 		{
 			"name": "clean",
@@ -80,6 +80,26 @@
 			"cwd":           "{project_root}/out/windows/{build_name}",
 			"stop_on_entry": false,
 			"build_profile": "release"
+		},
+		{
+			"name":          "Debug Odit (macOS debug)",
+			"adapter":       "lldb",
+			"request":       "launch",
+			"program":       "{project_root}/out/macos/debug/odit_self",
+			"args":          [],
+			"cwd":           "{project_root}/out/macos/debug",
+			"stop_on_entry": false,
+			"build_profile": "macos-debug"
+		},
+		{
+			"name":          "Debug Odit (macOS release)",
+			"adapter":       "lldb",
+			"request":       "launch",
+			"program":       "{project_root}/out/macos/release/odit_self",
+			"args":          [],
+			"cwd":           "{project_root}/out/macos/release",
+			"stop_on_entry": false,
+			"build_profile": "macos-release"
 		}
 	]
 }
