@@ -1,5 +1,5 @@
 {
-  "name": "TypeScript",
+  "{NAME}": "TypeScript",
   "extensions": [
     "ts",
     "tsx",
@@ -44,7 +44,7 @@
     "interface",
     "type",
     "enum",
-    "namespace",
+    "{NAME}space",
     "module",
     "throw",
     "try",
@@ -109,51 +109,59 @@
   ],
   "symbol_patterns": [
     {
-      "pattern": "function NAME",
+      "pattern": "function {NAME}",
       "kind": "Function"
     },
     {
-      "pattern": "async function NAME",
+      "pattern": "async function {NAME}",
       "kind": "Function"
     },
     {
-      "pattern": "class NAME",
+      "pattern": "class {NAME}",
       "kind": "Type"
     },
     {
-      "pattern": "interface NAME",
+      "pattern": "interface {NAME}",
       "kind": "Type"
     },
     {
-      "pattern": "type NAME =",
+      "pattern": "type {NAME} =",
       "kind": "Type"
     },
     {
-      "pattern": "enum NAME",
+      "pattern": "enum {NAME}",
       "kind": "Type"
     },
     {
-      "pattern": "namespace NAME",
+      "pattern": "{NAME}space {NAME}",
       "kind": "Module"
     },
     {
-      "pattern": "const NAME =",
+      "pattern": "const {NAME} =",
       "kind": "Variable"
     },
     {
-      "pattern": "const NAME :",
+      "pattern": "const {NAME} :",
       "kind": "Variable"
     },
     {
-      "pattern": "let NAME =",
+      "pattern": "let {NAME} =",
       "kind": "Variable"
     },
     {
-      "pattern": "let NAME :",
+      "pattern": "let {NAME} :",
       "kind": "Variable"
     },
     {
-      "pattern": "var NAME =",
+      "pattern": "var {NAME} =",
+      "kind": "Variable"
+    },
+    {
+      "pattern": ", {NAME} : {ANY}",
+      "kind": "Variable"
+    },
+    {
+      "pattern": "{NAME} : {ANY}",
       "kind": "Variable"
     }
   ]

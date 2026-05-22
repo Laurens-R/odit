@@ -6,6 +6,7 @@ import "core:path/filepath"
 import "core:strings"
 import "vendor:sdl3"
 
+import "../git"
 import "../syntax"
 import "../ui"
 
@@ -105,7 +106,7 @@ git_history_dialog_open :: proc(editor: ^Editor) {
 	}
 	state.file_path = strings.clone(editor_pane.file_path)
 
-	if !git_is_available() {
+	if !git.is_available() {
 		editor.show_git_history = true
 		git_history_set_error(state, "git is not on PATH")
 		return

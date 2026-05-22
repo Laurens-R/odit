@@ -6,8 +6,14 @@ import "vendor:sdl3/ttf"
 
 import "../dap"
 import "../document"
+import completion_popup_pkg "./completion_popup"
+import help_pkg "./help"
+import hover_pkg "./hover"
+import signature_popup_pkg "./signature_popup"
+import terminal_picker_pkg "./terminal_picker"
 import "../keybindings"
 import "../lsp"
+import "../markdown"
 import "../syntax"
 import "../terminal"
 import "../ui"
@@ -236,9 +242,11 @@ Editor :: struct {
 	fps_last_value:       i32,
 
 	// Modal UI
-	show_help:       bool,
-	help_scroll:     i32,
-	help_scrollbar:  ui.Scrollbar,
+	// F1 help dialog. Self-owned by the `help` subpackage — visibility,
+	// scroll offset, and scrollbar state all live inside `help.State`. The
+	// editor only knows about it as one of the modal states in
+	// `editor_is_modal_open` and as a render dispatch case.
+	help: help_pkg.State,
 	show_browse:     bool,
 	browse_state:    BrowseState,
 
@@ -297,8 +305,9 @@ Editor :: struct {
 
 	// Ctrl+Shift+F9 picker. Lists open terminal sessions so the user can
 	// jump between them.
-	show_terminal_picker:        bool,
-	terminal_picker:             TerminalPicker,
+	// Ctrl+Shift+F9 picker. State lives in the `terminal_picker`
+	// subpackage; visibility flag is inside the State itself.
+	terminal_picker: terminal_picker_pkg.State,
 
 	// Find mode (Ctrl+F). Attached to a single pane at a time; closes on
 	// click outside the bar, on Esc, or on pane switch.
@@ -353,7 +362,7 @@ Editor :: struct {
 	// Fonts loaded lazily for the markdown preview pane. Proportional (Arial-
 	// like) for body / headings; monospace for inline code and code blocks.
 	// Loaded on the first F5 press, freed in `editor_destroy`.
-	markdown_fonts:             MarkdownFonts,
+	markdown_fonts:             markdown.Fonts,
 
 	// Top-of-window menu bar. Always visible; clicking a title opens the
 	// dropdown, clicking outside or pressing Esc closes it. While a menu is
@@ -379,15 +388,15 @@ Editor :: struct {
 	// Hover popup state. Set by Ctrl+K → editor sends the LSP hover
 	// request → next frame's poll surfaces a result → we copy it here for
 	// rendering. Cleared on Esc / next keystroke / cursor move.
-	hover_popup:                 HoverPopup,
+	hover_popup:                 hover_pkg.State,
 	hover_popup_request_pending: bool,
 
 	// Completion popup state — see `completion.odin` for the lifecycle.
-	completion_popup:            CompletionPopup,
+	completion_popup:            completion_popup_pkg.State,
 
 	// Signature-help popup — fires on `(`, refreshes on `,` while inside
 	// the same argument list, auto-closes on `)` / Esc / cursor row change.
-	signature_popup:             SignaturePopup,
+	signature_popup:             signature_popup_pkg.State,
 
 	// Project root, set by Ctrl+P in the file browser. Owned absolute path;
 	// "" when unset. When set:
@@ -576,13 +585,13 @@ editor_destroy :: proc(editor: ^Editor) {
 	save_as_dialog_destroy(&editor.save_as_dialog)
 	git_history_dialog_destroy(&editor.git_history_dialog)
 	open_docs_dialog_destroy(&editor.open_docs_dialog)
-	terminal_picker_destroy(&editor.terminal_picker)
+	terminal_picker_pkg.destroy(&editor.terminal_picker)
 	tasks_dialog_destroy(&editor.tasks_dialog)
 	project_config_destroy(&editor.project_config)
 	breakpoint_condition_dialog_destroy(&editor.breakpoint_condition_dialog)
-	hover_popup_destroy(&editor.hover_popup)
-	completion_popup_destroy(&editor.completion_popup)
-	signature_popup_destroy(&editor.signature_popup)
+	hover_pkg.destroy(&editor.hover_popup)
+	completion_popup_pkg.destroy(&editor.completion_popup)
+	signature_popup_pkg.destroy(&editor.signature_popup)
 	editor_lsp_destroy_all(editor)
 	editor_settings_destroy(&editor.settings)
 	for background_index in 0..<len(editor.background_documents) {
@@ -606,7 +615,7 @@ editor_destroy :: proc(editor: ^Editor) {
 		}
 	}
 	if cap(editor.terminals) > 0 { delete(editor.terminals) }
-	markdown_fonts_destroy(&editor.markdown_fonts)
+	markdown.fonts_destroy(&editor.markdown_fonts)
 	editor_dap_destroy_all(editor)
 	debug_state_destroy(&editor.debug_state)
 	debug_output_destroy(editor)
@@ -863,6 +872,52 @@ editor_active_terminal :: proc(editor: ^Editor) -> ^terminal.Terminal {
 	if len(editor.terminals) == 0 { return nil }
 	if editor.active_terminal_index < 0 || editor.active_terminal_index >= len(editor.terminals) { return nil }
 	return editor.terminals[editor.active_terminal_index].terminal
+}
+
+// Project the editor's terminal list into the read-only view the
+// `terminal_picker` subpackage consumes. Allocated in `allocator` (usually
+// temp_allocator — one slice per event, no stable storage required).
+@(private)
+terminal_picker_entries :: proc(editor: ^Editor, allocator := context.temp_allocator) -> []terminal_picker_pkg.Entry {
+	entries := make([]terminal_picker_pkg.Entry, len(editor.terminals), allocator)
+	for entry, entry_index in editor.terminals {
+		entries[entry_index] = terminal_picker_pkg.Entry{
+			display_number = entry.display_number,
+			is_active      = entry_index == editor.active_terminal_index,
+		}
+	}
+	return entries
+}
+
+// Open the terminal picker over the current terminals slice. Mirrors the
+// old `terminal_picker_open` proc but now goes through the subpackage so
+// the Editor struct holds zero picker-specific logic.
+@(private)
+editor_open_terminal_picker :: proc(editor: ^Editor) {
+	if len(editor.terminals) == 0 { return }
+	entries := terminal_picker_entries(editor, context.temp_allocator)
+	initial_selection := editor.active_terminal_index
+	if initial_selection < 0 { initial_selection = 0 }
+	terminal_picker_pkg.open(&editor.terminal_picker, entries, initial_selection)
+}
+
+// Switch the active terminal to the entry the picker activated. Replaces
+// the inline pane-swap dance that used to live in
+// `terminal_picker_activate` — the picker no longer touches `editor.panes`
+// directly, it just hands back the chosen index.
+@(private)
+editor_activate_terminal_at :: proc(editor: ^Editor, entry_index: int) {
+	if entry_index < 0 || entry_index >= len(editor.terminals) { return }
+	editor.active_terminal_index = entry_index
+
+	if editor_is_terminal_visible(editor) {
+		if terminal_pane, is_terminal := &editor.panes[TERMINAL_PANE_INDEX].content.(TerminalPane); is_terminal {
+			terminal_pane.terminal = editor_active_terminal(editor)
+		}
+		editor.active_pane_index = TERMINAL_PANE_INDEX
+	} else {
+		editor_terminal_show(editor)
+	}
 }
 
 // Display number of the active terminal entry, or 0 when nothing's open.
@@ -1309,7 +1364,7 @@ editor_needs_render :: proc(editor: ^Editor) -> bool {
 
 // True when a modal dialog (help, browse, future popups) currently owns input.
 editor_is_modal_open :: proc(editor: ^Editor) -> bool {
-	return editor.show_help || editor.show_browse || editor.show_symbols || editor.show_find_in_files || editor.show_replace_in_files || editor.show_save_as || editor.show_close_confirm || editor.show_git_history || editor.show_open_docs || editor.show_terminal_picker || editor.show_tasks_dialog || editor.show_breakpoint_condition || editor.menu_bar.open_menu_index >= 0
+	return editor.help.visible || editor.show_browse || editor.show_symbols || editor.show_find_in_files || editor.show_replace_in_files || editor.show_save_as || editor.show_close_confirm || editor.show_git_history || editor.show_open_docs || editor.terminal_picker.visible || editor.show_tasks_dialog || editor.show_breakpoint_condition || editor.menu_bar.open_menu_index >= 0
 }
 
 // --- Project root ---------------------------------------------------------

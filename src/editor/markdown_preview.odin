@@ -3,615 +3,135 @@ package editor
 import "core:fmt"
 import "core:strings"
 import "vendor:sdl3"
-import "vendor:sdl3/ttf"
 
 import "../document"
+import "../markdown"
 import "../syntax"
 import "../ui"
 
-// --- Types -----------------------------------------------------------------
-
-@(private)
-MarkdownInlineKind :: enum {
-	Plain,
-	Bold,
-	Italic,
-	Code,
-	Link,
-}
-
-@(private)
-MarkdownInlineRun :: struct {
-	kind: MarkdownInlineKind,
-	text: string, // owned
-	url:  string, // owned, only set for Link
-}
-
-@(private)
-MarkdownBlockKind :: enum {
-	BlankLine,
-	Heading,
-	Paragraph,
-	CodeBlock,
-	BlockQuote,
-	ListItem,
-	HorizontalRule,
-}
-
-@(private)
-MarkdownBlock :: struct {
-	kind:          MarkdownBlockKind,
-	level:         int, // heading level 1..6
-	ordered_index: int, // ListItem: 0 = unordered bullet, >0 = ordered (1-based) number
-	// ListItem only: 0 = top-level. Counts the leading whitespace at parse
-	// time (rounded down to 2-space units) so nested bullets indent further
-	// during render.
-	list_depth:    int,
-	inline_runs:   [dynamic]MarkdownInlineRun, // owned
-}
-
-// Pane variant rendering pre-parsed markdown blocks. State is fully self-
-// contained — we re-parse on every F5 rather than tracking the source pane's
-// document for live updates.
-//
-// `layouted_blocks` is a per-frame-stable layout cache: word-wrapping, atom
-// widths, and per-atom `ttf.Text*` handles. The render path is hot (cursor
-// blink alone fires it twice a second) so recomputing this every frame was
-// the dominant cost — instead we recompute only when `layout_width` no longer
-// matches the current viewport, or `set_content` invalidates the cache.
+// F5 markdown preview pane. Holds the parsed block tree + layout cache;
+// the layout/parse/render machinery itself lives in `src/markdown` and is
+// shared with the LSP hover popup and the signature-help popup. This file
+// is now just the editor-side modal glue: open / close, source ↔ preview
+// pairing, idle auto-refresh, pane render orchestration, scroll input.
 @(private)
 MarkdownPreviewPane :: struct {
-	blocks:           [dynamic]MarkdownBlock,
+	blocks:           [dynamic]markdown.Block,
 	source_file_path: string, // owned, displayed in the title bar
 	scroll_y:         f32,
 	scroll_y_target:  f32,
 	visible_lines:    u32,
 	scrollbar:        ui.Scrollbar,
 
-	// Stashed by the renderer each frame so the scrollbar drag handler can
-	// reuse the same clamp range without re-running the layout pass to
-	// compute total content height.
+	// Stashed by the renderer each frame so the scrollbar drag handler
+	// can reuse the same clamp range without re-running the layout pass
+	// to compute total content height.
 	last_max_scroll_pixels: f32,
 
-	// Layout cache. Owns its dynamic arrays AND every `^ttf.Text` it points at
-	// (via atoms / code_lines / marker_text_object). Invalidated by
-	// `markdown_preview_pane_set_content` and rebuilt lazily on the next
-	// render whose `usable_text_pixels` doesn't match `layout_width`.
-	layouted_blocks:  [dynamic]LayoutedBlock,
+	// Layout cache. Owns its dynamic arrays AND every `^ttf.Text` it
+	// points at (via atoms / code_lines / marker_text_object). Invalidated
+	// by `markdown_preview_pane_set_content` and rebuilt lazily on the
+	// next render whose `usable_text_pixels` doesn't match `layout_width`.
+	layouted_blocks:  [dynamic]markdown.LayoutedBlock,
 	layout_width:     i32,
 }
 
-// --- Fonts -----------------------------------------------------------------
+// --- Editor-side helpers --------------------------------------------------
 
-// Proportional + monospace font handles loaded lazily for the markdown
-// preview. Headings use a true-bold variant at six progressively smaller
-// sizes; body uses regular/bold/italic at one size; code stays monospace
-// (we re-open the bundled font.ttf at body size).
+// Build the per-call `markdown.Context` the layout / render procs read
+// from. Returns by value (small struct), with `renderer` set to the
+// passed-in pointer — pass nil if you only need layout.
 @(private)
-MarkdownFonts :: struct {
-	loaded:               bool,
-	// Multiplier applied to every baseline size when the fonts open.
-	// Driven by `editor.font_size`: when the user Ctrl+Wheel-zooms the
-	// editor's monospace font, the preview's body/heading/code fonts
-	// scale proportionally so the whole reading surface grows together.
-	current_scale:        f32,
-	body:                 ^ttf.Font,
-	body_bold:            ^ttf.Font,
-	body_italic:          ^ttf.Font,
-	heading:              [6]^ttf.Font,
-	code:                 ^ttf.Font,
-	body_line_height:     i32,
-	heading_line_heights: [6]i32,
-	code_line_height:     i32,
-}
-
-// Body text size for the preview. Independent of editor.font_size — Ctrl+Wheel
-// zoom should not bleed into the preview layout.
-@(private="file")
-MARKDOWN_BODY_FONT_SIZE :: 16.0
-
-// Heading sizes, indexed by level - 1. H1 ≈ 1.75× body, H6 = body. The H6 = body
-// size is intentional: the H6 font is still BOLD so it remains visually distinct
-// from a paragraph even at the same point size.
-@(private="file")
-MARKDOWN_HEADING_SIZES := [6]f32{ 28, 24, 20, 18, 17, 16 }
-
-// Candidate proportional-font triples to try in order. First triple whose
-// regular file loads is used for body, bold, italic AND all six heading
-// sizes (the bold path is used for the latter).
-@(private="file")
-PROPORTIONAL_FONT_CANDIDATES := [?][3]string{
-	// Windows
-	{"C:/Windows/Fonts/arial.ttf",       "C:/Windows/Fonts/arialbd.ttf",  "C:/Windows/Fonts/ariali.ttf"},
-	{"C:/Windows/Fonts/segoeui.ttf",     "C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/segoeuii.ttf"},
-	{"C:/Windows/Fonts/calibri.ttf",     "C:/Windows/Fonts/calibrib.ttf", "C:/Windows/Fonts/calibrii.ttf"},
-	// Linux (common distros)
-	{"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", "/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf"},
-	{"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",                 "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf"},
-	// macOS
-	{"/Library/Fonts/Arial.ttf",         "/Library/Fonts/Arial Bold.ttf",   "/Library/Fonts/Arial Italic.ttf"},
-	{"/System/Library/Fonts/Helvetica.ttc", "/System/Library/Fonts/Helvetica.ttc", "/System/Library/Fonts/Helvetica.ttc"},
-}
-
-@(private="file")
-MONOSPACE_FALLBACK_PATH :: "font.ttf"
-
-// Bundled proportional font for the markdown preview. Staged into the
-// build output by `scripts/build.{sh,ps1}` (sits in `vendor/md.ttf` →
-// next to the binary at runtime). When present, this trumps the
-// PROPORTIONAL_FONT_CANDIDATES probe below so the preview is consistent
-// across machines instead of inheriting whatever the OS happens to ship.
-// Single-file font: we point regular/bold/italic at it and let SDL_ttf
-// synthesise the variants via BOLD / ITALIC style flags.
-@(private="file")
-MARKDOWN_BUNDLED_FONT_PATH :: "md.ttf"
-
-// Extra pixels added between visual lines within a Paragraph / ListItem /
-// BlockQuote so body text doesn't feel cramped. Headings keep their own
-// `heading_line_height` which already breathes; code blocks stay tight.
-@(private="file")
-MARKDOWN_LINE_LEADING_EXTRA :: 3
-
-// Trailing space below each block — bigger gap between paragraphs / lists /
-// quotes makes the document easier to scan.
-@(private="file")
-MARKDOWN_PARAGRAPH_TRAILING :: 12
-@(private="file")
-MARKDOWN_LIST_ITEM_TRAILING :: 6
-@(private="file")
-MARKDOWN_BLOCKQUOTE_TRAILING :: 10
-@(private="file")
-MARKDOWN_CODEBLOCK_TRAILING  :: 10
-
-// How far each nesting level shifts a list item right. 18 px is about a tab
-// stop at typical body sizes; nested bullets are clearly inset.
-@(private="file")
-MARKDOWN_LIST_DEPTH_INDENT :: 18
-
-// Pixel radius for rounded code-block backgrounds.
-@(private="file")
-MARKDOWN_CODE_CORNER_RADIUS_BLOCK  :: 5
-@(private="file")
-MARKDOWN_CODE_CORNER_RADIUS_INLINE :: 3
-
-// Try every font path in order. Returns the first that loads, or nil if
-// none do.
-@(private="file")
-markdown_open_font_from_paths :: proc(paths: []string, size: f32) -> ^ttf.Font {
-	for path in paths {
-		c_path := strings.clone_to_cstring(path, context.temp_allocator)
-		if font := ttf.OpenFont(c_path, size); font != nil { return font }
+editor_markdown_context :: proc(editor: ^Editor, renderer: ^sdl3.Renderer) -> markdown.Context {
+	return markdown.Context{
+		renderer              = renderer,
+		engine                = editor.text_engine,
+		fonts                 = &editor.markdown_fonts,
+		monospace_font        = editor.font,
+		monospace_line_height = editor.line_height,
+		theme                 = editor_markdown_theme(editor),
 	}
-	return nil
 }
 
-// Baseline editor monospace size that maps to a `current_scale` of 1.0.
-// Matches main.odin's FONT_SIZE — kept in sync manually since main.odin's
-// constant is package-private to `main`.
-@(private="file")
-MARKDOWN_BASELINE_EDITOR_FONT_SIZE :: f32(16.0)
-
-// Lazy-load every font handle we need for the preview. Subsequent calls are
-// no-ops. If a particular handle can't be opened we leave it nil — the
-// renderer checks for that and falls back to the editor's monospace font, so
-// the preview degrades gracefully when no proportional font is on the system.
-//
-// Body/heading/code sizes are multiplied by `fonts.current_scale` so the
-// preview keeps step with the editor's Ctrl+Wheel zoom. A scale of 0 (the
-// struct's zero-value, never touched) is treated as 1.0.
+// Map the editor's color fields into a `markdown.Theme`. Keeping this
+// proc small and in one place means changing how (say) inline code looks
+// in the preview is a one-line change here — every markdown surface
+// (preview, hover popup, signature help) pulls through the same mapping.
 @(private)
-markdown_fonts_ensure_loaded :: proc(fonts: ^MarkdownFonts) {
-	if fonts.loaded { return }
-
-	scale := fonts.current_scale
-	if scale <= 0 { scale = 1.0 }
-	fonts.current_scale = scale
-
-	body_size       := MARKDOWN_BODY_FONT_SIZE * scale
-	probe_size      := body_size
-
-	// Bundled md.ttf trumps system fonts so the preview looks the same on
-	// every machine. When it loads, it's the only file we open: bold and
-	// italic point at the same handle path with the matching style flag
-	// synthesised by SDL_ttf. Falls through to the per-OS triples below if
-	// it isn't present (development build / file missing).
-	bundled_probe := ttf.OpenFont(strings.clone_to_cstring(MARKDOWN_BUNDLED_FONT_PATH, context.temp_allocator), probe_size)
-	use_bundled_font := bundled_probe != nil
-	if bundled_probe != nil { ttf.CloseFont(bundled_probe) }
-
-	chosen_regular_path: string
-	chosen_bold_path:    string
-	chosen_italic_path:  string
-
-	if !use_bundled_font {
-		// Discover which proportional triple is installed. Probe at the
-		// scaled body size so a font that opens fine at default 16 px but
-		// can't be sized higher (vanishingly rare) still picks correctly.
-		for triple in PROPORTIONAL_FONT_CANDIDATES {
-			probe := ttf.OpenFont(strings.clone_to_cstring(triple[0], context.temp_allocator), probe_size)
-			if probe != nil {
-				ttf.CloseFont(probe)
-				chosen_regular_path = triple[0]
-				chosen_bold_path    = triple[1]
-				chosen_italic_path  = triple[2]
-				break
-			}
-		}
+editor_markdown_theme :: proc(editor: ^Editor) -> markdown.Theme {
+	return markdown.Theme{
+		text             = editor.foreground_color,
+		bold             = editor.cursor_color,
+		italic           = editor.syntax_preprocessor_foreground,
+		code_inline      = editor.syntax_keyword_foreground,
+		code_inline_bg   = editor.status_bar_background,
+		code_block       = editor.syntax_keyword_foreground,
+		code_block_bg    = editor.status_bar_background,
+		link             = editor.syntax_type_foreground,
+		quote_bar        = editor.line_number_color,
+		quote_text       = editor.syntax_comment_foreground,
+		horizontal_rule  = editor.line_number_color,
+		list_marker     = editor.syntax_keyword_foreground,
 	}
-
-	regular_paths: []string
-	bold_paths:    []string
-	italic_paths:  []string
-	switch {
-	case use_bundled_font:
-		// Single-file font: open the same file for every slot and rely on
-		// the style-flag fixup below to bold/italic.
-		regular_paths = []string{MARKDOWN_BUNDLED_FONT_PATH,                          MONOSPACE_FALLBACK_PATH}
-		bold_paths    = []string{MARKDOWN_BUNDLED_FONT_PATH,                          MONOSPACE_FALLBACK_PATH}
-		italic_paths  = []string{MARKDOWN_BUNDLED_FONT_PATH,                          MONOSPACE_FALLBACK_PATH}
-	case len(chosen_regular_path) > 0:
-		regular_paths = []string{chosen_regular_path,                                 MONOSPACE_FALLBACK_PATH}
-		bold_paths    = []string{chosen_bold_path,    chosen_regular_path,            MONOSPACE_FALLBACK_PATH}
-		italic_paths  = []string{chosen_italic_path,  chosen_regular_path,            MONOSPACE_FALLBACK_PATH}
-	case:
-		// No proportional font found at all — fall back to the bundled
-		// monospace font with style flags so we still get a usable preview.
-		regular_paths = []string{MONOSPACE_FALLBACK_PATH}
-		bold_paths    = []string{MONOSPACE_FALLBACK_PATH}
-		italic_paths  = []string{MONOSPACE_FALLBACK_PATH}
-	}
-
-	fonts.body        = markdown_open_font_from_paths(regular_paths, body_size)
-	fonts.body_bold   = markdown_open_font_from_paths(bold_paths,    body_size)
-	fonts.body_italic = markdown_open_font_from_paths(italic_paths,  body_size)
-
-	// When the bold/italic file didn't actually resolve to a true variant
-	// (single-file md.ttf, or system probe found only a regular face),
-	// force the style flags so the glyphs still render the way the user
-	// expects.
-	bold_is_synthetic   := use_bundled_font || len(chosen_bold_path)   == 0
-	italic_is_synthetic := use_bundled_font || len(chosen_italic_path) == 0
-	if fonts.body_bold   != nil && bold_is_synthetic   { ttf.SetFontStyle(fonts.body_bold,   {.BOLD})   }
-	if fonts.body_italic != nil && italic_is_synthetic { ttf.SetFontStyle(fonts.body_italic, {.ITALIC}) }
-
-	for level_index in 0..<6 {
-		fonts.heading[level_index] = markdown_open_font_from_paths(bold_paths, MARKDOWN_HEADING_SIZES[level_index] * scale)
-		if fonts.heading[level_index] != nil && bold_is_synthetic {
-			ttf.SetFontStyle(fonts.heading[level_index], {.BOLD})
-		}
-	}
-
-	// Code is always monospace, sized to match body.
-	monospace_paths := []string{MONOSPACE_FALLBACK_PATH}
-	fonts.code = markdown_open_font_from_paths(monospace_paths, body_size)
-
-	if fonts.body        != nil { fonts.body_line_height        = i32(ttf.GetFontLineSkip(fonts.body)) }
-	if fonts.code        != nil { fonts.code_line_height        = i32(ttf.GetFontLineSkip(fonts.code)) }
-	for level_index in 0..<6 {
-		if fonts.heading[level_index] != nil {
-			fonts.heading_line_heights[level_index] = i32(ttf.GetFontLineSkip(fonts.heading[level_index]))
-		}
-	}
-
-	fonts.loaded = true
-}
-
-// Close every ttf.Font handle but leave `current_scale` intact. Used by the
-// zoom path (about to reload) and the final teardown (followed by zeroing
-// the struct).
-@(private="file")
-markdown_fonts_close_handles :: proc(fonts: ^MarkdownFonts) {
-	if fonts.body        != nil { ttf.CloseFont(fonts.body);        fonts.body        = nil }
-	if fonts.body_bold   != nil { ttf.CloseFont(fonts.body_bold);   fonts.body_bold   = nil }
-	if fonts.body_italic != nil { ttf.CloseFont(fonts.body_italic); fonts.body_italic = nil }
-	for level_index in 0..<6 {
-		if fonts.heading[level_index] != nil {
-			ttf.CloseFont(fonts.heading[level_index])
-			fonts.heading[level_index] = nil
-		}
-	}
-	if fonts.code != nil { ttf.CloseFont(fonts.code); fonts.code = nil }
-	fonts.loaded                = false
-	fonts.body_line_height      = 0
-	fonts.code_line_height      = 0
-	for level_index in 0..<6 { fonts.heading_line_heights[level_index] = 0 }
-}
-
-// Public entrypoint for Ctrl+Wheel — recomputes scale from `editor_font_size`
-// and reloads handles when the value moved enough to be visible. No-op when
-// the scale change is below a floating-point fuzz factor so jitter doesn't
-// thrash the font system.
-@(private)
-markdown_fonts_apply_zoom :: proc(fonts: ^MarkdownFonts, editor_font_size: f32) {
-	new_scale := editor_font_size / MARKDOWN_BASELINE_EDITOR_FONT_SIZE
-	if new_scale < 0.4 { new_scale = 0.4 }
-	if new_scale > 4.0 { new_scale = 4.0 }
-
-	current := fonts.current_scale; if current <= 0 { current = 1.0 }
-	if abs(current - new_scale) < 0.001 { return }
-
-	markdown_fonts_close_handles(fonts)
-	fonts.current_scale = new_scale
-	// ensure_loaded picks up the new scale on next render (or now, since
-	// the editor doesn't redraw until after this call returns).
-	markdown_fonts_ensure_loaded(fonts)
-}
-
-// Lazy-load wrapper used by the render paths. Same as `ensure_loaded` but
-// also picks up the editor's current font_size BEFORE the first load —
-// without this, a Ctrl+K (or any markdown-rendering popup) opened at a
-// zoom level the user reached via the keyboard before ever opening the
-// preview would load at 1.0 scale instead of the editor's actual size.
-//
-// Safe to call every frame: once `loaded` is true, this short-circuits
-// (the destructive reload path lives in `apply_zoom`, which the editor
-// invokes only from `editor_zoom` after invalidating caches).
-@(private)
-markdown_fonts_ensure_loaded_at_editor_scale :: proc(fonts: ^MarkdownFonts, editor_font_size: f32) {
-	if fonts.loaded {
-		markdown_fonts_ensure_loaded(fonts)
-		return
-	}
-	desired := editor_font_size / MARKDOWN_BASELINE_EDITOR_FONT_SIZE
-	if desired < 0.4 { desired = 0.4 }
-	if desired > 4.0 { desired = 4.0 }
-	fonts.current_scale = desired
-	markdown_fonts_ensure_loaded(fonts)
-}
-
-@(private)
-markdown_fonts_destroy :: proc(fonts: ^MarkdownFonts) {
-	markdown_fonts_close_handles(fonts)
-	fonts^ = MarkdownFonts{}
 }
 
 // Invalidate every layout cache that holds `^ttf.Text*` pointers bound to
-// the markdown fonts. Called from the Ctrl+Wheel zoom path right BEFORE the
-// fonts get closed + reloaded — without it, the next render would reach
-// for now-freed glyph data.
+// the markdown fonts. Called from the Ctrl+Wheel zoom path right BEFORE
+// the fonts get closed + reloaded — without it, the next render would
+// reach for now-freed glyph data.
 @(private)
 editor_invalidate_markdown_caches :: proc(editor: ^Editor) {
 	for pane_index in 0..<len(editor.panes) {
 		#partial switch &content_value in editor.panes[pane_index].content {
 		case MarkdownPreviewPane:
-			markdown_clear_layouted_blocks(&content_value.layouted_blocks)
+			markdown.clear_layouted_blocks(&content_value.layouted_blocks)
 			content_value.layout_width = 0
 		}
 	}
-	markdown_clear_layouted_blocks(&editor.hover_popup.layouted_blocks)
+	markdown.clear_layouted_blocks(&editor.hover_popup.layouted_blocks)
 	editor.hover_popup.layout_width = 0
-	markdown_clear_layouted_blocks(&editor.signature_popup.doc_layouted_blocks)
+	markdown.clear_layouted_blocks(&editor.signature_popup.doc_layouted_blocks)
 	editor.signature_popup.doc_layout_width = 0
 }
 
-// --- Font selection per atom / block --------------------------------------
-
-@(private="file")
-markdown_inline_font :: proc(editor: ^Editor, kind: MarkdownInlineKind, block_default_font: ^ttf.Font) -> ^ttf.Font {
-	fonts := &editor.markdown_fonts
-	switch kind {
-	case .Plain:  if block_default_font   != nil { return block_default_font   }
-	case .Bold:   if fonts.body_bold      != nil { return fonts.body_bold      }
-	case .Italic: if fonts.body_italic    != nil { return fonts.body_italic    }
-	case .Code:   if fonts.code           != nil { return fonts.code           }
-	case .Link:   if block_default_font   != nil { return block_default_font   }
-	}
-	if editor.font != nil { return editor.font }
-	return nil
-}
-
-@(private="file")
-markdown_block_default_font :: proc(editor: ^Editor, block: ^MarkdownBlock) -> ^ttf.Font {
-	fonts := &editor.markdown_fonts
-	#partial switch block.kind {
-	case .Heading:
-		level_index := block.level - 1
-		if level_index < 0 { level_index = 0 }
-		if level_index > 5 { level_index = 5 }
-		if fonts.heading[level_index] != nil { return fonts.heading[level_index] }
-	case .CodeBlock:
-		if fonts.code != nil { return fonts.code }
-	}
-	if fonts.body != nil { return fonts.body }
-	return editor.font
-}
-
-// --- Layout helpers -------------------------------------------------------
-
-// Vertical step between visual lines within a body block (paragraph, list
-// item, blockquote). Body font's natural line skip + a few pixels of
-// leading so paragraphs aren't visually packed.
-@(private)
-markdown_body_line_step :: proc(editor: ^Editor) -> i32 {
-	body_line_height := editor.markdown_fonts.body_line_height
-	if body_line_height <= 0 { body_line_height = editor.line_height }
-	if body_line_height <= 0 { body_line_height = 16 }
-	return body_line_height + MARKDOWN_LINE_LEADING_EXTRA
-}
-
-// Paint a filled rectangle with circular corners of radius `corner_radius`.
-// Falls back to a normal RenderFillRect when the radius is small enough
-// that rounding would be invisible. Uses the SDL_RenderFillRect path for
-// the body + per-row horizontal strips on top/bottom; each strip's width
-// follows a circular profile so the corners look smooth rather than chamfered.
-@(private)
-draw_rounded_filled_rect :: proc(renderer: ^sdl3.Renderer, rect: sdl3.FRect, corner_radius: f32, color: sdl3.FColor) {
-	sdl3.SetRenderDrawColorFloat(renderer, color.r, color.g, color.b, color.a)
-	radius := corner_radius
-	// Local copy so we can take its address — Odin disallows &param on
-	// proc parameters by design.
-	rect_local := rect
-	if radius < 1 || rect.w < 2*radius || rect.h < 2*radius {
-		sdl3.RenderFillRect(renderer, &rect_local)
-		return
-	}
-	radius_i := i32(radius)
-
-	// Center body — full width minus the two corner-height strips at
-	// top + bottom.
-	body_rect := sdl3.FRect{rect.x, rect.y + f32(radius_i), rect.w, rect.h - 2 * f32(radius_i)}
-	sdl3.RenderFillRect(renderer, &body_rect)
-
-	// Top + bottom corner strips. Each strip is one pixel tall; its width
-	// shrinks toward the corner along a circular profile so the corner
-	// looks round at common radii (3–8 px).
-	for row_offset in 0..<radius_i {
-		// `row_offset` is the pixel offset *into* the corner from the top
-		// of the top row (or from the bottom of the bottom row). The
-		// distance from the corner's circle center along Y is
-		// `radius - row_offset - 0.5`, where the +0.5 picks a pixel mid-
-		// point for smoother sampling.
-		dy := f32(radius_i) - f32(row_offset) - 0.5
-		dx_max_sq := f32(radius_i)*f32(radius_i) - dy*dy
-		if dx_max_sq < 0 { dx_max_sq = 0 }
-		inset := f32(radius_i) - math_sqrt_f32(dx_max_sq)
-		if inset > f32(radius_i) { inset = f32(radius_i) }
-
-		strip_y_top := rect.y + f32(row_offset)
-		strip_y_bot := rect.y + rect.h - 1 - f32(row_offset)
-		strip_x     := rect.x + inset
-		strip_width := rect.w - 2 * inset
-		if strip_width < 1 { continue }
-
-		top_strip := sdl3.FRect{strip_x, strip_y_top, strip_width, 1}
-		bot_strip := sdl3.FRect{strip_x, strip_y_bot, strip_width, 1}
-		sdl3.RenderFillRect(renderer, &top_strip)
-		sdl3.RenderFillRect(renderer, &bot_strip)
-	}
-}
-
-@(private="file")
-math_sqrt_f32 :: proc(value: f32) -> f32 {
-	if value <= 0 { return 0 }
-	guess := value * 0.5
-	for _ in 0..<8 { guess = 0.5 * (guess + value / guess) }
-	return guess
-}
-
-// --- TTF measurement / drawing helpers ------------------------------------
-
-@(private="file")
-markdown_measure_text_pixels :: proc(font: ^ttf.Font, text: string) -> (width: i32, height: i32) {
-	if len(text) == 0 || font == nil { return 0, 0 }
-	c_text := strings.clone_to_cstring(text, context.temp_allocator)
-	ttf.GetStringSize(font, c_text, 0, &width, &height)
-	return
-}
-
-// Build a `ttf.Text*` that the layout cache will hand back to the renderer
-// every frame, avoiding a CreateText/Destroy roundtrip per atom per frame.
-// Callers own the returned handle and must ttf.DestroyText it on invalidation.
-@(private="file")
-markdown_create_text :: proc(engine: ^ttf.TextEngine, font: ^ttf.Font, text: string) -> ^ttf.Text {
-	if len(text) == 0 || font == nil || engine == nil { return nil }
-	c_text := strings.clone_to_cstring(text, context.temp_allocator)
-	return ttf.CreateText(engine, font, c_text, 0)
-}
-
-// Draw a cached text object at (x, y) in `color`. SetTextColorFloat mutates
-// the object, so atoms shared across colors would corrupt each other — we
-// give every atom its own object, so this is safe.
-@(private="file")
-markdown_draw_cached_text :: proc(text_object: ^ttf.Text, x, y: i32, color: sdl3.FColor) {
-	if text_object == nil { return }
-	_ = ttf.SetTextColorFloat(text_object, color.r, color.g, color.b, color.a)
-	_ = ttf.DrawRendererText(text_object, f32(x), f32(y))
-}
-
-// Free every `^ttf.Text` and owned dynamic array referenced by a slice of
-// LayoutedBlock entries, then `clear()` the slice. Idempotent. Works on a
-// bare `^[dynamic]LayoutedBlock` so callers outside MarkdownPreviewPane
-// (e.g. the hover popup) can reuse it.
-@(private)
-markdown_clear_layouted_blocks :: proc(layouted_blocks: ^[dynamic]LayoutedBlock) {
-	for layouted_index in 0..<len(layouted_blocks^) {
-		layouted := &layouted_blocks[layouted_index]
-		for visual_line_index in 0..<len(layouted.visual_lines) {
-			visual_line := &layouted.visual_lines[visual_line_index]
-			for atom_index in 0..<len(visual_line.atoms) {
-				atom := &visual_line.atoms[atom_index]
-				if atom.text_object != nil {
-					ttf.DestroyText(atom.text_object)
-					atom.text_object = nil
-				}
-			}
-			if cap(visual_line.atoms) > 0 { delete(visual_line.atoms) }
-		}
-		if cap(layouted.visual_lines) > 0 { delete(layouted.visual_lines) }
-
-		for code_line_index in 0..<len(layouted.code_lines) {
-			code_line := &layouted.code_lines[code_line_index]
-			if code_line.text_object != nil {
-				ttf.DestroyText(code_line.text_object)
-				code_line.text_object = nil
-			}
-		}
-		if cap(layouted.code_lines) > 0 { delete(layouted.code_lines) }
-
-		if layouted.marker_text_object != nil {
-			ttf.DestroyText(layouted.marker_text_object)
-			layouted.marker_text_object = nil
-		}
-	}
-	clear(layouted_blocks)
-}
-
-// Pane-wrapped version: invalidates the layout cache and resets layout_width.
-@(private="file")
-markdown_clear_layout_cache :: proc(pane: ^MarkdownPreviewPane) {
-	markdown_clear_layouted_blocks(&pane.layouted_blocks)
-	pane.layout_width = 0
-}
-
-// --- Lifecycle -------------------------------------------------------------
+// --- Lifecycle ------------------------------------------------------------
 
 @(private)
 markdown_preview_pane_destroy :: proc(pane: ^MarkdownPreviewPane) {
 	markdown_clear_layout_cache(pane)
 	if cap(pane.layouted_blocks) > 0 { delete(pane.layouted_blocks) }
-	markdown_preview_clear_blocks(pane)
+	markdown.clear_blocks(&pane.blocks)
 	if cap(pane.blocks) > 0 { delete(pane.blocks) }
 	if len(pane.source_file_path) > 0 { delete(pane.source_file_path) }
 	pane^ = MarkdownPreviewPane{}
 }
 
-// Free every inline run owned by `blocks` and `clear()` the slice. Works on
-// a bare dynamic so the hover popup can reuse it.
-@(private)
-markdown_clear_blocks :: proc(blocks: ^[dynamic]MarkdownBlock) {
-	for block in blocks^ {
-		for run in block.inline_runs {
-			if len(run.text) > 0 { delete(run.text) }
-			if len(run.url)  > 0 { delete(run.url)  }
-		}
-		if cap(block.inline_runs) > 0 { delete(block.inline_runs) }
-	}
-	clear(blocks)
-}
-
+// Invalidates the layout cache and resets layout_width.
 @(private="file")
-markdown_preview_clear_blocks :: proc(pane: ^MarkdownPreviewPane) {
-	markdown_clear_blocks(&pane.blocks)
+markdown_clear_layout_cache :: proc(pane: ^MarkdownPreviewPane) {
+	markdown.clear_layouted_blocks(&pane.layouted_blocks)
+	pane.layout_width = 0
 }
 
 @(private)
 markdown_preview_pane_set_content :: proc(pane: ^MarkdownPreviewPane, content_text, source_file_path: string) {
-	// Invalidate the layout cache first — it holds `^ttf.Text` handles that
-	// reference (string content of) the blocks we're about to delete. Destroy
-	// order is independent in practice, but doing it here keeps the cache's
-	// invariant "every entry's text_object is alive" honest.
+	// Invalidate the layout cache first — it holds `^ttf.Text` handles
+	// that reference (string content of) the blocks we're about to
+	// delete. Destroy order is independent in practice, but doing it
+	// here keeps the cache's invariant "every entry's text_object is
+	// alive" honest.
 	markdown_clear_layout_cache(pane)
 
-	markdown_preview_clear_blocks(pane)
+	markdown.clear_blocks(&pane.blocks)
 	if len(pane.source_file_path) > 0 {
 		delete(pane.source_file_path)
 		pane.source_file_path = ""
 	}
 	pane.source_file_path = strings.clone(source_file_path)
-	markdown_preview_parse_into(content_text, &pane.blocks)
+	markdown.parse_into(content_text, &pane.blocks)
 }
 
-// --- F5 entry point --------------------------------------------------------
+// --- F5 entry point -------------------------------------------------------
 
 @(private)
 markdown_preview_open :: proc(editor: ^Editor) {
@@ -622,16 +142,16 @@ markdown_preview_open :: proc(editor: ^Editor) {
 	#partial switch &content_value in active_pane.content {
 	case EditorPane:
 		if !is_markdown_language(content_value.language) { return }
-		markdown_fonts_ensure_loaded_at_editor_scale(&editor.markdown_fonts, editor.font_size)
+		markdown.fonts_ensure_loaded_at_host_scale(&editor.markdown_fonts, editor.font_size)
 		markdown_preview_open_in_opposite(editor, active_pane_index, &content_value)
 		// Preview is now in sync with the source.
 		content_value.markdown_dirty = false
 
 	case MarkdownPreviewPane:
-		// F5 from the preview itself is a CLOSE — tear the preview down and
-		// collapse the split so the source MD pane gets the full width back.
-		// (Auto-refresh handles "keep the preview current" without the user
-		// needing to mash F5.)
+		// F5 from the preview itself is a CLOSE — tear the preview down
+		// and collapse the split so the source MD pane gets the full
+		// width back. (Auto-refresh handles "keep the preview current"
+		// without the user needing to mash F5.)
 		markdown_preview_close_active(editor)
 	}
 }
@@ -646,16 +166,14 @@ markdown_preview_close_active :: proc(editor: ^Editor) {
 	if _, is_preview := editor.panes[active_pane_index].content.(MarkdownPreviewPane); !is_preview { return }
 
 	if !editor.split_active {
-		// Edge case: a preview is open with no split (shouldn't really happen,
-		// since F5 forces the split on). Just blank the pane.
 		pane_destroy(&editor.panes[active_pane_index])
 		editor.panes[active_pane_index].content = PaneContent{}
 		editor.active_pane_index = 0
 		return
 	}
 
-	// Same shape as the editor close in save_close.odin: the surviving pane
-	// always ends up in pane[0], which is the canonical home for
+	// Same shape as the editor close in save_close.odin: the surviving
+	// pane always ends up in pane[0], which is the canonical home for
 	// single-pane mode.
 	if active_pane_index == 0 {
 		pane_content_destroy(&editor.panes[0].content)
@@ -673,21 +191,19 @@ markdown_preview_close_active :: proc(editor: ^Editor) {
 	editor.split_active      = false
 	editor.active_pane_index = 0
 
-	// Any markdown_dirty on the surviving source pane is now meaningless —
-	// there's nothing to auto-refresh into anymore.
+	// Any markdown_dirty on the surviving source pane is now meaningless
+	// — there's nothing to auto-refresh into anymore.
 	if surviving := pane_as_editor(&editor.panes[0]); surviving != nil {
 		surviving.markdown_dirty = false
 	}
 }
 
-// Idle auto-refresh. Called from `editor_update` once per frame. For every
-// EditorPane that (a) has the Markdown language, (b) has been edited since
-// the last refresh, and (c) is paired with a preview in the opposite pane,
-// re-parse the document into that preview — but only after a 2s pause from
-// the most recent keystroke, so we don't thrash the layout mid-typing.
-//
-// If a source has the dirty flag set but its opposite isn't a preview (the
-// user closed it), we eagerly clear the flag so it doesn't linger forever.
+// Idle auto-refresh. Called from `editor_update` once per frame. For
+// every EditorPane that (a) has the Markdown language, (b) has been
+// edited since the last refresh, and (c) is paired with a preview in the
+// opposite pane, re-parse the document into that preview — but only
+// after a 2s pause from the most recent keystroke, so we don't thrash
+// the layout mid-typing.
 @(private)
 markdown_preview_auto_refresh_tick :: proc(editor: ^Editor) {
 	for pane_index in 0..<len(editor.panes) {
@@ -702,23 +218,26 @@ markdown_preview_auto_refresh_tick :: proc(editor: ^Editor) {
 
 		preview_value, is_preview := &editor.panes[opposite_pane_index].content.(MarkdownPreviewPane)
 		if !is_preview {
-			// No counterpart preview is open — there's nothing to refresh,
-			// and the next F5 will pull fresh content from the source anyway.
+			// No counterpart preview is open — there's nothing to
+			// refresh, and the next F5 will pull fresh content from the
+			// source anyway.
 			source_pane.markdown_dirty = false
 			continue
 		}
 
-		// Only refresh when the file is still markdown — language could have
-		// changed (Save As, browser-driven retarget) since the flag was set.
+		// Only refresh when the file is still markdown — language could
+		// have changed (Save As, browser-driven retarget) since the flag
+		// was set.
 		if !is_markdown_language(source_pane.language) {
 			source_pane.markdown_dirty = false
 			continue
 		}
 
-		// Wait until the user has actually paused. `last_keystroke_time` is
-		// stamped on every key event in input.odin, so this debounces across
-		// all panes, which is what we want — clicking around between panes
-		// shouldn't trigger a refresh, but typing should reset the clock.
+		// Wait until the user has actually paused. `last_keystroke_time`
+		// is stamped on every key event in input.odin, so this debounces
+		// across all panes, which is what we want — clicking around
+		// between panes shouldn't trigger a refresh, but typing should
+		// reset the clock.
 		if editor.clock - editor.last_keystroke_time < 2.0 { continue }
 
 		fresh_content_text := document.document_get_text(&source_pane.document, context.temp_allocator)
@@ -754,631 +273,7 @@ markdown_preview_open_in_opposite :: proc(editor: ^Editor, source_pane_index: in
 	editor.split_active = true
 }
 
-// --- Block parser ---------------------------------------------------------
-
-@(private)
-markdown_preview_parse_into :: proc(content_text: string, blocks: ^[dynamic]MarkdownBlock) {
-	lines: [dynamic]string
-	lines.allocator = context.temp_allocator
-
-	remaining_content := content_text
-	for {
-		line, ok := strings.split_lines_iterator(&remaining_content)
-		if !ok { break }
-		append(&lines, line)
-	}
-
-	line_index := 0
-	for line_index < len(lines) {
-		current_line := lines[line_index]
-		left_trimmed := strings.trim_left(current_line, " \t")
-		fully_trimmed := strings.trim_space(current_line) // shared by blank/rule checks
-
-		if strings.has_prefix(left_trimmed, "```") {
-			line_index += 1
-			code_builder: strings.Builder
-			strings.builder_init(&code_builder, 0, 128, context.temp_allocator)
-			first_line := true
-			for line_index < len(lines) {
-				inner_line := lines[line_index]
-				if strings.has_prefix(strings.trim_left(inner_line, " \t"), "```") {
-					line_index += 1
-					break
-				}
-				if !first_line { strings.write_byte(&code_builder, '\n') }
-				strings.write_string(&code_builder, inner_line)
-				first_line = false
-				line_index += 1
-			}
-
-			runs: [dynamic]MarkdownInlineRun
-			runs.allocator = context.allocator
-			append(&runs, MarkdownInlineRun{kind = .Plain, text = strings.clone(strings.to_string(code_builder))})
-			append(blocks, MarkdownBlock{kind = .CodeBlock, inline_runs = runs})
-			continue
-		}
-
-		if len(fully_trimmed) == 0 {
-			append(blocks, MarkdownBlock{kind = .BlankLine})
-			line_index += 1
-			continue
-		}
-
-		if is_horizontal_rule_line(fully_trimmed) {
-			append(blocks, MarkdownBlock{kind = .HorizontalRule})
-			line_index += 1
-			continue
-		}
-
-		if heading_level := count_atx_heading_marker(left_trimmed); heading_level > 0 {
-			heading_text := strings.trim_left(left_trimmed[heading_level:], " \t")
-			heading_text  = strings.trim_right(heading_text, " #\t")
-			runs := parse_inline_runs(heading_text)
-			append(blocks, MarkdownBlock{kind = .Heading, level = heading_level, inline_runs = runs})
-			line_index += 1
-			continue
-		}
-
-		if strings.has_prefix(left_trimmed, ">") {
-			quote_text := strings.trim_left(left_trimmed[1:], " \t")
-			runs := parse_inline_runs(quote_text)
-			append(blocks, MarkdownBlock{kind = .BlockQuote, inline_runs = runs})
-			line_index += 1
-			continue
-		}
-
-		// Count leading whitespace on the line so we can pick up nesting
-		// depth for bullets and tell whether following lines belong to the
-		// same item.
-		leading_whitespace_count := 0
-		for leading_whitespace_count < len(current_line) && (current_line[leading_whitespace_count] == ' ' || current_line[leading_whitespace_count] == '\t') {
-			leading_whitespace_count += 1
-		}
-
-		if is_unordered_list_marker(left_trimmed) {
-			parse_list_item_into_blocks(lines, &line_index, blocks,
-				leading_whitespace_count, 2, 0 /*ordered_value*/, leading_whitespace_count / 2)
-			continue
-		}
-
-		if ordered_value, marker_byte_length := parse_ordered_list_marker(left_trimmed); ordered_value > 0 {
-			parse_list_item_into_blocks(lines, &line_index, blocks,
-				leading_whitespace_count, marker_byte_length, ordered_value, leading_whitespace_count / 2)
-			continue
-		}
-
-		// Paragraph — collect consecutive non-block-starting lines and join
-		// with single spaces.
-		paragraph_builder: strings.Builder
-		strings.builder_init(&paragraph_builder, 0, 128, context.temp_allocator)
-		for line_index < len(lines) {
-			inner_line          := lines[line_index]
-			inner_left_trimmed  := strings.trim_left(inner_line, " \t")
-			inner_fully_trimmed := strings.trim_space(inner_line)
-			if len(inner_fully_trimmed) == 0                                          { break }
-			if is_horizontal_rule_line(inner_fully_trimmed)                           { break }
-			if count_atx_heading_marker(inner_left_trimmed) > 0                       { break }
-			if strings.has_prefix(inner_left_trimmed, ">")                            { break }
-			if strings.has_prefix(inner_left_trimmed, "```")                          { break }
-			if is_unordered_list_marker(inner_left_trimmed)                           { break }
-			if ordered_value, _ := parse_ordered_list_marker(inner_left_trimmed); ordered_value > 0 { break }
-
-			if strings.builder_len(paragraph_builder) > 0 { strings.write_byte(&paragraph_builder, ' ') }
-			strings.write_string(&paragraph_builder, inner_fully_trimmed)
-			line_index += 1
-		}
-		paragraph_text := strings.to_string(paragraph_builder)
-		runs := parse_inline_runs(paragraph_text)
-		append(blocks, MarkdownBlock{kind = .Paragraph, inline_runs = runs})
-	}
-}
-
-// Parse one list item starting at `lines[line_index]`. Consumes the marker
-// line, then any indented continuation lines (each line indented at least
-// one column past the original `leading_whitespace_count`) until a blank
-// line or a new block construct shows up. Continuation lines are joined
-// into the item text with a single space separator — the visual-line
-// wrapper handles further breakage.
-@(private="file")
-parse_list_item_into_blocks :: proc(
-	lines: [dynamic]string,
-	line_index: ^int,
-	blocks: ^[dynamic]MarkdownBlock,
-	leading_whitespace_count, marker_byte_length, ordered_value, list_depth: int,
-) {
-	first_line := lines[line_index^]
-	left_trimmed := first_line[leading_whitespace_count:]
-
-	item_text_builder: strings.Builder
-	strings.builder_init(&item_text_builder, 0, 64, context.temp_allocator)
-	strings.write_string(&item_text_builder, left_trimmed[marker_byte_length:])
-	line_index^ += 1
-
-	// Continuation must be indented past the marker — at least
-	// `leading_whitespace_count + 1` columns. We accept any indent that
-	// exceeds the parent marker's indent so loosely-formatted docs
-	// (e.g. "    continuation") still attach to the bullet.
-	min_continuation_indent := leading_whitespace_count + 1
-
-	for line_index^ < len(lines) {
-		cont_line := lines[line_index^]
-		if len(strings.trim_space(cont_line)) == 0 { break }
-
-		cont_leading := 0
-		for cont_leading < len(cont_line) && (cont_line[cont_leading] == ' ' || cont_line[cont_leading] == '\t') { cont_leading += 1 }
-		if cont_leading < min_continuation_indent { break }
-
-		cont_trimmed := cont_line[cont_leading:]
-		// Don't swallow a new block as continuation.
-		if is_unordered_list_marker(cont_trimmed)                                   { break }
-		if count_atx_heading_marker(cont_trimmed) > 0                               { break }
-		if strings.has_prefix(cont_trimmed, "```")                                  { break }
-		if strings.has_prefix(cont_trimmed, ">")                                    { break }
-		if v, _ := parse_ordered_list_marker(cont_trimmed); v > 0                   { break }
-		if is_horizontal_rule_line(strings.trim_space(cont_trimmed))                { break }
-
-		if strings.builder_len(item_text_builder) > 0 { strings.write_byte(&item_text_builder, ' ') }
-		strings.write_string(&item_text_builder, cont_trimmed)
-		line_index^ += 1
-	}
-
-	runs := parse_inline_runs(strings.to_string(item_text_builder))
-	append(blocks, MarkdownBlock{
-		kind          = .ListItem,
-		ordered_index = ordered_value,
-		list_depth    = list_depth,
-		inline_runs   = runs,
-	})
-}
-
-@(private="file")
-is_unordered_list_marker :: proc(text: string) -> bool {
-	if len(text) < 2 { return false }
-	if text[0] != '-' && text[0] != '*' && text[0] != '+' { return false }
-	return text[1] == ' '
-}
-
-@(private="file")
-count_atx_heading_marker :: proc(text: string) -> int {
-	hash_count := 0
-	for hash_count < len(text) && hash_count < 6 && text[hash_count] == '#' { hash_count += 1 }
-	if hash_count == 0                                      { return 0 }
-	if hash_count >= len(text)                              { return hash_count }
-	if text[hash_count] == ' ' || text[hash_count] == '\t'  { return hash_count }
-	return 0
-}
-
-@(private="file")
-is_horizontal_rule_line :: proc(trimmed_text: string) -> bool {
-	if len(trimmed_text) < 3 { return false }
-	marker_byte := trimmed_text[0]
-	if marker_byte != '-' && marker_byte != '*' && marker_byte != '_' { return false }
-	marker_run_count := 0
-	for byte_index in 0..<len(trimmed_text) {
-		current_byte := trimmed_text[byte_index]
-		if current_byte == marker_byte { marker_run_count += 1; continue }
-		if current_byte == ' ' || current_byte == '\t' { continue }
-		return false
-	}
-	return marker_run_count >= 3
-}
-
-@(private="file")
-parse_ordered_list_marker :: proc(text: string) -> (parsed_value: int, byte_length: int) {
-	digit_count := 0
-	for digit_count < len(text) && text[digit_count] >= '0' && text[digit_count] <= '9' { digit_count += 1 }
-	if digit_count == 0                  { return 0, 0 }
-	if digit_count + 1 >= len(text)      { return 0, 0 }
-	separator_byte := text[digit_count]
-	if separator_byte != '.' && separator_byte != ')' { return 0, 0 }
-	if text[digit_count + 1] != ' '       { return 0, 0 }
-
-	accumulator := 0
-	for digit_index in 0..<digit_count { accumulator = accumulator * 10 + int(text[digit_index] - '0') }
-	if accumulator <= 0 { return 0, 0 }
-	return accumulator, digit_count + 2
-}
-
-// --- Inline parser ---------------------------------------------------------
-
-@(private="file")
-flush_plain_run :: proc(runs: ^[dynamic]MarkdownInlineRun, source_text: string, from, to: int) {
-	if to > from {
-		append(runs, MarkdownInlineRun{kind = .Plain, text = strings.clone(source_text[from:to])})
-	}
-}
-
-@(private="file")
-parse_inline_runs :: proc(text: string) -> [dynamic]MarkdownInlineRun {
-	runs: [dynamic]MarkdownInlineRun
-	runs.allocator = context.allocator
-
-	plain_start := 0
-	scan_index  := 0
-	text_length := len(text)
-
-	for scan_index < text_length {
-		current_byte := text[scan_index]
-
-		// Inline code (`code`)
-		if current_byte == '`' {
-			closing_offset := find_inline_close(text, scan_index + 1, "`")
-			if closing_offset >= 0 {
-				flush_plain_run(&runs, text, plain_start, scan_index)
-				code_text := text[scan_index + 1:closing_offset]
-				append(&runs, MarkdownInlineRun{kind = .Code, text = strings.clone(code_text)})
-				scan_index  = closing_offset + 1
-				plain_start = scan_index
-				continue
-			}
-		}
-
-		// Bold (** or __)
-		if scan_index + 1 < text_length && (current_byte == '*' || current_byte == '_') && text[scan_index + 1] == current_byte {
-			marker_pair    := text[scan_index:scan_index + 2]
-			closing_offset := find_inline_close(text, scan_index + 2, marker_pair)
-			if closing_offset >= 0 {
-				flush_plain_run(&runs, text, plain_start, scan_index)
-				bold_text := text[scan_index + 2:closing_offset]
-				append(&runs, MarkdownInlineRun{kind = .Bold, text = strings.clone(bold_text)})
-				scan_index  = closing_offset + 2
-				plain_start = scan_index
-				continue
-			}
-		}
-
-		// Italic (single * or _)
-		if current_byte == '*' || current_byte == '_' {
-			next_byte_is_same_marker := scan_index + 1 < text_length && text[scan_index + 1] == current_byte
-			if !next_byte_is_same_marker {
-				marker_string  := text[scan_index:scan_index + 1]
-				closing_offset := find_inline_close(text, scan_index + 1, marker_string)
-				if closing_offset >= 0 {
-					flush_plain_run(&runs, text, plain_start, scan_index)
-					italic_text := text[scan_index + 1:closing_offset]
-					append(&runs, MarkdownInlineRun{kind = .Italic, text = strings.clone(italic_text)})
-					scan_index  = closing_offset + 1
-					plain_start = scan_index
-					continue
-				}
-			}
-		}
-
-		// Link or image
-		if current_byte == '[' || (current_byte == '!' && scan_index + 1 < text_length && text[scan_index + 1] == '[') {
-			link_open_index := scan_index
-			bracket_open    := scan_index
-			if current_byte == '!' { bracket_open = scan_index + 1 }
-			close_bracket_offset := find_inline_close(text, bracket_open + 1, "]")
-			if close_bracket_offset > 0 && close_bracket_offset + 1 < text_length && text[close_bracket_offset + 1] == '(' {
-				close_paren_offset := find_inline_close(text, close_bracket_offset + 2, ")")
-				if close_paren_offset > 0 {
-					flush_plain_run(&runs, text, plain_start, link_open_index)
-					link_text_segment := text[bracket_open + 1:close_bracket_offset]
-					link_url_segment  := text[close_bracket_offset + 2:close_paren_offset]
-					append(&runs, MarkdownInlineRun{
-						kind = .Link,
-						text = strings.clone(link_text_segment),
-						url  = strings.clone(link_url_segment),
-					})
-					scan_index  = close_paren_offset + 1
-					plain_start = scan_index
-					continue
-				}
-			}
-		}
-
-		scan_index += 1
-	}
-
-	flush_plain_run(&runs, text, plain_start, scan_index)
-	return runs
-}
-
-@(private="file")
-find_inline_close :: proc(text: string, search_from: int, marker: string) -> int {
-	if search_from >= len(text) { return -1 }
-	relative_index := strings.index(text[search_from:], marker)
-	if relative_index < 0 { return -1 }
-	return search_from + relative_index
-}
-
-// --- Pixel-based layout ----------------------------------------------------
-
-@(private)
-MarkdownLayoutAtom :: struct {
-	text:        string,
-	kind:        MarkdownInlineKind,
-	url:         string,
-	font:        ^ttf.Font, // chosen at flatten time so layout/render measure with the same handle
-	pixel_width: i32,
-	is_space:    bool,
-	// Pre-built `ttf.Text*` for non-space atoms — avoids a CreateText/Destroy
-	// roundtrip per atom per frame. nil for whitespace atoms (never drawn).
-	// Owned by the enclosing `LayoutedBlock`'s pane cache.
-	text_object: ^ttf.Text,
-}
-
-@(private)
-MarkdownVisualLine :: struct {
-	atoms: [dynamic]MarkdownLayoutAtom,
-}
-
-// One pre-split line of a fenced code block, with its pre-built `ttf.Text*`
-// so the render path can reuse the same handle every frame.
-@(private)
-MarkdownCodeLine :: struct {
-	text_object: ^ttf.Text, // owned by the enclosing LayoutedBlock's pane cache
-}
-
-// Layout cache for one block — computed once on (re)layout and held on the
-// pane until the content or pane width changes. Both the height-accumulation
-// pass and the render pass walk the same cache so geometry stays in sync.
-@(private)
-LayoutedBlock :: struct {
-	block:              ^MarkdownBlock,
-	block_default_font: ^ttf.Font,
-	visual_lines:       [dynamic]MarkdownVisualLine,
-	height_pixels:      i32,
-	// .CodeBlock only: pre-split lines + their text objects.
-	code_lines:         [dynamic]MarkdownCodeLine,
-	// .ListItem only: pre-measured + pre-built marker glyph. Marker text
-	// itself isn't stored — its contents are captured inside the Text object.
-	marker_width:       i32,
-	marker_text_object: ^ttf.Text, // owned by the enclosing pane cache
-}
-
-// Walks the inline runs once and produces width-measured atoms. Whitespace
-// runs (one or more spaces / tabs) become space atoms. Code atoms keep the
-// whole run as one indivisible token so a code span never breaks mid-word.
-// Non-space atoms get a pre-built `^ttf.Text` so the render path doesn't
-// have to CreateText/Destroy per atom per frame.
-@(private="file")
-flatten_runs_to_atoms_pixel :: proc(editor: ^Editor, runs: []MarkdownInlineRun, block_default_font: ^ttf.Font) -> [dynamic]MarkdownLayoutAtom {
-	atoms: [dynamic]MarkdownLayoutAtom
-	// Atoms here are a scratch buffer — layout_atoms_pixel copies each one
-	// (including the text_object pointer) into a per-visual-line dynamic array
-	// allocated on context.allocator, after which this buffer can be discarded.
-	atoms.allocator = context.temp_allocator
-	engine := editor.text_engine
-
-	for run in runs {
-		atom_font := markdown_inline_font(editor, run.kind, block_default_font)
-
-		if run.kind == .Code {
-			width_pixels, _ := markdown_measure_text_pixels(atom_font, run.text)
-			append(&atoms, MarkdownLayoutAtom{
-				text        = run.text,
-				kind        = run.kind,
-				url         = run.url,
-				font        = atom_font,
-				pixel_width = width_pixels,
-				is_space    = false,
-				text_object = markdown_create_text(engine, atom_font, run.text),
-			})
-			continue
-		}
-
-		byte_index := 0
-		for byte_index < len(run.text) {
-			if run.text[byte_index] == ' ' || run.text[byte_index] == '\t' {
-				start_index := byte_index
-				for byte_index < len(run.text) && (run.text[byte_index] == ' ' || run.text[byte_index] == '\t') { byte_index += 1 }
-				whitespace_text := run.text[start_index:byte_index]
-				width_pixels, _ := markdown_measure_text_pixels(atom_font, whitespace_text)
-				append(&atoms, MarkdownLayoutAtom{
-					text        = whitespace_text,
-					kind        = run.kind,
-					url         = run.url,
-					font        = atom_font,
-					pixel_width = width_pixels,
-					is_space    = true,
-					// Whitespace is never drawn as glyphs — leave text_object nil
-					// to avoid burning a TTF text object on each space run.
-				})
-				continue
-			}
-			start_index := byte_index
-			for byte_index < len(run.text) && run.text[byte_index] != ' ' && run.text[byte_index] != '\t' { byte_index += 1 }
-			word_text := run.text[start_index:byte_index]
-			width_pixels, _ := markdown_measure_text_pixels(atom_font, word_text)
-			append(&atoms, MarkdownLayoutAtom{
-				text        = word_text,
-				kind        = run.kind,
-				url         = run.url,
-				font        = atom_font,
-				pixel_width = width_pixels,
-				is_space    = false,
-				text_object = markdown_create_text(engine, atom_font, word_text),
-			})
-		}
-	}
-
-	return atoms
-}
-
-// Pack atoms into visual lines that fit within `max_pixel_width`. Leading
-// whitespace of each line is dropped; trailing whitespace is trimmed at wrap.
-// Output lives on `context.allocator` so the caller can stash it on the pane
-// layout cache.
-@(private="file")
-layout_atoms_pixel :: proc(atoms: []MarkdownLayoutAtom, max_pixel_width: i32) -> [dynamic]MarkdownVisualLine {
-	visual_lines: [dynamic]MarkdownVisualLine
-	visual_lines.allocator = context.allocator
-
-	// `current_atoms` is built per visual line and then donated to the line
-	// (its buffer becomes the line's atoms slice). After each flush we start
-	// fresh — append on a zero-valued [dynamic] picks up the context allocator.
-	current_atoms: [dynamic]MarkdownLayoutAtom
-	current_atoms.allocator = context.allocator
-	current_width: i32 = 0
-
-	for atom in atoms {
-		if atom.is_space {
-			if len(current_atoms) == 0 { continue }
-			append(&current_atoms, atom)
-			current_width += atom.pixel_width
-			continue
-		}
-
-		if current_width + atom.pixel_width > max_pixel_width && len(current_atoms) > 0 {
-			markdown_flush_visual_line(&visual_lines, &current_atoms)
-			current_width = 0
-		}
-
-		append(&current_atoms, atom)
-		current_width += atom.pixel_width
-	}
-
-	markdown_flush_visual_line(&visual_lines, &current_atoms)
-	return visual_lines
-}
-
-// Trim trailing whitespace, then donate `current_atoms`'s buffer to a new
-// visual line and reset `current_atoms` so the next line builds a fresh
-// buffer. Avoids the per-atom copy the old element-by-element flush did.
-@(private="file")
-markdown_flush_visual_line :: proc(visual_lines: ^[dynamic]MarkdownVisualLine, current_atoms: ^[dynamic]MarkdownLayoutAtom) {
-	for len(current_atoms^) > 0 && current_atoms[len(current_atoms^) - 1].is_space {
-		resize(current_atoms, len(current_atoms^) - 1)
-	}
-	if len(current_atoms^) == 0 { return }
-
-	// Hand the dynamic-array header (data, len, cap, allocator) over to the
-	// new visual line; reset our local builder so the next line allocates a
-	// fresh buffer on first append.
-	donated := current_atoms^
-	current_atoms^ = [dynamic]MarkdownLayoutAtom{}
-	current_atoms.allocator = donated.allocator
-	append(visual_lines, MarkdownVisualLine{atoms = donated})
-}
-
-// Lay one block out into a LayoutedBlock. Headings and code blocks have
-// special height math; everything else word-wraps with the body font. Any
-// `^ttf.Text` allocated here is owned by the returned LayoutedBlock and is
-// freed by `markdown_clear_layout_cache`.
-@(private)
-layout_block :: proc(editor: ^Editor, block: ^MarkdownBlock, max_pixel_width: i32) -> LayoutedBlock {
-	layouted: LayoutedBlock
-	layouted.block              = block
-	layouted.block_default_font = markdown_block_default_font(editor, block)
-
-	body_line_step := markdown_body_line_step(editor)
-
-	switch block.kind {
-	case .BlankLine:
-		layouted.height_pixels = body_line_step / 2 + 2
-		return layouted
-
-	case .HorizontalRule:
-		layouted.height_pixels = body_line_step
-		return layouted
-
-	case .Heading:
-		level_index := block.level - 1
-		if level_index < 0 { level_index = 0 }
-		if level_index > 5 { level_index = 5 }
-		heading_line_height := editor.markdown_fonts.heading_line_heights[level_index]
-		if heading_line_height <= 0 { heading_line_height = body_line_step + 4 }
-
-		atoms := flatten_runs_to_atoms_pixel(editor, block.inline_runs[:], layouted.block_default_font)
-		layouted.visual_lines = layout_atoms_pixel(atoms[:], max_pixel_width)
-
-		line_count := len(layouted.visual_lines)
-		if line_count == 0 { line_count = 1 }
-		// Padding above + below the heading so it breathes; bottom padding
-		// also leaves room for the full-width underline.
-		heading_top_padding:    i32 = 10
-		heading_bottom_padding: i32 = 14
-		layouted.height_pixels = heading_top_padding + i32(line_count) * heading_line_height + heading_bottom_padding
-		return layouted
-
-	case .CodeBlock:
-		code_text := ""
-		if len(block.inline_runs) > 0 { code_text = block.inline_runs[0].text }
-		code_font := editor.markdown_fonts.code
-		if code_font == nil { code_font = editor.font }
-		code_line_height := editor.markdown_fonts.code_line_height
-		if code_line_height <= 0 { code_line_height = body_line_step }
-
-		// Pre-split the code block into lines and pre-build a Text object per
-		// line. Render replays these directly — no per-frame string splitting,
-		// no per-frame CreateText.
-		layouted.code_lines = make([dynamic]MarkdownCodeLine, 0, 8, context.allocator)
-		remaining := code_text
-		for {
-			newline_offset := strings.index_byte(remaining, '\n')
-			line_text: string
-			if newline_offset >= 0 {
-				line_text = remaining[:newline_offset]
-				remaining = remaining[newline_offset + 1:]
-			} else {
-				line_text = remaining
-				remaining = ""
-			}
-			append(&layouted.code_lines, MarkdownCodeLine{
-				text_object = markdown_create_text(editor.text_engine, code_font, line_text),
-			})
-			if newline_offset < 0 { break }
-		}
-		line_count := len(layouted.code_lines)
-		if line_count < 1 { line_count = 1 }
-		layouted.height_pixels = i32(line_count) * code_line_height + 12 + MARKDOWN_CODEBLOCK_TRAILING
-		return layouted
-
-	case .Paragraph:
-		atoms := flatten_runs_to_atoms_pixel(editor, block.inline_runs[:], layouted.block_default_font)
-		layouted.visual_lines = layout_atoms_pixel(atoms[:], max_pixel_width)
-		line_count := len(layouted.visual_lines)
-		if line_count == 0 { line_count = 1 }
-		layouted.height_pixels = i32(line_count) * body_line_step + MARKDOWN_PARAGRAPH_TRAILING
-		return layouted
-
-	case .BlockQuote:
-		atoms := flatten_runs_to_atoms_pixel(editor, block.inline_runs[:], layouted.block_default_font)
-		quote_indent_pixels: i32 = 16
-		text_max_pixels := max_pixel_width - quote_indent_pixels
-		if text_max_pixels < 80 { text_max_pixels = 80 }
-		layouted.visual_lines = layout_atoms_pixel(atoms[:], text_max_pixels)
-		line_count := len(layouted.visual_lines)
-		if line_count == 0 { line_count = 1 }
-		layouted.height_pixels = i32(line_count) * body_line_step + MARKDOWN_BLOCKQUOTE_TRAILING
-		return layouted
-
-	case .ListItem:
-		atoms := flatten_runs_to_atoms_pixel(editor, block.inline_runs[:], layouted.block_default_font)
-		// Pre-measure + pre-build the marker glyph. The marker text itself is
-		// captured inside the Text object — we don't need to keep our own copy.
-		marker_text := list_marker_text(block)
-		marker_width_px, _ := markdown_measure_text_pixels(layouted.block_default_font, marker_text)
-		layouted.marker_width       = marker_width_px
-		layouted.marker_text_object = markdown_create_text(editor.text_engine, layouted.block_default_font, marker_text)
-
-		// Nested bullets get pushed right by depth × tab-ish indent. The
-		// marker still sits at column 0 relative to the block's x_start
-		// at render time (the render path adds the depth offset).
-		depth_indent_pixels := i32(block.list_depth) * i32(MARKDOWN_LIST_DEPTH_INDENT)
-		list_indent_pixels  := marker_width_px + 4
-		text_max_pixels := max_pixel_width - list_indent_pixels - depth_indent_pixels
-		if text_max_pixels < 80 { text_max_pixels = 80 }
-		layouted.visual_lines = layout_atoms_pixel(atoms[:], text_max_pixels)
-		line_count := len(layouted.visual_lines)
-		if line_count == 0 { line_count = 1 }
-		layouted.height_pixels = i32(line_count) * body_line_step + MARKDOWN_LIST_ITEM_TRAILING
-		return layouted
-	}
-
-	layouted.height_pixels = body_line_step
-	return layouted
-}
-
-@(private="file")
-list_marker_text :: proc(block: ^MarkdownBlock) -> string {
-	if block.ordered_index <= 0 { return "• " }
-	return fmt.tprintf("%d. ", block.ordered_index)
-}
-
-// --- Update / render -------------------------------------------------------
+// --- Pane update + render -------------------------------------------------
 
 @(private)
 markdown_preview_pane_update :: proc(editor: ^Editor, pane: ^MarkdownPreviewPane, delta_time: f64) {
@@ -1392,7 +287,7 @@ markdown_preview_pane_update :: proc(editor: ^Editor, pane: ^MarkdownPreviewPane
 
 @(private)
 markdown_preview_pane_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pane, content: ^MarkdownPreviewPane, is_active: bool) {
-	markdown_fonts_ensure_loaded_at_editor_scale(&editor.markdown_fonts, editor.font_size)
+	markdown.fonts_ensure_loaded_at_host_scale(&editor.markdown_fonts, editor.font_size)
 
 	view_x := pane.rectangle.x
 	view_y := pane.rectangle.y
@@ -1427,21 +322,24 @@ markdown_preview_pane_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, 
 	usable_text_pixels := view_w - horizontal_padding * 2
 	if usable_text_pixels < 100 { usable_text_pixels = 100 }
 
-	// Lay out only when the cache is stale: usable width changed, the block
-	// count drifted from the cache, or the cache is empty (post-set_content).
-	// Idle re-renders (cursor blink, mouse motion) hit the fast path and
-	// reuse the previous frame's measurements + Text objects unchanged.
+	md_ctx := editor_markdown_context(editor, renderer)
+
+	// Lay out only when the cache is stale: usable width changed, the
+	// block count drifted from the cache, or the cache is empty
+	// (post-set_content). Idle re-renders (cursor blink, mouse motion)
+	// hit the fast path and reuse the previous frame's measurements +
+	// Text objects unchanged.
 	cache_is_stale := content.layout_width != usable_text_pixels ||
 	                  len(content.layouted_blocks) != len(content.blocks)
 	if cache_is_stale {
 		markdown_clear_layout_cache(content)
 		if cap(content.layouted_blocks) < len(content.blocks) {
 			if cap(content.layouted_blocks) > 0 { delete(content.layouted_blocks) }
-			content.layouted_blocks = make([dynamic]LayoutedBlock, 0, len(content.blocks), context.allocator)
+			content.layouted_blocks = make([dynamic]markdown.LayoutedBlock, 0, len(content.blocks), context.allocator)
 		}
 		for block_index in 0..<len(content.blocks) {
 			block := &content.blocks[block_index]
-			append(&content.layouted_blocks, layout_block(editor, block, usable_text_pixels))
+			append(&content.layouted_blocks, markdown.layout_block(&md_ctx, block, usable_text_pixels))
 		}
 		content.layout_width = usable_text_pixels
 	}
@@ -1467,15 +365,16 @@ markdown_preview_pane_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, 
 		layouted := &content.layouted_blocks[layouted_index]
 		block_height := layouted.height_pixels
 		if current_y + block_height >= text_origin_y && current_y < bottom_y {
-			markdown_render_layouted_block(editor, renderer, layouted, text_left_x, current_y, usable_text_pixels)
+			markdown.render_layouted_block(&md_ctx, layouted, text_left_x, current_y, usable_text_pixels)
 		}
 		current_y += block_height
 		if current_y >= bottom_y { break }
 	}
 
-	// Scrollbar — same shape as the editor pane's: 6px normally, 14px on
-	// hover/drag. Track + thumb rectangles get saved back to `content.scrollbar`
-	// so the mouse handlers can hit-test them next frame.
+	// Scrollbar — same shape as the editor pane's: 6px normally, 14px
+	// on hover/drag. Track + thumb rectangles get saved back to
+	// `content.scrollbar` so the mouse handlers can hit-test them next
+	// frame.
 	{
 		full_content_height := f32(total_content_height + vertical_padding * 2)
 		viewport_height_f   := f32(text_area_h)
@@ -1484,184 +383,6 @@ markdown_preview_pane_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, 
 		ui.scrollbar_render(&ui_context, &content.scrollbar, view_x + view_w - 2, text_origin_y, text_area_h,
 			viewport_height_f, full_content_height, content.scroll_y, theme)
 	}
-}
-
-@(private)
-markdown_render_layouted_block :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, layouted: ^LayoutedBlock, x_start, y_start, usable_text_pixels: i32) {
-	block := layouted.block
-
-	body_line_step := markdown_body_line_step(editor)
-
-	switch block.kind {
-	case .BlankLine:
-		return
-
-	case .HorizontalRule:
-		rule_y := y_start + body_line_step / 2
-		sdl3.SetRenderDrawColorFloat(renderer, editor.line_number_color.r, editor.line_number_color.g, editor.line_number_color.b, editor.line_number_color.a)
-		sdl3.RenderLine(renderer, f32(x_start), f32(rule_y), f32(x_start + usable_text_pixels), f32(rule_y))
-		return
-
-	case .Heading:
-		level_index := block.level - 1
-		if level_index < 0 { level_index = 0 }
-		if level_index > 5 { level_index = 5 }
-		heading_line_height := editor.markdown_fonts.heading_line_heights[level_index]
-		if heading_line_height <= 0 { heading_line_height = body_line_step + 4 }
-		heading_color := markdown_heading_color(block.level)
-
-		// Top padding pushes the first heading line away from the previous block.
-		top_padding: i32 = 10
-		current_y := y_start + top_padding
-
-		for visual_line in layouted.visual_lines {
-			markdown_render_visual_line(renderer, editor, visual_line, x_start, current_y, heading_color)
-			current_y += heading_line_height
-		}
-
-		// Full-width underline beneath the last rendered line.
-		underline_y := current_y + 2
-		underline_color := markdown_heading_color(block.level)
-		sdl3.SetRenderDrawColorFloat(renderer, underline_color.r, underline_color.g, underline_color.b, underline_color.a)
-		// Make the underline noticeable on H1/H2 (2 px), thin (1 px) on lower levels.
-		thickness: i32 = block.level <= 2 ? 2 : 1
-		for offset_index in 0..<thickness {
-			sdl3.RenderLine(renderer, f32(x_start), f32(underline_y + offset_index), f32(x_start + usable_text_pixels), f32(underline_y + offset_index))
-		}
-		return
-
-	case .CodeBlock:
-		code_line_height := editor.markdown_fonts.code_line_height
-		if code_line_height <= 0 { code_line_height = body_line_step }
-
-		code_line_count := len(layouted.code_lines)
-		if code_line_count < 1 { code_line_count = 1 }
-
-		// Slab spans the same horizontal margins as a horizontal rule so
-		// code blocks line up vertically with every other body block.
-		// Text inside is inset a few pixels so glyphs don't graze the
-		// rounded corners.
-		code_text_inset: i32 = 8
-		background_rectangle := sdl3.FRect{
-			f32(x_start),
-			f32(y_start),
-			f32(usable_text_pixels),
-			f32(code_line_count * int(code_line_height) + 12),
-		}
-		draw_rounded_filled_rect(renderer, background_rectangle, MARKDOWN_CODE_CORNER_RADIUS_BLOCK, editor.status_bar_background)
-
-		code_color := editor.syntax_keyword_foreground
-		current_y := y_start + 6
-		for code_line in layouted.code_lines {
-			markdown_draw_cached_text(code_line.text_object, x_start + code_text_inset, current_y, code_color)
-			current_y += code_line_height
-		}
-		return
-
-	case .BlockQuote:
-		quote_indent: i32 = 16
-		quote_text_x := x_start + quote_indent
-		bar_height_pixels: i32 = body_line_step
-		if len(layouted.visual_lines) > 0 { bar_height_pixels = i32(len(layouted.visual_lines)) * body_line_step }
-		bar_color := editor.line_number_color
-		bar_rectangle := sdl3.FRect{f32(x_start + 4), f32(y_start), 3, f32(bar_height_pixels)}
-		sdl3.SetRenderDrawColorFloat(renderer, bar_color.r, bar_color.g, bar_color.b, bar_color.a)
-		sdl3.RenderFillRect(renderer, &bar_rectangle)
-
-		quote_default_color := editor.syntax_comment_foreground
-		current_y := y_start
-		for visual_line in layouted.visual_lines {
-			markdown_render_visual_line(renderer, editor, visual_line, quote_text_x, current_y, quote_default_color)
-			current_y += body_line_step
-		}
-		return
-
-	case .ListItem:
-		marker_color := editor.syntax_keyword_foreground
-		// Push nested bullets further right.
-		marker_x := x_start + i32(block.list_depth) * i32(MARKDOWN_LIST_DEPTH_INDENT)
-		markdown_draw_cached_text(layouted.marker_text_object, marker_x, y_start, marker_color)
-		text_left_x := marker_x + layouted.marker_width + 4
-
-		current_y := y_start
-		for visual_line in layouted.visual_lines {
-			markdown_render_visual_line(renderer, editor, visual_line, text_left_x, current_y, editor.foreground_color)
-			current_y += body_line_step
-		}
-		return
-
-	case .Paragraph:
-		current_y := y_start
-		for visual_line in layouted.visual_lines {
-			markdown_render_visual_line(renderer, editor, visual_line, x_start, current_y, editor.foreground_color)
-			current_y += body_line_step
-		}
-		return
-	}
-}
-
-@(private="file")
-markdown_render_visual_line :: proc(
-	renderer: ^sdl3.Renderer, editor: ^Editor,
-	visual_line: MarkdownVisualLine,
-	x_start, y: i32,
-	default_color: sdl3.FColor,
-) {
-	// Hoist line-height lookups out of the inner loop — these are pane-wide
-	// and only need to be resolved once per visual line, not per atom.
-	body_line_height := editor.markdown_fonts.body_line_height
-	if body_line_height <= 0 { body_line_height = editor.line_height }
-	code_line_height := editor.markdown_fonts.code_line_height
-	if code_line_height <= 0 { code_line_height = editor.line_height }
-	code_background_color := editor.status_bar_background
-
-	current_x := x_start
-	for atom in visual_line.atoms {
-		span_pixel_width := atom.pixel_width
-
-		if atom.is_space {
-			current_x += span_pixel_width
-			continue
-		}
-
-		// Inline code spans get a faint background slab with subtle rounded
-		// corners so they read as code chips against the surrounding text.
-		if atom.kind == .Code {
-			code_bg_rectangle := sdl3.FRect{f32(current_x - 3), f32(y), f32(span_pixel_width + 6), f32(code_line_height)}
-			draw_rounded_filled_rect(renderer, code_bg_rectangle, MARKDOWN_CODE_CORNER_RADIUS_INLINE, code_background_color)
-		}
-
-		atom_color := default_color
-		switch atom.kind {
-		case .Plain:  // default_color (per-block: paragraph color, quote color, etc.)
-		case .Bold:   atom_color = editor.cursor_color
-		case .Italic: atom_color = editor.syntax_preprocessor_foreground
-		case .Code:   atom_color = editor.syntax_keyword_foreground
-		case .Link:   atom_color = editor.syntax_type_foreground
-		}
-
-		markdown_draw_cached_text(atom.text_object, current_x, y, atom_color)
-
-		if atom.kind == .Link {
-			underline_y := y + body_line_height - 2
-			sdl3.SetRenderDrawColorFloat(renderer, atom_color.r, atom_color.g, atom_color.b, atom_color.a)
-			sdl3.RenderLine(renderer, f32(current_x), f32(underline_y), f32(current_x + span_pixel_width - 1), f32(underline_y))
-		}
-
-		current_x += span_pixel_width
-	}
-}
-
-@(private="file")
-markdown_heading_color :: proc(level: int) -> sdl3.FColor {
-	switch level {
-	case 1: return sdl3.FColor{0.96, 0.86, 0.60, 1.0}
-	case 2: return sdl3.FColor{0.92, 0.82, 0.58, 1.0}
-	case 3: return sdl3.FColor{0.86, 0.78, 0.58, 1.0}
-	case 4: return sdl3.FColor{0.80, 0.74, 0.60, 1.0}
-	case 5: return sdl3.FColor{0.76, 0.72, 0.62, 1.0}
-	}
-	return sdl3.FColor{0.72, 0.70, 0.64, 1.0}
 }
 
 @(private="file")
@@ -1708,9 +429,3 @@ markdown_preview_handle_key :: proc(editor: ^Editor, content: ^MarkdownPreviewPa
 		content.scroll_y_target = 1e9 // renderer clamps to the actual max
 	}
 }
-
-// --- ui import keepalive ---------------------------------------------------
-
-// Touch the ui package so the import doesn't drop when nothing else in this
-// file references it directly — keeps `ui.Context`-shaped extensions easy.
-@(private="file") _ui_keepalive := ui.Theme{}

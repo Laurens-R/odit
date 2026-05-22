@@ -5,6 +5,9 @@ import "vendor:sdl3/ttf"
 
 import "../dap"
 import "../document"
+import help_pkg "./help"
+import "../markdown"
+import terminal_picker_pkg "./terminal_picker"
 import "../keybindings"
 import "../terminal"
 import "../ui"
@@ -43,41 +46,54 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 	if menu_bar_handle_event(editor, event) { return }
 
 	// Modal dialogs intercept input.
-	if editor.show_help {
+	//
+	// Each modal handler reports back whether it changed anything visible
+	// via a `needs_redraw` bool; we funnel that through `editor_mark_dirty`
+	// so the modal package stays unaware of the editor's dirty-tracking.
+	if editor.help.visible {
+		needs_redraw := false
 		#partial switch event.type {
 		case .KEY_DOWN:
 			pressed_key := event.key.key
 			switch pressed_key {
 			case sdl3.K_F1, sdl3.K_ESCAPE:
-				help_close(editor)
+				needs_redraw = help_pkg.close(&editor.help)
 			case sdl3.K_UP:
-				help_scroll_by(editor, -editor.line_height)
+				help_pkg.scroll_by(&editor.help, -editor.line_height)
+				needs_redraw = true
 			case sdl3.K_DOWN:
-				help_scroll_by(editor, editor.line_height)
+				help_pkg.scroll_by(&editor.help, editor.line_height)
+				needs_redraw = true
 			case sdl3.K_PAGEUP:
 				page_step := max(i32(1), editor.line_height * 8)
-				help_scroll_by(editor, -page_step)
+				help_pkg.scroll_by(&editor.help, -page_step)
+				needs_redraw = true
 			case sdl3.K_PAGEDOWN:
 				page_step := max(i32(1), editor.line_height * 8)
-				help_scroll_by(editor, page_step)
+				help_pkg.scroll_by(&editor.help, page_step)
+				needs_redraw = true
 			case sdl3.K_HOME:
-				help_scroll_to_top(editor)
+				help_pkg.scroll_to_top(&editor.help)
+				needs_redraw = true
 			case sdl3.K_END:
-				help_scroll_to_bottom(editor)
+				help_pkg.scroll_to_bottom(&editor.help)
+				needs_redraw = true
 			}
 		case .MOUSE_WHEEL:
-			help_scroll_by(editor, -i32(event.wheel.y * f32(editor.line_height) * 3))
+			help_pkg.scroll_by(&editor.help, -i32(event.wheel.y * f32(editor.line_height) * 3))
+			needs_redraw = true
 		case .MOUSE_MOTION:
-			help_handle_mouse_motion(editor, event.motion.x, event.motion.y)
+			needs_redraw = help_pkg.handle_mouse_motion(&editor.help, event.motion.x, event.motion.y)
 		case .MOUSE_BUTTON_DOWN:
 			if event.button.button == sdl3.BUTTON_LEFT {
-				help_handle_mouse_down(editor, event.button.x, event.button.y)
+				needs_redraw = help_pkg.handle_mouse_down(&editor.help, event.button.x, event.button.y)
 			}
 		case .MOUSE_BUTTON_UP:
 			if event.button.button == sdl3.BUTTON_LEFT {
-				help_handle_mouse_up(editor)
+				needs_redraw = help_pkg.handle_mouse_up(&editor.help)
 			}
 		}
+		if needs_redraw { editor_mark_dirty(editor) }
 		return
 	}
 	if editor.show_browse {
@@ -112,8 +128,17 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 		open_docs_dialog_handle_event(editor, event)
 		return
 	}
-	if editor.show_terminal_picker {
-		terminal_picker_handle_event(editor, event)
+	if editor.terminal_picker.visible {
+		entries := terminal_picker_entries(editor, context.temp_allocator)
+		intent, needs_redraw := terminal_picker_pkg.handle_event(&editor.terminal_picker, event, entries)
+		if intent != nil {
+			#partial switch intent_value in intent {
+			case terminal_picker_pkg.Activate:
+				editor_activate_terminal_at(editor, intent_value.entry_index)
+			}
+			needs_redraw = true
+		}
+		if needs_redraw { editor_mark_dirty(editor) }
 		return
 	}
 	if editor.show_tasks_dialog {
@@ -154,7 +179,7 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 				// Typing in the document dismisses the hover popup — it
 				// only makes sense as long as the cursor sits on the
 				// symbol it was anchored to.
-				if editor.hover_popup.is_visible { hover_popup_close(editor) }
+				if editor.hover_popup.visible { hover_popup_close(editor) }
 				// Mirror keystrokes into the completion popup filter when it's open.
 				_ = completion_popup_consume_text(editor, input_text)
 				editor_insert_text(editor, input_text)
@@ -179,11 +204,11 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 		pressed_key   := event.key.key
 		key_modifiers := event.key.mod
 
-		if pressed_key == sdl3.K_ESCAPE && editor.hover_popup.is_visible {
+		if pressed_key == sdl3.K_ESCAPE && editor.hover_popup.visible {
 			hover_popup_close(editor)
 			return
 		}
-		if pressed_key == sdl3.K_ESCAPE && editor.signature_popup.is_visible {
+		if pressed_key == sdl3.K_ESCAPE && editor.signature_popup.visible {
 			signature_popup_close(editor)
 			return
 		}
@@ -193,7 +218,7 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 		// Completion popup intercepts navigation + Enter/Tab while open. It
 		// passes text-input events through so the user can keep typing —
 		// the filter is updated via the consume_text hook below.
-		if editor.completion_popup.is_visible {
+		if editor.completion_popup.visible {
 			if completion_popup_handle_key(editor, event) { return }
 		}
 
@@ -316,7 +341,7 @@ editor_dispatch_shortcut :: proc(editor: ^Editor, pressed_key: sdl3.Keycode, key
 	action := keybindings.lookup(&editor.keybindings, pressed_key, key_modifiers, .Global)
 
 	#partial switch action {
-	case .Help:               help_toggle(editor)
+	case .Help:               if help_pkg.toggle(&editor.help) { editor_mark_dirty(editor) }
 	case .FileBrowser:        browse_open(editor)
 	case .GitHistory:         git_history_dialog_open(editor)
 	case .OpenDocs:           open_docs_dialog_open(editor)
@@ -329,7 +354,7 @@ editor_dispatch_shortcut :: proc(editor: ^Editor, pressed_key: sdl3.Keycode, key
 	case .StepIn:             dap.client_step_in(editor.active_dap_client)
 	case .ToggleTerminal:     editor_toggle_terminal(editor)
 	case .NewTerminal:        editor_terminal_create_new(editor)
-	case .PickTerminal:       terminal_picker_open(editor)
+	case .PickTerminal:       editor_open_terminal_picker(editor)
 	case .SwapPanes:
 		find_close(editor)
 		replace_close(editor, false)
@@ -596,7 +621,7 @@ editor_apply_font_size :: proc(editor: ^Editor, requested_size: f32) {
 	// reload the markdown fonts at the new scale. The next render
 	// re-lays-out at the new metrics.
 	editor_invalidate_markdown_caches(editor)
-	markdown_fonts_apply_zoom(&editor.markdown_fonts, editor.font_size)
+	markdown.fonts_apply_zoom(&editor.markdown_fonts, editor.font_size)
 
 	// Persist so the next session opens at the same zoom level. Tiny JSON
 	// write; happens at most every couple of wheel ticks.

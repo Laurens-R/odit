@@ -1,8 +1,24 @@
-package editor
+// Package `help` is the F1 help dialog modal. It owns its visibility +
+// scroll state, renders itself against a `ui.Context` the editor builds,
+// and reports back via plain return values whether the host needs to
+// repaint. Zero coupling to the editor package — drop in by hosting a
+// `help.State` field and calling the small public API below.
+//
+// Extracted from src/editor/help.odin during the modal-subpackage split.
+// Serves as the reference pattern for the other modals: state-owning
+// package + ui.Context-driven render + "needs_redraw" booleans returned
+// upward so the host stays in charge of dirty-tracking.
+package help
 
 import "vendor:sdl3"
 
-import "../ui"
+import "../../ui"
+
+State :: struct {
+	visible:   bool,
+	scroll:    i32,
+	scrollbar: ui.Scrollbar,
+}
 
 @(private="file")
 HelpItem :: struct {
@@ -16,8 +32,8 @@ HelpSection :: struct {
 	items: []HelpItem,
 }
 
-// Section content is stored as package-scope fixed arrays so that slicing them
-// into HelpSection.items references stable memory rather than a stack frame.
+// Section content is package-scope so the slice in `HelpSection.items`
+// references stable memory rather than a stack frame.
 
 @(private="file")
 editing_items := [?]HelpItem{
@@ -124,41 +140,93 @@ help_sections := [?]HelpSection{
 	{title = "OTHER",      items = other_items[:]},
 }
 
-@(private)
-help_toggle :: proc(editor: ^Editor) {
-	if !editor.show_help {
-		editor.help_scroll = 0
+// Flip the modal's visibility. Resets scroll to the top when *opening* so
+// the user always sees the intro line, never a mid-section landing. Always
+// returns true — every toggle changes what's drawn.
+toggle :: proc(state: ^State) -> (needs_redraw: bool) {
+	if !state.visible { state.scroll = 0 }
+	state.visible = !state.visible
+	return true
+}
+
+// Hide the modal. No-op (and no repaint) when it's already hidden.
+close :: proc(state: ^State) -> (needs_redraw: bool) {
+	if !state.visible { return false }
+	state.visible = false
+	return true
+}
+
+scroll_by :: proc(state: ^State, scroll_delta: i32) {
+	state.scroll += scroll_delta
+	// `render` clamps the upper bound each frame; only lower-bound clamp here.
+	if state.scroll < 0 { state.scroll = 0 }
+}
+
+scroll_to_top    :: proc(state: ^State) { state.scroll = 0 }
+// Sentinel — render clamps to the real max so we don't have to recompute
+// content height here just to position the bottom.
+scroll_to_bottom :: proc(state: ^State) { state.scroll = 1 << 30 }
+
+// Mouse handlers. Each returns `needs_redraw=true` when the visible state
+// changed, so the host can decide whether to mark the next frame dirty.
+//
+// Plain hover updates are reported as needing a redraw so the scrollbar
+// thumb's highlight feedback animates promptly — same contract the editor's
+// in-package scrollbar handlers used to satisfy via `editor_mark_dirty`.
+
+handle_mouse_motion :: proc(state: ^State, mouse_x, mouse_y: f32) -> (needs_redraw: bool) {
+	if state.scrollbar.is_dragging {
+		apply_scrollbar_drag(state, mouse_y)
+		return true
 	}
-	editor.show_help = !editor.show_help
+	return ui.scrollbar_update_hover(&state.scrollbar, mouse_x, mouse_y)
 }
 
-@(private)
-help_close :: proc(editor: ^Editor) {
-	editor.show_help = false
+handle_mouse_down :: proc(state: ^State, mouse_x, mouse_y: f32) -> (needs_redraw: bool) {
+	if ui.scrollbar_thumb_hit(&state.scrollbar, mouse_x, mouse_y) {
+		ui.scrollbar_begin_thumb_drag(&state.scrollbar, mouse_y)
+		return false
+	}
+	if ui.scrollbar_track_hit(&state.scrollbar, mouse_x, mouse_y) {
+		ui.scrollbar_begin_track_drag(&state.scrollbar)
+		apply_scrollbar_drag(state, mouse_y)
+		return true
+	}
+	return false
 }
 
-@(private)
-help_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewport_width, viewport_height: i32) {
-	ui_context := editor_make_ui_context(editor, renderer)
+handle_mouse_up :: proc(state: ^State) -> (needs_redraw: bool) {
+	if state.scrollbar.is_dragging {
+		ui.scrollbar_end_drag(&state.scrollbar)
+		return true
+	}
+	return false
+}
+
+// Paint the modal at the centre of the given viewport. Caller must verify
+// `state.visible` first; this proc does no visibility check so it can be
+// composed against test harnesses or screenshot tooling without the modal
+// state having to be open.
+render :: proc(state: ^State, ui_context: ^ui.Context, viewport_width, viewport_height: i32) {
 	theme := ui.default_theme()
 
 	// Dim everything behind the dialog.
-	ui.draw_dim_overlay(&ui_context, viewport_width, viewport_height, theme.overlay)
+	ui.draw_dim_overlay(ui_context, viewport_width, viewport_height, theme.overlay)
 
 	// Size the dialog from font metrics, then clamp to viewport.
 	desired_columns: i32 = 56
 	desired_rows: i32 = 34
-	dialog_width  := min(desired_columns * editor.character_width + 32, viewport_width  - 40)
-	dialog_height := min(desired_rows * editor.line_height + 40, viewport_height - 40)
+	dialog_width  := min(desired_columns * ui_context.character_width + 32, viewport_width  - 40)
+	dialog_height := min(desired_rows * ui_context.line_height + 40, viewport_height - 40)
 	if dialog_width  < 200 { dialog_width  = min(viewport_width  - 16, 200) }
 	if dialog_height < 200 { dialog_height = min(viewport_height - 16, 200) }
 	dialog_x := (viewport_width  - dialog_width)  / 2
 	dialog_y := (viewport_height - dialog_height) / 2
 	dialog_rectangle := sdl3.FRect{f32(dialog_x), f32(dialog_y), f32(dialog_width), f32(dialog_height)}
 
-	content_rectangle := ui.draw_window(&ui_context, dialog_rectangle, "Help — odit", theme)
+	content_rectangle := ui.draw_window(ui_context, dialog_rectangle, "Help — odit", theme)
 
-	line_step := editor.line_height
+	line_step := ui_context.line_height
 
 	// Carve out a footer strip at the bottom of the dialog; everything above
 	// it is the scrollable viewport.
@@ -171,29 +239,29 @@ help_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewport_width, v
 	}
 	if viewport_rectangle.h < f32(line_step) { viewport_rectangle.h = f32(line_step) }
 
-	total_content_height := help_content_height(line_step)
+	total_content_height := content_height(line_step)
 
-	origin_x, origin_y, scroll_view := ui.scroll_view_begin(&ui_context, &editor.help_scrollbar, viewport_rectangle, &editor.help_scroll, total_content_height)
+	origin_x, origin_y, scroll_view := ui.scroll_view_begin(ui_context, &state.scrollbar, viewport_rectangle, &state.scroll, total_content_height)
 
-	ui.draw_text(&ui_context, "Welcome to odit — a terminal-inspired text editor.", origin_x, origin_y, theme.text_foreground)
+	ui.draw_text(ui_context, "Welcome to odit — a terminal-inspired text editor.", origin_x, origin_y, theme.text_foreground)
 	origin_y += line_step
-	ui.draw_text(&ui_context, "Every shortcut currently wired up is listed below.", origin_x, origin_y, theme.dim_foreground)
+	ui.draw_text(ui_context, "Every shortcut currently wired up is listed below.", origin_x, origin_y, theme.dim_foreground)
 	origin_y += line_step + 6
 
-	ui.draw_hrule(&ui_context, origin_x, origin_y, i32(viewport_rectangle.w), theme.border)
+	ui.draw_hrule(ui_context, origin_x, origin_y, i32(viewport_rectangle.w), theme.border)
 	origin_y += 8
 
-	keybinding_column_x  := origin_x + 2 * editor.character_width
-	description_column_x := origin_x + 18 * editor.character_width
+	keybinding_column_x  := origin_x + 2 * ui_context.character_width
+	description_column_x := origin_x + 18 * ui_context.character_width
 
 	for section, section_index in help_sections {
 		if section_index > 0 { origin_y += line_step / 2 }
-		ui.draw_text(&ui_context, section.title, origin_x, origin_y, theme.accent_foreground)
+		ui.draw_text(ui_context, section.title, origin_x, origin_y, theme.accent_foreground)
 		origin_y += line_step + 2
 
 		for help_item in section.items {
-			ui.draw_text(&ui_context, help_item.keybinding,  keybinding_column_x,  origin_y, theme.title_foreground)
-			ui.draw_text(&ui_context, help_item.description, description_column_x, origin_y, theme.text_foreground)
+			ui.draw_text(ui_context, help_item.keybinding,  keybinding_column_x,  origin_y, theme.title_foreground)
+			ui.draw_text(ui_context, help_item.description, description_column_x, origin_y, theme.text_foreground)
 			origin_y += line_step
 		}
 	}
@@ -202,17 +270,17 @@ help_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewport_width, v
 
 	// Footer hint, anchored to the bottom of the dialog (outside the viewport).
 	footer_text := "Press F1 or Esc to close"
-	footer_width, _ := ui.text_size(&ui_context, footer_text)
+	footer_width, _ := ui.text_size(ui_context, footer_text)
 	footer_x := i32(dialog_rectangle.x + (dialog_rectangle.w - f32(footer_width)) / 2)
 	footer_y := i32(dialog_rectangle.y + dialog_rectangle.h) - line_step - 10
-	ui.draw_text(&ui_context, footer_text, footer_x, footer_y, theme.dim_foreground)
+	ui.draw_text(ui_context, footer_text, footer_x, footer_y, theme.dim_foreground)
 }
 
-// Compute the total pixel height of the help content laid out at `line_step`.
-// Mirrors the layout in `help_render` exactly so scroll clamping and the
-// scrollbar thumb stay in sync with what's actually drawn.
+// Total pixel height of the help content laid out at `line_step`. Mirrors
+// the layout in `render` exactly so scroll clamping and the scrollbar
+// thumb stay in sync with what's actually drawn.
 @(private="file")
-help_content_height :: proc(line_step: i32) -> i32 {
+content_height :: proc(line_step: i32) -> i32 {
 	accumulated_height: i32 = 0
 	accumulated_height += line_step           // intro line 1
 	accumulated_height += line_step + 6       // intro line 2 + gap
@@ -226,75 +294,17 @@ help_content_height :: proc(line_step: i32) -> i32 {
 	return accumulated_height
 }
 
-@(private)
-help_scroll_by :: proc(editor: ^Editor, scroll_delta: i32) {
-	editor.help_scroll += scroll_delta
-	// Render clamps to the valid range each frame; no need to compute max here.
-	if editor.help_scroll < 0 { editor.help_scroll = 0 }
-}
-
-@(private)
-help_scroll_to_top :: proc(editor: ^Editor) {
-	editor.help_scroll = 0
-}
-
-@(private)
-help_scroll_to_bottom :: proc(editor: ^Editor) {
-	// Use a sentinel large value; render clamps to the actual max.
-	editor.help_scroll = 1 << 30
-}
-
-// --- Mouse interactions on the scrollbar ---------------------------------
-//
-// The help dialog modal owns its event handling and doesn't go through the
-// main editor mouse dispatch, so the central `ui.Scrollbar` widget needs
-// explicit forwarding for hover + thumb-drag + track-click. Same shape as
-// the debug-panel section scrollbar handling.
-
-@(private)
-help_handle_mouse_motion :: proc(editor: ^Editor, mouse_x, mouse_y: f32) {
-	if editor.help_scrollbar.is_dragging {
-		help_apply_scrollbar_drag(editor, mouse_y)
-		return
-	}
-	if ui.scrollbar_update_hover(&editor.help_scrollbar, mouse_x, mouse_y) {
-		editor_mark_dirty(editor)
-	}
-}
-
-@(private)
-help_handle_mouse_down :: proc(editor: ^Editor, mouse_x, mouse_y: f32) {
-	if ui.scrollbar_thumb_hit(&editor.help_scrollbar, mouse_x, mouse_y) {
-		ui.scrollbar_begin_thumb_drag(&editor.help_scrollbar, mouse_y)
-		return
-	}
-	if ui.scrollbar_track_hit(&editor.help_scrollbar, mouse_x, mouse_y) {
-		ui.scrollbar_begin_track_drag(&editor.help_scrollbar)
-		help_apply_scrollbar_drag(editor, mouse_y)
-		return
-	}
-}
-
-@(private)
-help_handle_mouse_up :: proc(editor: ^Editor) {
-	if editor.help_scrollbar.is_dragging {
-		ui.scrollbar_end_drag(&editor.help_scrollbar)
-		editor_mark_dirty(editor)
-	}
-}
-
 // Recover content height from the last-rendered track/thumb ratio so we
-// don't have to re-run `help_content_height` here — track/thumb were sized
+// don't have to re-run `content_height` here — track/thumb were sized
 // from it on the previous frame, and the inverse gives us the original.
 @(private="file")
-help_apply_scrollbar_drag :: proc(editor: ^Editor, mouse_y: f32) {
-	track := editor.help_scrollbar.track_rectangle
-	thumb := editor.help_scrollbar.thumb_rectangle
+apply_scrollbar_drag :: proc(state: ^State, mouse_y: f32) {
+	track := state.scrollbar.track_rectangle
+	thumb := state.scrollbar.thumb_rectangle
 	if track.h <= 0 || thumb.h <= 0 { return }
-	content_height := track.h * track.h / thumb.h
-	max_scroll := content_height - track.h
+	max_height := track.h * track.h / thumb.h
+	max_scroll := max_height - track.h
 	if max_scroll < 0 { max_scroll = 0 }
-	new_scroll := ui.scrollbar_drag_to(&editor.help_scrollbar, mouse_y, max_scroll)
-	editor.help_scroll = i32(new_scroll)
-	editor_mark_dirty(editor)
+	new_scroll := ui.scrollbar_drag_to(&state.scrollbar, mouse_y, max_scroll)
+	state.scroll = i32(new_scroll)
 }

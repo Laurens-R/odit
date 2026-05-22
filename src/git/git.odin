@@ -1,4 +1,11 @@
-package editor
+// Package `git` is a thin wrapper over the `git` command-line tool, used
+// by the editor to surface per-file status in the file browser and a
+// commit log in the git-history dialog. It has no UI or editor coupling —
+// callers feed it directory paths and read back plain enum + string data.
+//
+// Lives outside `editor` so other future tooling (a status pane, a CI
+// check, …) can pull it in without dragging the whole editor in.
+package git
 
 import "base:runtime"
 import "core:os"
@@ -6,8 +13,8 @@ import "core:strings"
 
 // Per-entry git state. Inferred from `git status --porcelain` output. Multiple
 // hits on the same entry (a folder containing multiple changed files) are
-// collapsed to the highest-priority status — see `git_priority` below.
-GitStatus :: enum u8 {
+// collapsed to the highest-priority status — see `priority` below.
+Status :: enum u8 {
 	None,       // tracked & clean, or not in a git repo at all
 	Untracked,  // not tracked yet (`??`)
 	Added,      // staged for addition (`A `)
@@ -21,18 +28,17 @@ GitStatus :: enum u8 {
 // don't pay the cost (and latency) of spawning a process per directory
 // navigation when git isn't installed.
 @(private="file")
-git_available_state :: enum {
+Availability :: enum {
 	Unchecked,
 	Available,
 	Missing,
 }
 
 @(private="file")
-git_availability: git_available_state = .Unchecked
+availability_state: Availability = .Unchecked
 
-@(private)
-git_is_available :: proc() -> bool {
-	switch git_availability {
+is_available :: proc() -> bool {
+	switch availability_state {
 	case .Available: return true
 	case .Missing:   return false
 	case .Unchecked:
@@ -46,7 +52,7 @@ git_is_available :: proc() -> bool {
 	_ = stderr_bytes
 
 	git_runs_successfully := process_error == nil && process_state.exited && process_state.exit_code == 0
-	git_availability = git_runs_successfully ? .Available : .Missing
+	availability_state = git_runs_successfully ? .Available : .Missing
 	return git_runs_successfully
 }
 
@@ -61,22 +67,12 @@ git_is_available :: proc() -> bool {
 //
 // The map and underlying strings are allocated from the provided allocator
 // (typically `context.temp_allocator`).
-// Normalize a filesystem path for prefix comparison: forward slashes, no
-// trailing separator. Returns a temp-allocator-backed string.
-@(private="file")
-normalize_path_for_compare :: proc(path: string, allocator: runtime.Allocator) -> string {
-	forward_slashed_path, _ := strings.replace_all(path, "\\", "/", allocator)
-	forward_slashed_path = strings.trim_right(forward_slashed_path, "/")
-	return forward_slashed_path
-}
-
-@(private)
-git_query_status :: proc(directory_path: string, allocator := context.temp_allocator) -> map[string]GitStatus {
-	status_map := make(map[string]GitStatus, allocator = allocator)
+query_status :: proc(directory_path: string, allocator := context.temp_allocator) -> map[string]Status {
+	status_map := make(map[string]Status, allocator = allocator)
 
 	// Skip the per-directory spawn entirely if we've already determined that
 	// git isn't on PATH.
-	if !git_is_available() { return status_map }
+	if !is_available() { return status_map }
 
 	// First, resolve the repo root for `directory_path`. Porcelain output is
 	// always reported as paths *relative to the repo root*, regardless of
@@ -159,7 +155,7 @@ git_query_status :: proc(directory_path: string, allocator := context.temp_alloc
 		// flat-mode entry) or prefix rollup (directory entry in tree view).
 		classified_status := classify_git_code(status_code)
 		if existing_status, already_exists := status_map[entry_path]; already_exists {
-			if git_priority(classified_status) > git_priority(existing_status) {
+			if priority(classified_status) > priority(existing_status) {
 				status_map[entry_path] = classified_status
 			}
 		} else {
@@ -171,22 +167,21 @@ git_query_status :: proc(directory_path: string, allocator := context.temp_alloc
 }
 
 // Look up the effective git status for a single browse entry, given the
-// raw status map returned by `git_query_status`. For files (and flat-mode
+// raw status map returned by `query_status`. For files (and flat-mode
 // entries with embedded slashes) we look up by exact name. For directories,
 // we roll up to the highest-priority status of any path inside that
 // directory's subtree.
-@(private)
-git_status_for_entry :: proc(status_map: map[string]GitStatus, entry_name: string, entry_is_directory: bool) -> GitStatus {
+status_for_entry :: proc(status_map: map[string]Status, entry_name: string, entry_is_directory: bool) -> Status {
 	if exact_status, found_exact := status_map[entry_name]; found_exact {
 		return exact_status
 	}
 	if !entry_is_directory { return .None }
 
 	directory_path_prefix := strings.concatenate({entry_name, "/"}, context.temp_allocator)
-	best_status := GitStatus.None
+	best_status := Status.None
 	for descendant_path, descendant_status in status_map {
 		if strings.has_prefix(descendant_path, directory_path_prefix) {
-			if git_priority(descendant_status) > git_priority(best_status) {
+			if priority(descendant_status) > priority(best_status) {
 				best_status = descendant_status
 			}
 		}
@@ -195,8 +190,7 @@ git_status_for_entry :: proc(status_map: map[string]GitStatus, entry_name: strin
 }
 
 // Short text tag for the row label. Empty string for clean / unknown entries.
-@(private)
-git_status_tag :: proc(status: GitStatus) -> string {
+status_tag :: proc(status: Status) -> string {
 	switch status {
 	case .None:      return ""
 	case .Untracked: return "[N]"
@@ -208,38 +202,9 @@ git_status_tag :: proc(status: GitStatus) -> string {
 	return ""
 }
 
-// Map a two-character porcelain status code to our enum. Looks at both the
-// staged (`status_code[0]`) and unstaged (`status_code[1]`) positions and
-// returns the highest-priority interpretation.
-@(private="file")
-classify_git_code :: proc(status_code: string) -> GitStatus {
-	if status_code == "??" { return .Untracked }
-
-	best_status := GitStatus.None
-	for code_character_index in 0..<len(status_code) {
-		code_character := status_code[code_character_index]
-		interpreted_status: GitStatus
-		switch code_character {
-		case 'A': interpreted_status = .Added
-		case 'D': interpreted_status = .Deleted
-		case 'M': interpreted_status = .Modified
-		case 'R': interpreted_status = .Renamed
-		case 'C': interpreted_status = .Added // copy — treat like add for display purposes
-		case 'U': interpreted_status = .Modified // unmerged — show as modified
-		case:     interpreted_status = .None
-		}
-		if git_priority(interpreted_status) > git_priority(best_status) {
-			best_status = interpreted_status
-		}
-	}
-	if best_status == .None { return .Modified }
-	return best_status
-}
-
 // Ordering for collapsing multiple hits on the same entry. Higher = stronger
 // visual signal (we want "deleted" to win over "modified" in a folder, etc.).
-@(private)
-git_priority :: proc(status: GitStatus) -> int {
+priority :: proc(status: Status) -> int {
 	switch status {
 	case .None:      return 0
 	case .Untracked: return 1
@@ -249,4 +214,43 @@ git_priority :: proc(status: GitStatus) -> int {
 	case .Deleted:   return 5
 	}
 	return 0
+}
+
+// --- Helpers --------------------------------------------------------------
+
+// Normalize a filesystem path for prefix comparison: forward slashes, no
+// trailing separator. Returns an allocator-backed string.
+@(private="file")
+normalize_path_for_compare :: proc(path: string, allocator: runtime.Allocator) -> string {
+	forward_slashed_path, _ := strings.replace_all(path, "\\", "/", allocator)
+	forward_slashed_path = strings.trim_right(forward_slashed_path, "/")
+	return forward_slashed_path
+}
+
+// Map a two-character porcelain status code to our enum. Looks at both the
+// staged (`status_code[0]`) and unstaged (`status_code[1]`) positions and
+// returns the highest-priority interpretation.
+@(private="file")
+classify_git_code :: proc(status_code: string) -> Status {
+	if status_code == "??" { return .Untracked }
+
+	best_status := Status.None
+	for code_character_index in 0..<len(status_code) {
+		code_character := status_code[code_character_index]
+		interpreted_status: Status
+		switch code_character {
+		case 'A': interpreted_status = .Added
+		case 'D': interpreted_status = .Deleted
+		case 'M': interpreted_status = .Modified
+		case 'R': interpreted_status = .Renamed
+		case 'C': interpreted_status = .Added // copy — treat like add for display purposes
+		case 'U': interpreted_status = .Modified // unmerged — show as modified
+		case:     interpreted_status = .None
+		}
+		if priority(interpreted_status) > priority(best_status) {
+			best_status = interpreted_status
+		}
+	}
+	if best_status == .None { return .Modified }
+	return best_status
 }

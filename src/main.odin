@@ -23,7 +23,7 @@ FONT_SIZE     :: 16.0
 
 init_sdl :: proc() -> bool {
 	_ = sdl3.SetAppMetadata("odit", "0.1.0", "com.glowingideas.odit")
-
+    
 	if !sdl3.Init(sdl3.INIT_VIDEO) {
 		sdl3.Log("Couldn't initialize SDL3")
 		return false

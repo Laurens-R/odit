@@ -7,6 +7,7 @@ import "core:slice"
 import "core:strings"
 import "vendor:sdl3"
 
+import "../git"
 import "../keybindings"
 import "../ui"
 
@@ -14,7 +15,7 @@ import "../ui"
 BrowseEntry :: struct {
 	name:       string, // owned
 	is_dir:     bool,
-	git_status: GitStatus, // .None if not in a git repo or unchanged
+	git_status: git.Status, // .None if not in a git repo or unchanged
 }
 
 @(private)
@@ -274,9 +275,9 @@ browse_load_directory :: proc(editor: ^Editor, directory_path: string) {
 	// the highest-priority status across the subtree, for files / flat-mode
 	// entries we look up by exact name.
 	{
-		git_status_map := git_query_status(directory_path)
+		git_status_map := git.query_status(directory_path)
 		for &entry in editor.browse_state.entries {
-			entry.git_status = git_status_for_entry(git_status_map, entry.name, entry.is_dir)
+			entry.git_status = git.status_for_entry(git_status_map, entry.name, entry.is_dir)
 		}
 	}
 
@@ -586,7 +587,7 @@ browse_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, viewport_width,
 		// git status tag. The slot is filled with [N]/[M]/[D]/[R] when the
 		// entry has a status and left blank otherwise, so names line up in
 		// the same column regardless of whether they have a tag.
-		git_status_tag_string := git_status_tag(entry.git_status)
+		git_status_tag_string := git.status_tag(entry.git_status)
 		if len(git_status_tag_string) == 0 { git_status_tag_string = "   " }
 		row_label := fmt.tprintf("%s %s", git_status_tag_string, entry.name)
 

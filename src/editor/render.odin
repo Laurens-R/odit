@@ -7,6 +7,8 @@ import "vendor:sdl3/ttf"
 
 import "../dap"
 import "../document"
+import help_pkg "./help"
+import terminal_picker_pkg "./terminal_picker"
 import "../lsp"
 import "../syntax"
 import "../terminal"
@@ -370,8 +372,9 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 	if editor.show_symbols {
 		symbols_dialog_render(editor, renderer, window_width, window_height)
 	}
-	if editor.show_help {
-		help_render(editor, renderer, window_width, window_height)
+	if editor.help.visible {
+		ui_context := editor_make_ui_context(editor, renderer)
+		help_pkg.render(&editor.help, &ui_context, window_width, window_height)
 	}
 	if editor.show_find_in_files {
 		find_in_files_render(editor, renderer, window_width, window_height)
@@ -391,8 +394,10 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 	if editor.show_open_docs {
 		open_docs_dialog_render(editor, renderer, window_width, window_height)
 	}
-	if editor.show_terminal_picker {
-		terminal_picker_render(editor, renderer, window_width, window_height)
+	if editor.terminal_picker.visible {
+		ui_context := editor_make_ui_context(editor, renderer)
+		entries := terminal_picker_entries(editor, context.temp_allocator)
+		terminal_picker_pkg.render(&editor.terminal_picker, &ui_context, entries, window_width, window_height)
 	}
 	if editor.show_tasks_dialog {
 		tasks_dialog_render(editor, renderer, window_width, window_height)

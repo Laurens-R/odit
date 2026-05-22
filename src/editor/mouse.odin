@@ -96,7 +96,7 @@ editor_mouse_down :: proc(editor: ^Editor, mouse_x: f32, mouse_y: f32, shift_hel
 	// Any click in the editor dismisses the LSP hover popup — it's
 	// anchored to a specific symbol, so clicking elsewhere counts as
 	// "the user moved on".
-	if editor.hover_popup.is_visible { hover_popup_close(editor) }
+	if editor.hover_popup.visible { hover_popup_close(editor) }
 
 	// Grab the divider first when both panes are showing — the hit zone is
 	// generous (a few pixels either side of the 2-px line) because the line

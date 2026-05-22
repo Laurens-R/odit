@@ -5,6 +5,7 @@ import "vendor:sdl3"
 import "vendor:sdl3/ttf"
 
 import "../dap"
+import help_pkg "./help"
 import "../terminal"
 import "../ui"
 
@@ -713,7 +714,7 @@ menu_execute_action :: proc(editor: ^Editor, action: MenuActionKind) {
 
 	case .TerminalShowHide:    editor_toggle_terminal(editor)
 	case .TerminalNew:         editor_terminal_create_new(editor)
-	case .TerminalSwitch:      terminal_picker_open(editor)
+	case .TerminalSwitch:      editor_open_terminal_picker(editor)
 	case .TerminalCloseActive: editor_terminal_destroy_active(editor)
 
 	case .DebugTasks:          tasks_dialog_open(editor)
@@ -724,7 +725,7 @@ menu_execute_action :: proc(editor: ^Editor, action: MenuActionKind) {
 	case .DebugStepInto:       dap.client_step_in(editor.active_dap_client)
 	case .DebugStepOut:        dap.client_step_out(editor.active_dap_client)
 
-	case .HelpToggle:          help_toggle(editor)
+	case .HelpToggle:          if help_pkg.toggle(&editor.help) { editor_mark_dirty(editor) }
 	}
 }
 
