@@ -285,7 +285,7 @@ find_in_files_walk :: proc(editor: ^Editor, root_directory, sub_relative_path: s
 	if len(sub_relative_path) == 0 {
 		full_directory = root_directory
 	} else {
-		full_directory = strings.concatenate({root_directory, "/", sub_relative_path}, context.temp_allocator)
+		full_directory = path_join({root_directory, sub_relative_path}, context.temp_allocator)
 	}
 
 	directory_entries, read_directory_error := os.read_all_directory_by_path(full_directory, context.temp_allocator)
@@ -299,14 +299,14 @@ find_in_files_walk :: proc(editor: ^Editor, root_directory, sub_relative_path: s
 		if len(sub_relative_path) == 0 {
 			entry_relative_path = entry_info.name
 		} else {
-			entry_relative_path = strings.concatenate({sub_relative_path, "/", entry_info.name}, context.temp_allocator)
+			entry_relative_path = path_join({sub_relative_path, entry_info.name}, context.temp_allocator)
 		}
 
 		if entry_info.type == .Directory {
 			if fif_skip_dir(entry_info.name) { continue }
 			find_in_files_walk(editor, root_directory, entry_relative_path, current_depth + 1, query_bytes)
 		} else if entry_info.type == .Regular || entry_info.type == .Symlink {
-			full_file_path := strings.concatenate({root_directory, "/", entry_relative_path}, context.temp_allocator)
+			full_file_path := path_join({root_directory, entry_relative_path}, context.temp_allocator)
 			find_in_files_scan_file(editor, full_file_path, entry_relative_path, query_bytes)
 		}
 	}

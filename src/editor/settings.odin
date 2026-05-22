@@ -94,10 +94,10 @@ editor_settings_try_load :: proc(settings: ^EditorSettings) {
 
 	candidate_paths[0] = "odit.json"
 	if appdata := os.get_env("APPDATA", context.temp_allocator); len(appdata) > 0 {
-		candidate_paths[1] = strings.concatenate({appdata, "/odit/settings.json"}, context.temp_allocator)
+		candidate_paths[1] = path_join({appdata, "odit", "settings.json"}, context.temp_allocator)
 	}
 	if home := os.get_env("HOME", context.temp_allocator); len(home) > 0 {
-		candidate_paths[2] = strings.concatenate({home, "/.config/odit/settings.json"}, context.temp_allocator)
+		candidate_paths[2] = path_join({home, ".config", "odit", "settings.json"}, context.temp_allocator)
 	}
 
 	for path_candidate in candidate_paths {

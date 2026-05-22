@@ -107,6 +107,8 @@ other_items := [?]HelpItem{
 	{"Ctrl+Shift+V",  "In terminal pane: paste clipboard into the shell"},
 	{"Shift+Enter",   "In file browser: open file in second pane (split)"},
 	{"Ctrl+Tab",      "Swap focus between split panes"},
+	{"Ctrl+Left/Right",       "Focus the left / right pane (opens split if needed)"},
+	{"Ctrl+Shift+Left/Right", "Move the active document to the left / right pane"},
 	{"Mouse click",   "Click in a pane to focus it"},
 	{"Esc",           "Close dialog / find bar"},
 	{"Ctrl+Q",        "Quit"},

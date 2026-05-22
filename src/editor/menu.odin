@@ -4,6 +4,7 @@ import "core:strings"
 import "vendor:sdl3"
 import "vendor:sdl3/ttf"
 
+import "../dap"
 import "../terminal"
 import "../ui"
 
@@ -39,6 +40,10 @@ MenuActionKind :: enum {
 	ViewToggleDiff,
 	ViewMarkdownPreview,
 	ViewSwapPanes,
+	ViewFocusLeftPane,
+	ViewFocusRightPane,
+	ViewMoveToLeftPane,
+	ViewMoveToRightPane,
 
 	NavSymbolJump,
 	NavGitHistory,
@@ -48,6 +53,14 @@ MenuActionKind :: enum {
 	TerminalNew,
 	TerminalSwitch,
 	TerminalCloseActive,
+
+	DebugTasks,
+	DebugTogglePanel,
+	DebugContinue,
+	DebugStop,
+	DebugStepOver,
+	DebugStepInto,
+	DebugStepOut,
 
 	HelpToggle,
 }
@@ -109,7 +122,11 @@ VIEW_ITEMS := [?]MenuItemDef{
 	{label = "Toggle Diff",          shortcut = "F8",      action = .ViewToggleDiff},
 	{label = "Markdown Preview",     shortcut = "F5",      action = .ViewMarkdownPreview},
 	{},
-	{label = "Swap Pane Focus",      shortcut = "Ctrl+Tab", action = .ViewSwapPanes},
+	{label = "Swap Pane Focus",        shortcut = "Ctrl+Tab",         action = .ViewSwapPanes},
+	{label = "Focus Left Pane",        shortcut = "Ctrl+Left",        action = .ViewFocusLeftPane},
+	{label = "Focus Right Pane",       shortcut = "Ctrl+Right",       action = .ViewFocusRightPane},
+	{label = "Move to Left Pane",      shortcut = "Ctrl+Shift+Left",  action = .ViewMoveToLeftPane},
+	{label = "Move to Right Pane",     shortcut = "Ctrl+Shift+Right", action = .ViewMoveToRightPane},
 }
 
 @(private="file")
@@ -128,6 +145,19 @@ TERMINAL_ITEMS := [?]MenuItemDef{
 }
 
 @(private="file")
+DEBUG_ITEMS := [?]MenuItemDef{
+	{label = "Tasks...",                shortcut = "F7",       action = .DebugTasks},
+	{label = "Toggle Debugger Panel",   shortcut = "Shift+F7", action = .DebugTogglePanel},
+	{},
+	{label = "Continue",                shortcut = "",         action = .DebugContinue},
+	{label = "Stop",                    shortcut = "",         action = .DebugStop},
+	{},
+	{label = "Step Over",               shortcut = "F10",      action = .DebugStepOver},
+	{label = "Step Into",               shortcut = "F11",      action = .DebugStepInto},
+	{label = "Step Out",                shortcut = "",         action = .DebugStepOut},
+}
+
+@(private="file")
 HELP_ITEMS := [?]MenuItemDef{
 	{label = "Help...",         shortcut = "F1",     action = .HelpToggle},
 	{label = "Hover Info",      shortcut = "Ctrl+K", action = .NavLspHover},
@@ -140,6 +170,7 @@ MENUS := [?]MenuDef{
 	{title = "View",     mnemonic_letter = 'v', items = VIEW_ITEMS[:]},
 	{title = "Navigate", mnemonic_letter = 'n', items = NAV_ITEMS[:]},
 	{title = "Terminal", mnemonic_letter = 't', items = TERMINAL_ITEMS[:]},
+	{title = "Debug",    mnemonic_letter = 'd', items = DEBUG_ITEMS[:]},
 	{title = "Help",     mnemonic_letter = 'h', items = HELP_ITEMS[:]},
 }
 
@@ -662,6 +693,10 @@ menu_execute_action :: proc(editor: ^Editor, action: MenuActionKind) {
 	case .ViewToggleDiff:      diff_toggle(editor)
 	case .ViewMarkdownPreview: markdown_preview_open(editor)
 	case .ViewSwapPanes:       editor_focus_other_pane(editor)
+	case .ViewFocusLeftPane:   editor_focus_pane(editor, 0)
+	case .ViewFocusRightPane:  editor_focus_pane(editor, 1)
+	case .ViewMoveToLeftPane:  editor_move_active_to_pane(editor, 0)
+	case .ViewMoveToRightPane: editor_move_active_to_pane(editor, 1)
 
 	case .NavSymbolJump:       symbols_dialog_open(editor)
 	case .NavGitHistory:       git_history_dialog_open(editor)
@@ -671,6 +706,14 @@ menu_execute_action :: proc(editor: ^Editor, action: MenuActionKind) {
 	case .TerminalNew:         editor_terminal_create_new(editor)
 	case .TerminalSwitch:      terminal_picker_open(editor)
 	case .TerminalCloseActive: editor_terminal_destroy_active(editor)
+
+	case .DebugTasks:          tasks_dialog_open(editor)
+	case .DebugTogglePanel:    debug_panel_toggle(editor)
+	case .DebugContinue:       dap.client_continue(editor.active_dap_client)
+	case .DebugStop:           editor_dap_stop_session(editor)
+	case .DebugStepOver:       dap.client_step_over(editor.active_dap_client)
+	case .DebugStepInto:       dap.client_step_in(editor.active_dap_client)
+	case .DebugStepOut:        dap.client_step_out(editor.active_dap_client)
 
 	case .HelpToggle:          help_toggle(editor)
 	}

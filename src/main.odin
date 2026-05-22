@@ -102,9 +102,6 @@ main :: proc() {
 	_ = sdl3.StartTextInput(window)
 	defer { _ = sdl3.StopTextInput(window) }
 
-	// Welcome text
-	editor.editor_open_string(&editor_state, "Welcome to odit.\nStart typing to edit.\n")
-
 	is_running := true
 	last_tick_time := time.tick_now()
 

@@ -121,7 +121,7 @@ save_as_compute_default_path :: proc(editor: ^Editor, editor_pane: ^EditorPane) 
 		cwd, err := os.get_working_directory(context.temp_allocator)
 		parent_directory = err == nil ? cwd : "."
 	}
-	return strings.concatenate({parent_directory, "/", "untitled.txt"}, context.temp_allocator)
+	return path_join({parent_directory, "untitled.txt"}, context.temp_allocator)
 }
 
 @(private="file")
@@ -173,7 +173,7 @@ save_as_dialog_commit :: proc(editor: ^Editor) -> bool {
 	// the doc clean, and rebuild the per-pane symbol index (the language may
 	// have changed, which changes what counts as a symbol).
 	if len(editor_pane.file_path) > 0 { delete(editor_pane.file_path) }
-	editor_pane.file_path = strings.clone(cleaned_path)
+	editor_pane.file_path = path_normalize(cleaned_path)
 	editor_pane.language  = syntax.get_definition_for_path(cleaned_path)
 	document.document_mark_saved(&editor_pane.document)
 	pane_rebuild_symbols(editor_pane)

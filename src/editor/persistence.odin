@@ -10,7 +10,7 @@ import "core:strings"
 // state, and so a corrupt state file doesn't take settings down with it.
 //
 // Layout:
-//   { "last_project_root": "D:/odit" }
+//   { "last_project_root": "D:/odit", "last_font_size": 16.0 }
 //
 // File location (first existing parent directory wins):
 //   Windows: %APPDATA%/odit/state.json
@@ -20,12 +20,14 @@ import "core:strings"
 @(private="file")
 PersistedState :: struct {
 	last_project_root: string,
+	last_font_size:    f32, // 0 means "unset" — fall back to compile-time default
 }
 
 // Read the state file (if any) and apply its fields to the editor. Called
 // once from `editor_init` so a fresh session lands in the project the user
-// was working in last. Silently does nothing on missing / malformed files —
-// state persistence is best-effort, never blocking.
+// was working in last AND at the zoom level the user left them at. Silently
+// does nothing on missing / malformed files — state persistence is
+// best-effort, never blocking.
 @(private)
 editor_persistence_load :: proc(editor: ^Editor) {
 	state, ok := persistence_read_state()
@@ -38,17 +40,22 @@ editor_persistence_load :: proc(editor: ^Editor) {
 		editor_set_project_root(editor, state.last_project_root)
 	}
 
+	if state.last_font_size >= 8 && state.last_font_size <= 72 {
+		editor_apply_font_size(editor, state.last_font_size)
+	}
+
 	persistence_state_destroy(&state)
 }
 
 // Write current persistent state out to disk. Called after every mutation
-// that changes a persisted field (currently just `editor.project_root` via
-// `editor_set_project_root`). Failures are swallowed — the user shouldn't
-// see an error popup just because their AppData folder is read-only.
+// that changes a persisted field (project root, font size). Failures are
+// swallowed — the user shouldn't see an error popup just because their
+// AppData folder is read-only.
 @(private)
 editor_persistence_save :: proc(editor: ^Editor) {
 	state := PersistedState{
 		last_project_root = editor.project_root,
+		last_font_size    = editor.font_size,
 	}
 	persistence_write_state(&state)
 }
@@ -71,6 +78,12 @@ persistence_read_state :: proc() -> (state: PersistedState, ok: bool) {
 				state.last_project_root = strings.clone(s)
 			}
 		}
+		if v, has := root_object["last_font_size"]; has {
+			#partial switch n in v {
+			case f64: state.last_font_size = f32(n)
+			case i64: state.last_font_size = f32(n)
+			}
+		}
 		return state, true
 	}
 	return PersistedState{}, false
@@ -90,10 +103,29 @@ persistence_write_state :: proc(state: ^PersistedState) {
 	strings.builder_init(&builder, 0, 128, context.temp_allocator)
 	strings.write_string(&builder, "{\n  \"last_project_root\": ")
 	persistence_write_json_string(&builder, state.last_project_root)
+	strings.write_string(&builder, ",\n  \"last_font_size\": ")
+	persistence_write_number(&builder, state.last_font_size)
 	strings.write_string(&builder, "\n}\n")
 
 	payload := transmute([]u8) strings.to_string(builder)
 	_ = os.write_entire_file(target_path, payload)
+}
+
+@(private="file")
+persistence_write_number :: proc(builder: ^strings.Builder, value: f32) {
+	// Round to one decimal place — the font-size step is whole-number
+	// integers in practice (the editor_zoom step is 2) but staying in f32
+	// keeps the door open for fractional sizes later.
+	integer_part   := i32(value)
+	fractional_x10 := i32((value - f32(integer_part)) * 10 + 0.5)
+	if fractional_x10 == 0 {
+		strings.write_int(builder, int(integer_part))
+		strings.write_string(builder, ".0")
+		return
+	}
+	strings.write_int(builder, int(integer_part))
+	strings.write_byte(builder, '.')
+	strings.write_int(builder, int(fractional_x10))
 }
 
 @(private="file")
@@ -111,10 +143,10 @@ persistence_candidate_paths :: proc() -> [3]string {
 	out: [3]string
 	out[0] = ".odit_state.json"
 	if appdata := os.get_env("APPDATA", context.temp_allocator); len(appdata) > 0 {
-		out[1] = strings.concatenate({appdata, "/odit/state.json"}, context.temp_allocator)
+		out[1] = path_join({appdata, "odit", "state.json"}, context.temp_allocator)
 	}
 	if home := os.get_env("HOME", context.temp_allocator); len(home) > 0 {
-		out[2] = strings.concatenate({home, "/.config/odit/state.json"}, context.temp_allocator)
+		out[2] = path_join({home, ".config", "odit", "state.json"}, context.temp_allocator)
 	}
 	return out
 }
@@ -125,10 +157,10 @@ persistence_candidate_paths :: proc() -> [3]string {
 @(private="file")
 persistence_writable_path :: proc() -> string {
 	if appdata := os.get_env("APPDATA", context.temp_allocator); len(appdata) > 0 {
-		return strings.concatenate({appdata, "/odit/state.json"}, context.temp_allocator)
+		return path_join({appdata, "odit", "state.json"}, context.temp_allocator)
 	}
 	if home := os.get_env("HOME", context.temp_allocator); len(home) > 0 {
-		return strings.concatenate({home, "/.config/odit/state.json"}, context.temp_allocator)
+		return path_join({home, ".config", "odit", "state.json"}, context.temp_allocator)
 	}
 	return ".odit_state.json"
 }

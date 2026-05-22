@@ -431,9 +431,11 @@ SCROLL_SMOOTHNESS :: 18.0 // higher = snappier; lower = floatier
 EDITOR_MAX_DOCUMENT_BYTES :: 1024 * 1024 * 1024 // 1 GiB
 
 editor_init :: proc(editor: ^Editor, text_engine: ^ttf.TextEngine, font: ^ttf.Font, font_size: f32) {
-	// Initialize both panes as empty editor panes. Future code paths can
-	// reassign `panes[i].content` to a different content type when the user
-	// opens a non-editor view.
+	// Both panes start as empty, untitled editor panes — the user lands on
+	// a blank document they can immediately type into, no welcome text, no
+	// pre-loaded buffer. `editor_open_string_in_pane` later swaps these
+	// out (or stashes them into `background_documents`) when a real file
+	// is opened.
 	for pane_index in 0..<len(editor.panes) {
 		editor_pane: EditorPane
 		document.document_init(&editor_pane.document, "")
@@ -743,6 +745,63 @@ editor_focus_other_pane :: proc(editor: ^Editor) {
 	editor.cursor_timer = 0
 }
 
+// Move focus to a specific pane by index. When the user asks for pane[1]
+// (the right pane) but split isn't currently active, we open the split —
+// the right pane is always populated (editor_init seeds it with an empty
+// editor), so revealing it is enough; no new content gets created.
+@(private)
+editor_focus_pane :: proc(editor: ^Editor, target_pane_index: int) {
+	if target_pane_index < 0 || target_pane_index >= len(editor.panes) { return }
+	if target_pane_index == 1 && !editor.split_active {
+		editor.split_active = true
+	}
+	if editor.active_pane_index == target_pane_index { return }
+	editor.active_pane_index = target_pane_index
+	editor.cursor_visible = true
+	editor.cursor_timer = 0
+	editor_mark_dirty(editor)
+}
+
+// Move the active pane's content to `target_pane_index`. If both panes
+// have content we swap (so neither doc gets lost); if the destination is
+// the empty initial editor pane, the source's content effectively shifts
+// over and the source is left with the destination's old empty slot. When
+// targeting the right pane while split is inactive, the split opens — the
+// right pane is then revealed with the moved content.
+//
+// Focus follows the moved content so the user can keep typing without an
+// extra Ctrl+Tab.
+@(private)
+editor_move_active_to_pane :: proc(editor: ^Editor, target_pane_index: int) {
+	if target_pane_index < 0 || target_pane_index >= len(editor.panes) { return }
+	if editor.active_pane_index == target_pane_index { return }
+
+	if target_pane_index == 1 && !editor.split_active {
+		editor.split_active = true
+	}
+
+	source_index := editor.active_pane_index
+	// Swap the two contents wholesale. PaneContent is a union — both fields
+	// own their payload (EditorPane.document, etc.) so the swap doesn't
+	// alias any state. Borrowed-pointer panes (TerminalPane, OutputPane)
+	// just shuffle the pointer, which is fine.
+	source_content      := editor.panes[source_index].content
+	destination_content := editor.panes[target_pane_index].content
+	editor.panes[source_index].content      = destination_content
+	editor.panes[target_pane_index].content = source_content
+
+	// Close any Find / Replace bars pinned to the panes whose content just
+	// shifted out from under them — the bar's `pane_index` would otherwise
+	// point at a doc that's now somewhere else.
+	if find_active(editor)    && (editor.find.pane_index    == source_index || editor.find.pane_index    == target_pane_index) { find_close(editor) }
+	if replace_active(editor) && (editor.replace.pane_index == source_index || editor.replace.pane_index == target_pane_index) { replace_close(editor, false) }
+
+	editor.active_pane_index = target_pane_index
+	editor.cursor_visible = true
+	editor.cursor_timer = 0
+	editor_mark_dirty(editor)
+}
+
 // --- Multi-terminal session model -----------------------------------------
 //
 // Terminals live in `editor.terminals` and are independent of pane state.
@@ -1041,7 +1100,10 @@ editor_open_string_in_pane :: proc(editor: ^Editor, pane_index: int, content_tex
 	new_editor_pane: EditorPane
 	document.document_init(&new_editor_pane.document, safe_content)
 	if len(file_path) > 0 {
-		new_editor_pane.file_path = strings.clone(file_path)
+		// Normalize the on-disk path so display / comparison stays
+		// consistent regardless of whether the OS handed us back slashes
+		// or our own code joined with forward slashes.
+		new_editor_pane.file_path = path_normalize(file_path)
 		new_editor_pane.language  = syntax.get_definition_for_path(file_path)
 	}
 	editor.panes[pane_index].content = new_editor_pane
@@ -1204,7 +1266,11 @@ editor_set_project_root :: proc(editor: ^Editor, path: string) {
 		editor.project_root = ""
 	}
 	if len(path) > 0 {
-		editor.project_root = strings.clone(path)
+		// Normalize incoming path to platform-native separators so the
+		// status bar, title strips, and debug output log all show one
+		// consistent form regardless of whether the caller sourced the
+		// path from F2 (OS-native) or from JSON config (forward slashes).
+		editor.project_root = path_normalize(path)
 	}
 	// Reload per-project profiles whenever the root moves — the new root
 	// might have its own `.odit/project.json`, and the old one's profiles

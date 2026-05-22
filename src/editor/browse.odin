@@ -189,7 +189,7 @@ flat_walk :: proc(root_directory: string, sub_relative_path: string, current_dep
 	if len(sub_relative_path) == 0 {
 		full_directory_path = root_directory
 	} else {
-		full_directory_path = strings.concatenate({root_directory, "/", sub_relative_path}, context.temp_allocator)
+		full_directory_path = path_join({root_directory, sub_relative_path}, context.temp_allocator)
 	}
 
 	directory_entries, read_directory_error := os.read_all_directory_by_path(full_directory_path, context.temp_allocator)
@@ -206,7 +206,7 @@ flat_walk :: proc(root_directory: string, sub_relative_path: string, current_dep
 		if len(sub_relative_path) == 0 {
 			entry_relative_path = entry_info.name
 		} else {
-			entry_relative_path = strings.concatenate({sub_relative_path, "/", entry_info.name}, context.temp_allocator)
+			entry_relative_path = path_join({sub_relative_path, entry_info.name}, context.temp_allocator)
 		}
 
 		if entry_is_directory {

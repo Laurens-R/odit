@@ -244,6 +244,26 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 			editor_focus_other_pane(editor)
 			return
 		}
+		// Pane navigation:
+		//   Ctrl+Left/Right       → focus the left / right pane.
+		//   Ctrl+Shift+Left/Right → move the active pane's content over.
+		// Both override the word-by-word cursor movement that would
+		// otherwise be conventional on those modifier combos — the user
+		// explicitly asked for the pane-focus binding.
+		if ctrl_held && pressed_key == sdl3.K_LEFT {
+			shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
+			find_close(editor)
+			replace_close(editor, false)
+			if shift_held { editor_move_active_to_pane(editor, 0) } else { editor_focus_pane(editor, 0) }
+			return
+		}
+		if ctrl_held && pressed_key == sdl3.K_RIGHT {
+			shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
+			find_close(editor)
+			replace_close(editor, false)
+			if shift_held { editor_move_active_to_pane(editor, 1) } else { editor_focus_pane(editor, 1) }
+			return
+		}
 		if ctrl_held && pressed_key == sdl3.K_W {
 			editor_toggle_wrap(editor)
 			return
@@ -599,12 +619,23 @@ editor_redo_active :: proc(editor: ^Editor) {
 
 @(private="file")
 editor_zoom :: proc(editor: ^Editor, wheel_direction: f32) {
-	FONT_SIZE_MIN :: 8.0
-	FONT_SIZE_MAX :: 72.0
 	zoom_step: f32 = 2.0
-
 	new_font_size := editor.font_size + (wheel_direction > 0 ? zoom_step : -zoom_step)
-	new_font_size = clamp(new_font_size, FONT_SIZE_MIN, FONT_SIZE_MAX)
+	editor_apply_font_size(editor, new_font_size)
+}
+
+@(private)
+FONT_SIZE_MIN: f32 : 8.0
+@(private)
+FONT_SIZE_MAX: f32 : 72.0
+
+// Apply a new font size and refresh every cache that depends on it (text
+// cache, markdown layout / fonts). Shared by the Ctrl+Wheel zoom path and
+// by `editor_persistence_load` (so restored zoom takes effect immediately
+// on startup). Idempotent: no work if the size hasn't actually changed.
+@(private)
+editor_apply_font_size :: proc(editor: ^Editor, requested_size: f32) {
+	new_font_size := clamp(requested_size, FONT_SIZE_MIN, FONT_SIZE_MAX)
 	if new_font_size == editor.font_size { return }
 
 	editor.font_size = new_font_size
@@ -626,4 +657,8 @@ editor_zoom :: proc(editor: ^Editor, wheel_direction: f32) {
 	// re-lays-out at the new metrics.
 	editor_invalidate_markdown_caches(editor)
 	markdown_fonts_apply_zoom(&editor.markdown_fonts, editor.font_size)
+
+	// Persist so the next session opens at the same zoom level. Tiny JSON
+	// write; happens at most every couple of wheel ticks.
+	editor_persistence_save(editor)
 }

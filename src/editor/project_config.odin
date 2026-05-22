@@ -140,7 +140,7 @@ project_config_reload :: proc(editor: ^Editor) {
 	project_config_clear(&editor.project_config)
 	if len(editor.project_root) == 0 { return }
 
-	config_path := strings.concatenate({editor.project_root, "/.odit/project.json"}, context.temp_allocator)
+	config_path := path_join({editor.project_root, ".odit", "project.json"}, context.temp_allocator)
 	file_data, read_error := os.read_entire_file_from_path(config_path, context.temp_allocator)
 	if read_error != nil { return }
 
@@ -289,5 +289,9 @@ project_expand_placeholders :: proc(value: string, editor: ^Editor, build_name: 
 	intermediate, _ = strings.replace_all(intermediate, "${workspaceFolder}", root,          context.temp_allocator)
 	intermediate, _ = strings.replace_all(intermediate, "{platform}",        platform_name,  context.temp_allocator)
 	intermediate, _ = strings.replace_all(intermediate, "{build_name}",      build_name,     context.temp_allocator)
-	return intermediate
+	// Templates in project.json typically use forward slashes for editor
+	// portability; collapse the result to platform-native separators so the
+	// final string handed to lldb-dap / the build PTY matches the platform's
+	// conventions and the editor's other path-display surfaces.
+	return path_normalize(intermediate, context.temp_allocator)
 }
