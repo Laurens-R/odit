@@ -388,28 +388,45 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 
 // Widest line currently in the viewport, measured in visual columns
 // after tab expansion. Drives the horizontal scrollbar's content
-// width — recomputing on every render keeps the bar honest as the
-// user scrolls vertically, and the bounded loop (visible_lines)
-// keeps the cost trivial even for huge files. Also folds in the
-// primary cursor's line so the bar can extend right when the caret
-// runs off the visible page.
-@(private="file")
+// width. Uses a tight no-allocation scan rather than
+// `build_line_display` — that one materialises a tab-expanded copy
+// of every line, which on every render was tanking framerate on
+// files with long lines.
+@(private)
 widest_visible_line_chars :: proc(editor_pane: ^EditorPane) -> u32 {
 	total_line_count := document.document_line_count(&editor_pane.document)
 	if total_line_count == 0 { return 0 }
 	end_line_index := min(editor_pane.scroll_line + editor_pane.visible_lines + 2, total_line_count)
 	widest: u32 = 0
 	for line_index := editor_pane.scroll_line; line_index < end_line_index; line_index += 1 {
-		line_text := document.document_get_line(&editor_pane.document, line_index, context.temp_allocator)
-		display_text, _ := build_line_display(line_text)
-		if u32(len(display_text)) > widest { widest = u32(len(display_text)) }
+		line_length := fast_visual_line_length(&editor_pane.document, line_index)
+		if line_length > widest { widest = line_length }
 	}
 	if editor_pane.cursor_line < total_line_count {
-		cursor_line_text := document.document_get_line(&editor_pane.document, editor_pane.cursor_line, context.temp_allocator)
-		cursor_display, _ := build_line_display(cursor_line_text)
-		if u32(len(cursor_display)) > widest { widest = u32(len(cursor_display)) }
+		cursor_line_length := fast_visual_line_length(&editor_pane.document, editor_pane.cursor_line)
+		if cursor_line_length > widest { widest = cursor_line_length }
 	}
 	return widest
+}
+
+// O(line_length) visual-column count: counts UTF-8 lead bytes (so
+// multi-byte runes count as one column) and expands tabs to the next
+// `TAB_WIDTH` boundary. No allocations, no intermediate strings —
+// the inner loop is roughly memchr-cheap.
+@(private="file")
+fast_visual_line_length :: proc(document_value: ^document.Document, line_index: u32) -> u32 {
+	line_text := document.document_get_line(document_value, line_index, context.temp_allocator)
+	visual_columns: u32 = 0
+	for byte_value in transmute([]u8)line_text {
+		switch {
+		case byte_value == '\t':
+			visual_columns += u32(TAB_WIDTH) - (visual_columns % u32(TAB_WIDTH))
+		case byte_value < 0x80, byte_value >= 0xC0: // ASCII or UTF-8 lead byte
+			visual_columns += 1
+		// UTF-8 continuation bytes (0x80..0xBF) contribute nothing.
+		}
+	}
+	return visual_columns
 }
 
 // --- Per-content renderers ------------------------------------------------
@@ -942,7 +959,13 @@ render_doc_line_into :: proc(
 	}
 
 	if len(display_text) > 0 {
-		render_line_with_syntax(editor, renderer, editor_pane, display_text, text_x_position, screen_y)
+		// Clip render to the pane's visible text band so we don't shape
+		// glyphs that the SDL clip rect would just discard. Saves real
+		// time on long lines when scrolled deep to the right.
+		pane := &editor.panes[get_pane_index(editor, editor_pane)]
+		visible_left_x  := view_x + editor.padding_x + gutter_width
+		visible_right_x := pane.rectangle.x + pane.rectangle.w - editor.padding_x
+		render_line_with_syntax(editor, renderer, editor_pane, display_text, text_x_position, screen_y, visible_left_x, visible_right_x)
 	}
 
 	if is_active && cursor_on_this_line && editor.cursor_visible {
@@ -1202,9 +1225,19 @@ render_wrapped_doc_line :: proc(
 // control chars → '?'). When language is nil, we render in a single pass
 // with the default foreground.
 @(private="file")
-render_line_with_syntax :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, editor_pane: ^EditorPane, display_text: string, text_x, screen_y: i32) {
+render_line_with_syntax :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, editor_pane: ^EditorPane, display_text: string, text_x, screen_y: i32, visible_left_x: i32 = min(i32), visible_right_x: i32 = max(i32)) {
+	// Clip the whole line to the visible horizontal window first.
+	// `display_text` is post-tab-expansion, so byte offset == visual
+	// column — slicing by column is exact. Skipping the off-screen
+	// portion is the difference between rendering 60 visible chars
+	// and shaping a 50,000-byte minified line on every frame.
+	visible_first_column, visible_last_column := visible_column_range(editor, display_text, text_x, visible_left_x, visible_right_x)
+	if visible_last_column <= visible_first_column { return }
+
 	if editor_pane.language == nil {
-		render_string(editor, renderer, display_text, text_x, screen_y, editor.foreground_color)
+		clipped_text := display_text[visible_first_column:visible_last_column]
+		clipped_x    := text_x + i32(visible_first_column) * editor.character_width
+		render_string(editor, renderer, clipped_text, clipped_x, screen_y, editor.foreground_color)
 		return
 	}
 
@@ -1214,11 +1247,48 @@ render_line_with_syntax :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, edito
 
 	for token in tokens {
 		if token.end <= token.start { continue }
-		token_text := display_text[token.start:token.end]
+		// Trim token to the visible window. Tokens that span a long
+		// off-screen range (e.g. a multi-line string body) get sliced
+		// down so render_string doesn't shape the off-screen bytes.
+		clipped_start := max(int(visible_first_column), token.start)
+		clipped_end   := min(int(visible_last_column),  token.end)
+		if clipped_end <= clipped_start { continue }
+		token_text := display_text[clipped_start:clipped_end]
 		token_color := syntax_color_for(editor, token.kind)
-		token_x_position := text_x + i32(token.start) * editor.character_width
+		token_x_position := text_x + i32(clipped_start) * editor.character_width
 		render_string(editor, renderer, token_text, token_x_position, screen_y, token_color)
 	}
+}
+
+// Convert the requested visible-pixel window into a byte/column range
+// inside `display_text`. Returns [0, len(display_text)] when called
+// without bounds (callers that don't pass visible_left/right_x). The
+// `display_text` byte index == visual column because tabs have
+// already been expanded by `build_line_display`.
+@(private="file")
+visible_column_range :: proc(editor: ^Editor, display_text: string, text_x: i32, visible_left_x: i32, visible_right_x: i32) -> (first_column, last_column: int) {
+	first_column = 0
+	last_column  = len(display_text)
+	if editor.character_width <= 0 { return }
+	if visible_left_x != min(i32) {
+		if visible_left_x > text_x {
+			first_column = int((visible_left_x - text_x) / editor.character_width)
+			if first_column < 0                { first_column = 0 }
+			if first_column > len(display_text) { first_column = len(display_text) }
+		}
+	}
+	if visible_right_x != max(i32) {
+		if visible_right_x > text_x {
+			// +1 column of slack so partially-visible glyphs on the
+			// right edge still get rendered.
+			last_column = int((visible_right_x - text_x) / editor.character_width) + 1
+			if last_column < 0                { last_column = 0 }
+			if last_column > len(display_text) { last_column = len(display_text) }
+		} else {
+			last_column = 0
+		}
+	}
+	return
 }
 
 @(private="file")

@@ -233,35 +233,12 @@ horizontal_scrollbar_apply_to_editor_pane :: proc(editor: ^Editor, editor_pane: 
 	text_area_width := f32(pane_rectangle.w - editor.padding_x - editor_pane.gutter_width - editor.padding_x)
 	if text_area_width <= 0 { return }
 
-	widest_chars := editor_horizontal_content_chars(editor_pane)
+	widest_chars := widest_visible_line_chars(editor_pane)
 	content_width := f32((i32(widest_chars) + 8) * editor.character_width)
 	max_scroll := max(f32(0), content_width - text_area_width)
 	new_scroll := ui.scrollbar_drag_to_horizontal(&editor_pane.horizontal_scrollbar, mouse_x, max_scroll)
 	editor_pane.scroll_x        = new_scroll
 	editor_pane.scroll_x_target = new_scroll
-}
-
-// Mirror of render's `widest_visible_line_chars` exposed for the
-// mouse path so the drag math uses the same `content_width` the
-// scrollbar was painted with. Lives here rather than render.odin so
-// mouse.odin doesn't need to import render-private helpers.
-@(private="file")
-editor_horizontal_content_chars :: proc(editor_pane: ^EditorPane) -> u32 {
-	total_line_count := document.document_line_count(&editor_pane.document)
-	if total_line_count == 0 { return 0 }
-	end_line_index := min(editor_pane.scroll_line + editor_pane.visible_lines + 2, total_line_count)
-	widest: u32 = 0
-	for line_index := editor_pane.scroll_line; line_index < end_line_index; line_index += 1 {
-		line_text := document.document_get_line(&editor_pane.document, line_index, context.temp_allocator)
-		display_text, _ := build_line_display(line_text)
-		if u32(len(display_text)) > widest { widest = u32(len(display_text)) }
-	}
-	if editor_pane.cursor_line < total_line_count {
-		cursor_line_text := document.document_get_line(&editor_pane.document, editor_pane.cursor_line, context.temp_allocator)
-		cursor_display, _ := build_line_display(cursor_line_text)
-		if u32(len(cursor_display)) > widest { widest = u32(len(cursor_display)) }
-	}
-	return widest
 }
 
 @(private="file")
