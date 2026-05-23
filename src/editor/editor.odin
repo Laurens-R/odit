@@ -84,7 +84,8 @@ EditorPane :: struct {
 	// handlers in `mouse.odin` read those rects to hit-test hover and
 	// drag. `is_hovered` widens the next paint; `is_dragging` locks scroll
 	// updates onto the thumb under the cursor.
-	scrollbar:       ui.Scrollbar,
+	scrollbar:            ui.Scrollbar,
+	horizontal_scrollbar: ui.Scrollbar,
 
 	// Selection
 	selection_active:  bool,

@@ -386,6 +386,32 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 	// iteration above.
 }
 
+// Widest line currently in the viewport, measured in visual columns
+// after tab expansion. Drives the horizontal scrollbar's content
+// width — recomputing on every render keeps the bar honest as the
+// user scrolls vertically, and the bounded loop (visible_lines)
+// keeps the cost trivial even for huge files. Also folds in the
+// primary cursor's line so the bar can extend right when the caret
+// runs off the visible page.
+@(private="file")
+widest_visible_line_chars :: proc(editor_pane: ^EditorPane) -> u32 {
+	total_line_count := document.document_line_count(&editor_pane.document)
+	if total_line_count == 0 { return 0 }
+	end_line_index := min(editor_pane.scroll_line + editor_pane.visible_lines + 2, total_line_count)
+	widest: u32 = 0
+	for line_index := editor_pane.scroll_line; line_index < end_line_index; line_index += 1 {
+		line_text := document.document_get_line(&editor_pane.document, line_index, context.temp_allocator)
+		display_text, _ := build_line_display(line_text)
+		if u32(len(display_text)) > widest { widest = u32(len(display_text)) }
+	}
+	if editor_pane.cursor_line < total_line_count {
+		cursor_line_text := document.document_get_line(&editor_pane.document, editor_pane.cursor_line, context.temp_allocator)
+		cursor_display, _ := build_line_display(cursor_line_text)
+		if u32(len(cursor_display)) > widest { widest = u32(len(cursor_display)) }
+	}
+	return widest
+}
+
 // --- Per-content renderers ------------------------------------------------
 
 @(private="file")
@@ -453,6 +479,25 @@ render_editor_pane :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pan
 
 		ui.scrollbar_render(&ui_context, &editor_pane.scrollbar, view_x + view_width - 2, text_y, text_height,
 			f32(text_height), content_height_pixels, current_scroll_value, theme)
+
+		// Horizontal scrollbar — only meaningful when wrap is off (wrap
+		// mode forbids horizontal scroll) and not in diff mode (the diff
+		// renderer doesn't drive scroll_x). Content width is computed
+		// from the widest visible line plus a small trailing pad so the
+		// user can scroll a few chars beyond the right edge of the text.
+		if !editor_pane.wrap_mode && !editor.diff_state.active {
+			text_area_x_start := view_x + editor.padding_x + gutter_width_pixels
+			text_area_width   := view_width - editor.padding_x - gutter_width_pixels - editor.padding_x
+			if text_area_width > 0 {
+				widest_chars := widest_visible_line_chars(editor_pane)
+				HORIZONTAL_TRAILING_PAD_CHARS :: 8
+				content_width_pixels := f32((i32(widest_chars) + HORIZONTAL_TRAILING_PAD_CHARS) * editor.character_width)
+				bottom_edge_y := text_y + text_height - 2
+				ui.scrollbar_render_horizontal(&ui_context, &editor_pane.horizontal_scrollbar,
+					text_area_x_start, bottom_edge_y, text_area_width,
+					f32(text_area_width), content_width_pixels, editor_pane.scroll_x, theme)
+			}
+		}
 	}
 
 	// Find / Replace bar — anchored to the pane bottom, painted after the

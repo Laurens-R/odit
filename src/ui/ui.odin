@@ -373,7 +373,8 @@ Scrollbar :: struct {
 	thumb_rectangle: sdl3.FRect,
 	is_hovered:      bool,
 	is_dragging:     bool,
-	drag_delta_y:    f32, // mouse-y offset within the thumb at drag start
+	drag_delta_y:    f32, // mouse-y offset within the thumb at drag start (vertical bars)
+	drag_delta_x:    f32, // mouse-x offset within the thumb at drag start (horizontal bars)
 }
 
 // Cosmetic constants. Lifted from the editor pane's original scrollbar so
@@ -498,6 +499,105 @@ scrollbar_drag_to :: proc(scrollbar: ^Scrollbar, mouse_y: f32, max_scroll: f32) 
 scrollbar_end_drag :: proc(scrollbar: ^Scrollbar) {
 	scrollbar.is_dragging = false
 	scrollbar.drag_delta_y = 0
+	scrollbar.drag_delta_x = 0
+}
+
+// --- Horizontal scrollbar (mirror of the vertical bar above) -------------
+//
+// Same `Scrollbar` struct holds the state, the orthogonal one of
+// `drag_delta_x` / `drag_delta_y` is the live one depending on which
+// orientation this widget is. Hit-test, hover, and end-drag procs are
+// shared with the vertical bar (they're orientation-agnostic).
+
+// Render the scrollbar along the bottom edge of a content area.
+// `bottom_edge_y` is the y-coordinate where the track's bottom side
+// sits; the track grows upward on hover/drag so a wider thumb doesn't
+// spill past `bottom_edge_y`. Writes the painted rects back into
+// `scrollbar`. Both rects are zeroed if the content fits in the
+// viewport.
+scrollbar_render_horizontal :: proc(
+	ui_context: ^Context,
+	scrollbar: ^Scrollbar,
+	track_x: i32,
+	bottom_edge_y: i32,
+	track_width: i32,
+	viewport_width: f32,
+	content_width: f32,
+	current_scroll: f32,
+	theme: Theme,
+) {
+	if content_width <= viewport_width || track_width <= 0 {
+		scrollbar.track_rectangle = sdl3.FRect{}
+		scrollbar.thumb_rectangle = sdl3.FRect{}
+		return
+	}
+
+	track_height := SCROLLBAR_NARROW_WIDTH
+	if scrollbar.is_hovered || scrollbar.is_dragging { track_height = SCROLLBAR_WIDE_WIDTH }
+	track_y := bottom_edge_y - track_height
+
+	renderer := ui_context.renderer
+
+	track_rectangle := sdl3.FRect{f32(track_x), f32(track_y), f32(track_width), f32(track_height)}
+	sdl3.SetRenderDrawColorFloat(
+		renderer,
+		theme.title_background.r,
+		theme.title_background.g,
+		theme.title_background.b,
+		theme.title_background.a,
+	)
+	sdl3.RenderFillRect(renderer, &track_rectangle)
+
+	thumb_width := max(SCROLLBAR_MIN_THUMB, f32(track_width) * viewport_width / content_width)
+	max_scroll := content_width - viewport_width
+	scroll_fraction := current_scroll / max_scroll
+	if scroll_fraction < 0 { scroll_fraction = 0 }
+	if scroll_fraction > 1 { scroll_fraction = 1 }
+	thumb_x := f32(track_x) + (f32(track_width) - thumb_width) * scroll_fraction
+
+	thumb_rectangle := sdl3.FRect{thumb_x, f32(track_y) + 1, thumb_width, f32(track_height) - 2}
+	sdl3.SetRenderDrawColorFloat(
+		renderer,
+		theme.accent_foreground.r,
+		theme.accent_foreground.g,
+		theme.accent_foreground.b,
+		theme.accent_foreground.a,
+	)
+	sdl3.RenderFillRect(renderer, &thumb_rectangle)
+
+	scrollbar.track_rectangle = track_rectangle
+	scrollbar.thumb_rectangle = thumb_rectangle
+}
+
+// Begin a thumb drag for a horizontal bar. Captures the x-offset
+// within the thumb so the thumb doesn't snap to the cursor on the
+// first motion event.
+scrollbar_begin_thumb_drag_horizontal :: proc(scrollbar: ^Scrollbar, mouse_x: f32) {
+	scrollbar.is_dragging = true
+	scrollbar.drag_delta_x = mouse_x - scrollbar.thumb_rectangle.x
+}
+
+// Begin a track-click drag — same as a thumb drag but the cursor
+// lands at the thumb's center so subsequent motion immediately
+// scrolls relative.
+scrollbar_begin_track_drag_horizontal :: proc(scrollbar: ^Scrollbar) {
+	scrollbar.is_dragging = true
+	scrollbar.drag_delta_x = scrollbar.thumb_rectangle.w / 2
+}
+
+// While dragging, translate the current `mouse_x` into a new scroll
+// value in the same units as `max_scroll`.
+scrollbar_drag_to_horizontal :: proc(scrollbar: ^Scrollbar, mouse_x: f32, max_scroll: f32) -> f32 {
+	track := scrollbar.track_rectangle
+	thumb := scrollbar.thumb_rectangle
+	if track.w <= 0 || thumb.w <= 0 || max_scroll <= 0 { return 0 }
+	travel_distance := track.w - thumb.w
+	if travel_distance <= 0 { return 0 }
+	target_thumb_x := mouse_x - scrollbar.drag_delta_x
+	if target_thumb_x < track.x                       { target_thumb_x = track.x }
+	if target_thumb_x > track.x + travel_distance     { target_thumb_x = track.x + travel_distance }
+	travel_fraction := (target_thumb_x - track.x) / travel_distance
+	return travel_fraction * max_scroll
 }
 
 // Recompute `is_hovered` from the current mouse position. Returns true when

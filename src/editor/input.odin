@@ -212,6 +212,14 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 			// `shift` flips the wheel to horizontal scroll when wrap is off.
 			#partial switch &content_value in editor_active_pane(editor).content {
 			case EditorPane:
+				// `wheel.x` is the trackpad's horizontal swipe (and a
+				// horizontal-wheel mouse's tilt). Apply it on every wheel
+				// event so two-finger panning feels native. Sign is flipped
+				// to match the OS convention — swiping right reveals more
+				// of the right side.
+				if event.wheel.x != 0 && !content_value.wrap_mode {
+					editor_scroll_horizontal(editor, i32(event.wheel.x * 3))
+				}
 				if shift_held && !content_value.wrap_mode {
 					editor_scroll_horizontal(editor, -i32(event.wheel.y * 3))
 				} else {
