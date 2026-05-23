@@ -1,15 +1,29 @@
 package editor
 
+import "base:runtime"
+import "core:fmt"
+import "core:os"
+import "core:path/filepath"
 import "core:strings"
 import "vendor:sdl3"
 import "vendor:sdl3/ttf"
 
 import "../dap"
 import "../document"
+import binding_pkg "./binding"
+import breakpoint_condition_pkg "./breakpoint_condition"
+import browse_pkg "./browse"
+import close_confirm_pkg "./close_confirm"
 import completion_popup_pkg "./completion_popup"
+import find_in_files_pkg "./find_in_files"
+import git_history_pkg "./git_history"
 import help_pkg "./help"
 import hover_pkg "./hover"
+import open_docs_pkg "./open_docs"
+import save_as_pkg "./save_as"
 import signature_popup_pkg "./signature_popup"
+import symbols_pkg "./symbols"
+import tasks_dialog_pkg "./tasks_dialog"
 import terminal_picker_pkg "./terminal_picker"
 import "../keybindings"
 import "../lsp"
@@ -242,13 +256,24 @@ Editor :: struct {
 	fps_last_value:       i32,
 
 	// Modal UI
+	// Plugin-style modal registry. Each subpackage installs a
+	// `binding.Binding` into `bindings` in `editor_init`; input.odin
+	// iterates them in priority order, render.odin paints them on
+	// top of everything else. `editor_api` is the editor-side
+	// surface every binding receives on each dispatch call.
+	editor_api: binding_pkg.EditorAPI,
+	bindings:   [dynamic]binding_pkg.Binding,
+
 	// F1 help dialog. Self-owned by the `help` subpackage — visibility,
 	// scroll offset, and scrollbar state all live inside `help.State`. The
 	// editor only knows about it as one of the modal states in
 	// `editor_is_modal_open` and as a render dispatch case.
 	help: help_pkg.State,
-	show_browse:     bool,
-	browse_state:    BrowseState,
+	// F2 file browser. UI + filter + sub-popup + fs ops + undo stack
+	// all live in the `browse` subpackage; the editor only owns the
+	// State and registers the subpackage with the binding registry
+	// below.
+	browse_view:         browse_pkg.State,
 
 	// Diff mode (compares views[0]'s doc against views[1]'s doc)
 	diff_state:      DiffState,
@@ -287,8 +312,9 @@ Editor :: struct {
 	syntax_symbol_foreground:       sdl3.FColor,
 
 	// Symbol-jump (F6) dialog state
-	show_symbols:   bool,
-	symbols_dialog: SymbolsDialog,
+	// F6 symbol picker. State + render live in the `symbols`
+	// subpackage; the symbol data itself lives on the source pane.
+	symbols_dialog: symbols_pkg.State,
 
 	// All open terminal sessions. F9 toggles visibility of the active
 	// entry (and creates the first one when the list is empty); Ctrl+F9
@@ -305,9 +331,11 @@ Editor :: struct {
 
 	// Ctrl+Shift+F9 picker. Lists open terminal sessions so the user can
 	// jump between them.
-	// Ctrl+Shift+F9 picker. State lives in the `terminal_picker`
-	// subpackage; visibility flag is inside the State itself.
-	terminal_picker: terminal_picker_pkg.State,
+	// Ctrl+Shift+F9 picker. State + render + dispatch live in the
+	// `terminal_picker` subpackage; the host trampolines below bridge
+	// the picker's callbacks to editor state.
+	terminal_picker:       terminal_picker_pkg.State,
+	terminal_picker_hooks: terminal_picker_pkg.Hooks,
 
 	// Find mode (Ctrl+F). Attached to a single pane at a time; closes on
 	// click outside the bar, on Esc, or on pane switch.
@@ -321,9 +349,9 @@ Editor :: struct {
 	replace:                    ReplaceState,
 
 	// Find-in-files dialog (Ctrl+Shift+F). Modal: takes over input while
-	// `show_find_in_files` is true.
-	show_find_in_files:         bool,
-	find_in_files:              FindInFilesState,
+	// Ctrl+Shift+F recursive grep. State + render in the
+	// `find_in_files` subpackage; visibility flag is inside the State.
+	find_in_files: find_in_files_pkg.State,
 
 	// Replace-in-files dialog (Ctrl+Shift+R). Modal companion to the find
 	// dialog — does destructive on-disk writes when the user commits.
@@ -333,23 +361,28 @@ Editor :: struct {
 	// Save-As path-input modal. Opens directly via Ctrl+Shift+S, indirectly
 	// via Ctrl+S on an untitled doc, and from the Yes branch of the close
 	// confirmation when the file has no path yet.
-	show_save_as:               bool,
-	save_as_dialog:             SaveAsDialog,
+	// Save-As text-input modal. State + render + dispatch in the
+	// `save_as` subpackage; host trampolines below.
+	save_as_dialog: save_as_pkg.State,
+	save_as_hooks:  save_as_pkg.Hooks,
 
 	// Yes/No/Cancel prompt fired by Ctrl+F4 on a dirty document.
-	show_close_confirm:         bool,
-	close_confirm_dialog:       CloseConfirmDialog,
+	// "Unsaved changes — save before closing?" prompt. State + render +
+	// dispatch in the `close_confirm` subpackage; host trampolines below.
+	close_confirm_dialog: close_confirm_pkg.State,
 
-	// Git history viewer (F3). Lists past revisions of the active pane's
-	// file; activating one opens that revision in the opposite pane.
-	show_git_history:           bool,
-	git_history_dialog:         GitHistoryDialog,
+	// F3 git history modal. Subpackage owns everything: dialog state,
+	// git CLI invocations, opposite-pane open via EditorAPI.
+	git_history_dialog: git_history_pkg.State,
 
 	// Open-documents picker (F4). Lists every EditorPane that's open but
 	// not currently displayed — selecting one swaps it into the active
 	// pane (stashing whatever was there first via the same mechanism).
-	show_open_docs:             bool,
-	open_docs_dialog:           OpenDocsDialog,
+	// F4 open-documents picker. State + render + dispatch live in
+	// the `open_docs` subpackage; the host trampolines bridge the
+	// picker's callbacks to editor state.
+	open_docs_dialog: open_docs_pkg.State,
+	open_docs_hooks:  open_docs_pkg.Hooks,
 
 	// Documents that are open but not currently displayed in any pane.
 	// Populated whenever an EditorPane is replaced via
@@ -388,15 +421,14 @@ Editor :: struct {
 	// Hover popup state. Set by Ctrl+K → editor sends the LSP hover
 	// request → next frame's poll surfaces a result → we copy it here for
 	// rendering. Cleared on Esc / next keystroke / cursor move.
-	hover_popup:                 hover_pkg.State,
-	hover_popup_request_pending: bool,
+	hover_popup: hover_pkg.State,
 
 	// Completion popup state — see `completion.odin` for the lifecycle.
-	completion_popup:            completion_popup_pkg.State,
+	completion_popup: completion_popup_pkg.State,
 
 	// Signature-help popup — fires on `(`, refreshes on `,` while inside
 	// the same argument list, auto-closes on `)` / Esc / cursor row change.
-	signature_popup:             signature_popup_pkg.State,
+	signature_popup: signature_popup_pkg.State,
 
 	// Project root, set by Ctrl+P in the file browser. Owned absolute path;
 	// "" when unset. When set:
@@ -430,18 +462,21 @@ Editor :: struct {
 	// tagged as a build job so the per-frame poll knows to watch its child
 	// process and chain a queued debug launch when a build-then-debug
 	// pairing completes successfully.
-	show_tasks_dialog:           bool,
-	tasks_dialog:                TasksDialog,
+	// F7 Tasks modal — build / debug profile picker. State + render
+	// in the `tasks_dialog` subpackage.
+	tasks_dialog: tasks_dialog_pkg.State,
 
 	// Selected index into `project_config.debug_profiles`. -1 means "no
 	// selection yet" — the Tasks dialog (F7) seeds it on activation.
 	active_debug_configuration_index: int,
 
-	// Conditional-breakpoint editor — opened by Shift+clicking the gutter.
-	// The dialog targets a frozen (file, line) tuple captured at open time
-	// so a pane swap mid-edit can't retarget the write.
-	show_breakpoint_condition:   bool,
-	breakpoint_condition_dialog: BreakpointConditionDialog,
+	// Shift+click-in-gutter conditional-breakpoint editor. State +
+	// render + dispatch all live in the `breakpoint_condition`
+	// subpackage; we register a `Host` callback set at editor_init so
+	// the subpackage can fire breakpoint mutations against editor
+	// state without importing the editor package.
+	breakpoint_condition_dialog: breakpoint_condition_pkg.State,
+	breakpoint_condition_hooks:  breakpoint_condition_pkg.Hooks,
 
 	// Shared scrolling log for the debug-output pane. Owned line strings;
 	// trimmed at DEBUG_OUTPUT_MAX_LINES. The OutputPane in pane[1] reads
@@ -553,6 +588,107 @@ editor_init :: proc(editor: ^Editor, text_engine: ^ttf.TextEngine, font: ^ttf.Fo
 
 	debug_state_init(&editor.debug_state)
 	editor.dap_clients = make(map[string]^dap.Client)
+
+	// Wire the breakpoint-condition modal's host callbacks. The modal
+	// uses these to read + mutate the editor's breakpoint table
+	// without taking a build-time dependency on the editor package.
+	editor.breakpoint_condition_hooks = breakpoint_condition_pkg.Hooks{
+		user_data             = editor,
+		existing_condition_at = breakpoint_condition_host_existing,
+		set_condition_at      = breakpoint_condition_host_set,
+	}
+	append(&editor.bindings, breakpoint_condition_pkg.make_binding(&editor.breakpoint_condition_dialog, editor.breakpoint_condition_hooks))
+
+	editor.terminal_picker_hooks = terminal_picker_pkg.Hooks{
+		user_data         = editor,
+		list_entries      = terminal_picker_host_list_entries,
+		initial_selection = terminal_picker_host_initial_selection,
+		activate          = terminal_picker_host_activate,
+	}
+	append(&editor.bindings, terminal_picker_pkg.make_binding(&editor.terminal_picker, editor.terminal_picker_hooks))
+
+	append(&editor.bindings, tasks_dialog_pkg.make_binding(&editor.tasks_dialog))
+
+	append(&editor.bindings, hover_pkg.make_binding(&editor.hover_popup))
+
+	append(&editor.bindings, signature_popup_pkg.make_binding(&editor.signature_popup))
+
+	append(&editor.bindings, completion_popup_pkg.make_binding(&editor.completion_popup))
+
+	append(&editor.bindings, git_history_pkg.make_binding(&editor.git_history_dialog))
+
+	append(&editor.bindings, find_in_files_pkg.make_binding(&editor.find_in_files))
+
+	editor.open_docs_hooks = open_docs_pkg.Hooks{
+		user_data    = editor,
+		list_entries = open_docs_host_list_entries,
+		activate     = open_docs_host_activate,
+	}
+	append(&editor.bindings, open_docs_pkg.make_binding(&editor.open_docs_dialog, editor.open_docs_hooks))
+
+	append(&editor.bindings, close_confirm_pkg.make_binding(&editor.close_confirm_dialog, close_confirm_pkg.Hooks{
+		user_data         = editor,
+		subject_name      = close_confirm_host_subject_name,
+		save_and_close    = close_confirm_host_save_and_close,
+		discard_and_close = close_confirm_host_discard_and_close,
+	}))
+
+	editor.save_as_hooks = save_as_pkg.Hooks{
+		user_data    = editor,
+		default_path = save_as_host_default_path,
+		commit       = save_as_host_commit,
+	}
+	append(&editor.bindings, save_as_pkg.make_binding(&editor.save_as_dialog, editor.save_as_hooks))
+
+	editor.editor_api = binding_pkg.EditorAPI{
+		editor                    = editor,
+		find_open_document        = editor_api_find_open_document,
+		open_string_in_pane       = editor_api_open_string_in_pane,
+		swap_background_into_pane = editor_api_swap_background_into_pane,
+		active_pane_index         = editor_api_active_pane_index,
+		set_active_pane_index     = editor_api_set_active_pane_index,
+		set_split_active          = editor_api_set_split_active,
+		project_root              = editor_api_project_root,
+		set_project_root          = editor_api_set_project_root,
+		path_inside_project_root  = editor_api_path_inside_project_root,
+		line_height               = editor_api_line_height,
+
+		open_file_at_path            = editor_api_open_file_at_path,
+		jump_active_pane_to          = editor_api_jump_active_pane_to,
+		active_pane_file_path        = editor_api_active_pane_file_path,
+		active_pane_short_selection  = editor_api_active_pane_short_selection,
+		open_string_in_opposite_pane = editor_api_open_string_in_opposite_pane,
+
+		project_loaded_path  = editor_api_project_loaded_path,
+		list_build_profiles  = editor_api_list_build_profiles,
+		list_debug_profiles  = editor_api_list_debug_profiles,
+		run_build_profile    = editor_api_run_build_profile,
+		start_debug_profile  = editor_api_start_debug_profile,
+
+		lsp_request_hover            = editor_api_lsp_request_hover,
+		lsp_poll_hover               = editor_api_lsp_poll_hover,
+		lsp_request_signature_help   = editor_api_lsp_request_signature_help,
+		lsp_poll_signature_help      = editor_api_lsp_poll_signature_help,
+		lsp_request_completion       = editor_api_lsp_request_completion,
+		lsp_poll_completion          = editor_api_lsp_poll_completion,
+		apply_completion_at_cursor   = editor_api_apply_completion_at_cursor,
+		markdown_context             = editor_api_markdown_context,
+		active_pane_cursor           = editor_api_active_pane_cursor,
+		pane_anchor                  = editor_api_pane_anchor,
+		theme                        = editor_api_theme,
+	}
+
+	// Order in `bindings` defines event-dispatch priority: the first
+	// visible binding consumes the event.
+	append(&editor.bindings, help_pkg.make_binding(&editor.help))
+	append(&editor.bindings, browse_pkg.make_binding(&editor.browse_view, &editor.keybindings))
+
+	append(&editor.bindings, symbols_pkg.make_binding(&editor.symbols_dialog, symbols_pkg.Hooks{
+		user_data      = editor,
+		source_symbols = symbols_host_source_symbols,
+		dialog_title   = symbols_host_dialog_title,
+		apply_activate = symbols_host_apply_activate,
+	}))
 	// Sentinel — start_session asks the user to pick via F7 the first time
 	// when more than one debug profile is loaded.
 	editor.active_debug_configuration_index = -1
@@ -571,27 +707,545 @@ editor_init :: proc(editor: ^Editor, text_engine: ^ttf.TextEngine, font: ^ttf.Fo
 	when ODIN_OS == .Darwin { editor_install_native_menu(editor) }
 }
 
+// --- EditorAPI implementations ------------------------------------------
+// Every editor primitive exposed to bindings is implemented here as a
+// tiny trampoline. The `editor: rawptr` argument is always a `^Editor`.
+
+@(private)
+editor_api_find_open_document :: proc(editor_ptr: rawptr, file_path: string) -> (pane_index, background_index: int) {
+	editor := cast(^Editor)editor_ptr
+	return editor_find_open_document(editor, file_path)
+}
+
+@(private)
+editor_api_open_string_in_pane :: proc(editor_ptr: rawptr, pane_index: int, content: string, file_path: string) {
+	editor := cast(^Editor)editor_ptr
+	editor_open_string_in_pane(editor, pane_index, content, file_path)
+}
+
+@(private)
+editor_api_swap_background_into_pane :: proc(editor_ptr: rawptr, pane_index, background_index: int) {
+	editor := cast(^Editor)editor_ptr
+	editor_swap_background_into_pane(editor, pane_index, background_index)
+}
+
+@(private)
+editor_api_active_pane_index :: proc(editor_ptr: rawptr) -> int {
+	editor := cast(^Editor)editor_ptr
+	return editor.active_pane_index
+}
+
+@(private)
+editor_api_set_active_pane_index :: proc(editor_ptr: rawptr, pane_index: int) {
+	editor := cast(^Editor)editor_ptr
+	editor.active_pane_index = pane_index
+}
+
+@(private)
+editor_api_set_split_active :: proc(editor_ptr: rawptr, value: bool) {
+	editor := cast(^Editor)editor_ptr
+	editor.split_active = value
+}
+
+@(private)
+editor_api_project_root :: proc(editor_ptr: rawptr) -> string {
+	editor := cast(^Editor)editor_ptr
+	return editor.project_root
+}
+
+@(private)
+editor_api_set_project_root :: proc(editor_ptr: rawptr, path: string) {
+	editor := cast(^Editor)editor_ptr
+	editor_set_project_root(editor, path)
+}
+
+@(private)
+editor_api_path_inside_project_root :: proc(editor_ptr: rawptr, path: string) -> bool {
+	editor := cast(^Editor)editor_ptr
+	return editor_path_inside_project_root(editor, path)
+}
+
+@(private)
+editor_api_line_height :: proc(editor_ptr: rawptr) -> i32 {
+	editor := cast(^Editor)editor_ptr
+	return editor.line_height
+}
+
+@(private="file")
+EDITOR_API_MAX_FILE_BYTES :: 256 * 1024 * 1024 // 256 MiB
+
+@(private)
+editor_api_open_file_at_path :: proc(editor_ptr: rawptr, path: string, split_secondary: bool, allocator: runtime.Allocator) -> (error_message: string) {
+	editor := cast(^Editor)editor_ptr
+
+	existing_pane_index, existing_background_index := editor_find_open_document(editor, path)
+	if existing_pane_index >= 0 {
+		editor.active_pane_index = existing_pane_index
+		return ""
+	}
+	if existing_background_index >= 0 {
+		target_pane_index := editor.active_pane_index
+		if split_secondary {
+			editor.split_active = true
+			target_pane_index   = 1
+			editor.active_pane_index = 1
+		}
+		editor_swap_background_into_pane(editor, target_pane_index, existing_background_index)
+		return ""
+	}
+
+	file_data, read_file_error := os.read_entire_file_from_path(path, context.allocator)
+	if read_file_error != nil {
+		return fmt.aprintf("Cannot open %s: %v", filepath.base(path), read_file_error, allocator = allocator)
+	}
+	defer delete(file_data)
+
+	if len(file_data) > EDITOR_API_MAX_FILE_BYTES {
+		return fmt.aprintf("File %s is too large (%d bytes)", filepath.base(path), len(file_data), allocator = allocator)
+	}
+
+	file_content := strings.clone(string(file_data))
+
+	target_pane_index := editor.active_pane_index
+	if split_secondary {
+		editor.split_active = true
+		target_pane_index   = 1
+		editor.active_pane_index = 1
+	}
+
+	editor_open_string_in_pane(editor, target_pane_index, file_content, path)
+	return ""
+}
+
+@(private)
+editor_api_jump_active_pane_to :: proc(editor_ptr: rawptr, line, column: u32) {
+	editor := cast(^Editor)editor_ptr
+	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return }
+
+	document_line_count := document.document_line_count(&editor_pane.document)
+	target_line := line
+	if target_line >= document_line_count { target_line = document_line_count - 1 }
+
+	line_start_offset := document.document_line_start(&editor_pane.document, target_line)
+	line_text         := document.document_get_line(&editor_pane.document, target_line, context.temp_allocator)
+	target_column     := column
+	if int(target_column) > len(line_text) { target_column = u32(len(line_text)) }
+
+	editor_pane.cursor_line      = target_line
+	editor_pane.cursor_column    = target_column
+	editor_pane.cursor_offset    = line_start_offset + target_column
+	editor_pane.selection_active = false
+
+	editor.cursor_visible = true
+	editor.cursor_timer   = 0
+
+	if editor.diff_state.active || editor.line_height <= 0 {
+		sync_cursor_from_offset(editor)
+	} else {
+		target_scroll_y := f32(target_line) * f32(editor.line_height)
+		if target_scroll_y < 0 { target_scroll_y = 0 }
+		editor_pane.scroll_y        = target_scroll_y
+		editor_pane.scroll_y_target = target_scroll_y
+		editor_pane.scroll_line     = target_line
+	}
+}
+
+@(private)
+editor_api_active_pane_file_path :: proc(editor_ptr: rawptr) -> string {
+	editor := cast(^Editor)editor_ptr
+	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return "" }
+	return editor_pane.file_path
+}
+
+@(private)
+editor_api_active_pane_short_selection :: proc(editor_ptr: rawptr, max_bytes: int, allocator: runtime.Allocator) -> (text: string, ok: bool) {
+	editor := cast(^Editor)editor_ptr
+	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return "", false }
+	if !editor_pane.selection_active                                          { return "", false }
+
+	low_offset, high_offset, has_selection := editor_pane_selection_range(editor_pane)
+	if !has_selection                       { return "", false }
+	if int(high_offset - low_offset) > max_bytes { return "", false }
+
+	selection_text := document.document_get_slice(&editor_pane.document, low_offset, high_offset - low_offset, context.temp_allocator)
+	for byte_value in transmute([]u8)selection_text {
+		if byte_value == '\n' { return "", false }
+	}
+	return strings.clone(selection_text, allocator), true
+}
+
+@(private)
+editor_api_open_string_in_opposite_pane :: proc(editor_ptr: rawptr, source_pane_index: int, content: string, file_path_for_syntax: string, display_title_override: string) {
+	editor := cast(^Editor)editor_ptr
+	opposite_pane_index := 1 - source_pane_index
+	if opposite_pane_index < 0 || opposite_pane_index >= len(editor.panes) { return }
+
+	editor.split_active = true
+	editor_open_string_in_pane(editor, opposite_pane_index, content, "")
+	if opposite_pane := pane_as_editor(&editor.panes[opposite_pane_index]); opposite_pane != nil {
+		opposite_pane.language               = syntax.get_definition_for_path(file_path_for_syntax)
+		opposite_pane.display_title_override = display_title_override
+		pane_rebuild_symbols(opposite_pane)
+		opposite_pane.symbols_dirty      = false
+		opposite_pane.last_analysis_time = editor.clock
+	}
+	editor.active_pane_index = opposite_pane_index
+}
+
+// --- LSP API primitives -----------------------------------------------
+
+// Resolve the LSP client + editor pane for the active pane. Returns
+// ok=false when nothing is wired up (no editor pane, no file path,
+// no client for the language, client not initialized, pane hasn't
+// sent didOpen yet).
+@(private="file")
+editor_api_active_lsp :: proc(editor: ^Editor) -> (client: ^lsp.Client, editor_pane: ^EditorPane, ok: bool) {
+	editor_pane = editor_active_editor_pane(editor); if editor_pane == nil { return nil, nil, false }
+	if len(editor_pane.file_path) == 0 { return nil, nil, false }
+	language_id := lsp_language_id_for(editor_pane.language); if len(language_id) == 0 { return nil, nil, false }
+	found_client, has_client := editor.lsp_clients[language_id]; if !has_client { return nil, nil, false }
+	if !found_client.is_initialized        { return nil, nil, false }
+	if !editor_pane.lsp_did_open_sent      { return nil, nil, false }
+	return found_client, editor_pane, true
+}
+
+@(private)
+editor_api_lsp_request_hover :: proc(editor_ptr: rawptr) -> bool {
+	editor := cast(^Editor)editor_ptr
+	client, editor_pane, ok := editor_api_active_lsp(editor)
+	if !ok { return false }
+	editor_lsp_flush_pending_change(editor, editor_pane)
+	lsp.client_request_hover(client, editor_pane.file_path, i32(editor_pane.cursor_line), i32(editor_pane.cursor_column))
+	return true
+}
+
+@(private)
+editor_api_lsp_poll_hover :: proc(editor_ptr: rawptr, allocator: runtime.Allocator) -> (text: string, ok: bool) {
+	editor := cast(^Editor)editor_ptr
+	for _, client in editor.lsp_clients {
+		if !client.hover.is_valid { continue }
+		cloned := strings.clone(client.hover.text, allocator)
+		lsp.hover_result_clear(&client.hover)
+		return cloned, true
+	}
+	return "", false
+}
+
+@(private)
+editor_api_lsp_request_signature_help :: proc(editor_ptr: rawptr) -> bool {
+	editor := cast(^Editor)editor_ptr
+	client, editor_pane, ok := editor_api_active_lsp(editor)
+	if !ok { return false }
+	editor_lsp_flush_pending_change(editor, editor_pane)
+	lsp.client_request_signature_help(client, editor_pane.file_path, i32(editor_pane.cursor_line), i32(editor_pane.cursor_column))
+	return true
+}
+
+@(private)
+editor_api_lsp_poll_signature_help :: proc(editor_ptr: rawptr, allocator: runtime.Allocator) -> (info: binding_pkg.SignatureInfo, ok: bool) {
+	editor := cast(^Editor)editor_ptr
+	for _, client in editor.lsp_clients {
+		if !client.signature_help.is_valid { continue }
+
+		if len(client.signature_help.signatures) == 0 {
+			lsp.signature_help_result_clear(&client.signature_help)
+			return binding_pkg.SignatureInfo{ active_start = -1, active_end = -1 }, true
+		}
+
+		active_signature_index := client.signature_help.active_signature
+		if active_signature_index < 0                                       { active_signature_index = 0 }
+		if active_signature_index >= len(client.signature_help.signatures)  { active_signature_index = len(client.signature_help.signatures) - 1 }
+
+		signature := client.signature_help.signatures[active_signature_index]
+		active_parameter_index := client.signature_help.active_parameter
+		if active_parameter_index < 0                                  { active_parameter_index = 0 }
+		if active_parameter_index >= len(signature.parameter_ranges)   { active_parameter_index = -1 }
+
+		result := binding_pkg.SignatureInfo{
+			label         = strings.clone(signature.label,         allocator),
+			documentation = strings.clone(signature.documentation, allocator),
+			active_start  = -1,
+			active_end    = -1,
+		}
+		if active_parameter_index >= 0 {
+			active_range := signature.parameter_ranges[active_parameter_index]
+			result.active_start = active_range.start_byte
+			result.active_end   = active_range.end_byte
+		}
+		lsp.signature_help_result_clear(&client.signature_help)
+		return result, true
+	}
+	return {}, false
+}
+
+@(private)
+editor_api_lsp_request_completion :: proc(editor_ptr: rawptr) -> bool {
+	editor := cast(^Editor)editor_ptr
+	client, editor_pane, ok := editor_api_active_lsp(editor)
+	if !ok { return false }
+	editor_lsp_flush_pending_change(editor, editor_pane)
+	lsp.client_request_completion(client, editor_pane.file_path, i32(editor_pane.cursor_line), i32(editor_pane.cursor_column))
+	return true
+}
+
+@(private)
+editor_api_lsp_poll_completion :: proc(editor_ptr: rawptr, allocator: runtime.Allocator) -> (items: []binding_pkg.CompletionItem, ok: bool) {
+	editor := cast(^Editor)editor_ptr
+	for _, client in editor.lsp_clients {
+		if !client.completion.is_valid { continue }
+		converted := make([]binding_pkg.CompletionItem, len(client.completion.items), allocator)
+		for raw_item, item_index in client.completion.items {
+			converted[item_index] = binding_pkg.CompletionItem{
+				label       = strings.clone(raw_item.label,       allocator),
+				detail      = strings.clone(raw_item.detail,      allocator),
+				insert_text = strings.clone(raw_item.insert_text, allocator),
+			}
+		}
+		lsp.completion_result_clear(&client.completion)
+		return converted, true
+	}
+	return nil, false
+}
+
+@(private)
+editor_api_apply_completion_at_cursor :: proc(editor_ptr: rawptr, pane_index: int, insert_text: string) {
+	editor := cast(^Editor)editor_ptr
+	if pane_index < 0 || pane_index >= len(editor.panes) { return }
+	editor_pane := pane_as_editor(&editor.panes[pane_index]); if editor_pane == nil { return }
+
+	cursor_offset := editor_pane.cursor_offset
+	prefix_start  := cursor_offset
+	for prefix_start > 0 {
+		previous_byte := editor_api_document_byte_at(editor_pane, prefix_start - 1)
+		if !editor_api_is_identifier_byte(previous_byte) { break }
+		prefix_start -= 1
+	}
+	if prefix_start < cursor_offset {
+		document.document_delete(&editor_pane.document, prefix_start, cursor_offset - prefix_start)
+		editor_pane.cursor_offset = prefix_start
+	}
+	document.document_insert(&editor_pane.document, editor_pane.cursor_offset, insert_text)
+	editor_pane.cursor_offset += u32(len(insert_text))
+	pane_mark_document_modified(editor, editor_pane)
+	sync_cursor_from_offset(editor)
+}
+
+@(private="file")
+editor_api_document_byte_at :: proc(editor_pane: ^EditorPane, offset: u32) -> u8 {
+	byte_slice := document.document_get_slice(&editor_pane.document, offset, 1, context.temp_allocator)
+	if len(byte_slice) == 0 { return 0 }
+	return byte_slice[0]
+}
+
+@(private="file")
+editor_api_is_identifier_byte :: proc(byte_value: u8) -> bool {
+	return (byte_value >= 'a' && byte_value <= 'z') ||
+	       (byte_value >= 'A' && byte_value <= 'Z') ||
+	       (byte_value >= '0' && byte_value <= '9') ||
+	       byte_value == '_'
+}
+
+@(private)
+editor_api_markdown_context :: proc(editor_ptr: rawptr, renderer: ^sdl3.Renderer) -> markdown.Context {
+	editor := cast(^Editor)editor_ptr
+	return editor_markdown_context(editor, renderer)
+}
+
+@(private)
+editor_api_active_pane_cursor :: proc(editor_ptr: rawptr) -> binding_pkg.ActivePaneCursor {
+	editor := cast(^Editor)editor_ptr
+	result := binding_pkg.ActivePaneCursor{
+		pane_index = editor.active_pane_index,
+	}
+	if active_editor_pane := editor_active_editor_pane(editor); active_editor_pane != nil {
+		result.cursor_line   = active_editor_pane.cursor_line
+		result.cursor_column = active_editor_pane.cursor_column
+		result.cursor_offset = active_editor_pane.cursor_offset
+		result.is_editor     = true
+	}
+	return result
+}
+
+@(private)
+editor_api_pane_anchor :: proc(editor_ptr: rawptr, pane_index: int, anchor_line: u32) -> binding_pkg.PaneAnchor {
+	editor := cast(^Editor)editor_ptr
+	if pane_index < 0 || pane_index >= len(editor.panes) { return {} }
+	pane := &editor.panes[pane_index]
+	editor_pane := pane_as_editor(pane); if editor_pane == nil { return {} }
+
+	title_bar_height    := editor_title_bar_height(editor)
+	cursor_screen_top_y := pane.rectangle.y + title_bar_height + editor.padding_y + i32(anchor_line) * editor.line_height - i32(editor_pane.scroll_y)
+	return binding_pkg.PaneAnchor{
+		cursor_screen_top_y = cursor_screen_top_y,
+		cursor_line_height  = editor.line_height,
+		character_width     = editor.character_width,
+		pane_left_x         = pane.rectangle.x,
+		pane_top_y          = pane.rectangle.y + title_bar_height,
+		text_left_x         = pane.rectangle.x + editor.padding_x + editor_pane.gutter_width,
+	}
+}
+
+@(private)
+editor_api_theme :: proc(editor_ptr: rawptr) -> binding_pkg.Theme {
+	editor := cast(^Editor)editor_ptr
+	return binding_pkg.Theme{
+		background_color          = editor.background_color,
+		foreground_color          = editor.foreground_color,
+		status_bar_background     = editor.status_bar_background,
+		divider_color             = editor.divider_color,
+		cursor_color              = editor.cursor_color,
+		selection_color           = editor.selection_color,
+		line_number_color         = editor.line_number_color,
+		syntax_keyword_foreground = editor.syntax_keyword_foreground,
+	}
+}
+
+// --- symbols subpackage host + per-pane symbol cache --------------------
+
+// Walk every line of the pane's doc through the language's symbol
+// patterns and rebuild `symbols` + `symbol_names`. Called on file load,
+// when symbols_dialog opens (so the dialog sees fresh data), and on the
+// background reanalyze tick. Lives here rather than in the subpackage
+// because `symbol_names` is also consumed by the per-line syntax
+// tokenizer.
+@(private)
+pane_rebuild_symbols :: proc(editor_pane: ^EditorPane) {
+	for existing_symbol in editor_pane.symbols { delete(existing_symbol.name) }
+	clear(&editor_pane.symbols)
+	clear(&editor_pane.symbol_names)
+
+	if editor_pane.language == nil { return }
+
+	total_line_count := document.document_line_count(&editor_pane.document)
+
+	// Materialize every line into a slice once — the syntax matcher
+	// works on a whole-file lexeme stream so patterns like
+	// `template ... class {NAME} {` can span newlines.
+	all_lines := make([]string, total_line_count, context.temp_allocator)
+	for line_index in 0..<total_line_count {
+		all_lines[line_index] = document.document_get_line(&editor_pane.document, line_index, context.temp_allocator)
+	}
+
+	// Pass 1: discover user-declared type names so the `{TYPE}`
+	// placeholder can resolve references regardless of declaration
+	// order. All allocations live in temp_allocator and survive until
+	// the end of this proc, after pass 2 has consumed the map.
+	known_type_names := make(map[string]bool, 0, context.temp_allocator)
+	{
+		scratch_symbols: [dynamic]syntax.Symbol
+		scratch_symbols.allocator = context.temp_allocator
+		syntax.extract_symbols_from_lines(editor_pane.language, all_lines, &scratch_symbols, nil, context.temp_allocator)
+		for scratch_symbol in scratch_symbols {
+			if scratch_symbol.kind == .Type { known_type_names[scratch_symbol.name] = true }
+		}
+	}
+
+	// Pass 2: full extraction (names cloned with the long-lived allocator).
+	syntax.extract_symbols_from_lines(editor_pane.language, all_lines, &editor_pane.symbols, &known_type_names)
+
+	for extracted_symbol in editor_pane.symbols {
+		editor_pane.symbol_names[extracted_symbol.name] = extracted_symbol.kind
+	}
+}
+
+// Refresh the active pane's symbol cache and open the picker.
+@(private)
+symbols_open :: proc(editor: ^Editor) {
+	editor_pane := editor_active_editor_pane(editor)
+	if editor_pane == nil { return }
+
+	// Always refresh on open so the user sees the latest declarations.
+	pane_rebuild_symbols(editor_pane)
+	editor_pane.symbols_dirty      = false
+	editor_pane.last_analysis_time = editor.clock
+
+	symbols_pkg.open(&editor.symbols_dialog, editor.active_pane_index, editor_pane.symbols[:])
+}
+
+@(private="file")
+symbols_host_source_pane :: proc(editor: ^Editor) -> ^EditorPane {
+	source_pane_index := editor.symbols_dialog.source_pane_index
+	if source_pane_index < 0 || source_pane_index >= len(editor.panes) { return nil }
+	return pane_as_editor(&editor.panes[source_pane_index])
+}
+
+@(private)
+symbols_host_source_symbols :: proc(user_data: rawptr) -> []syntax.Symbol {
+	editor := cast(^Editor)user_data
+	source_editor_pane := symbols_host_source_pane(editor)
+	if source_editor_pane == nil { return nil }
+	return source_editor_pane.symbols[:]
+}
+
+@(private)
+symbols_host_dialog_title :: proc(user_data: rawptr, allocator: runtime.Allocator) -> string {
+	editor := cast(^Editor)user_data
+	source_editor_pane := symbols_host_source_pane(editor)
+	if source_editor_pane == nil { return strings.clone("Symbols", allocator) }
+	display_filename := source_editor_pane.file_path != "" ? filepath.base(source_editor_pane.file_path) : "untitled"
+	return fmt.aprintf("Symbols — %s", display_filename, allocator = allocator)
+}
+
+@(private)
+symbols_host_apply_activate :: proc(user_data: rawptr, symbol_index: int) {
+	editor := cast(^Editor)user_data
+	source_editor_pane := symbols_host_source_pane(editor)
+	if source_editor_pane == nil { return }
+	if symbol_index < 0 || symbol_index >= len(source_editor_pane.symbols) { return }
+
+	selected_symbol := source_editor_pane.symbols[symbol_index]
+
+	// Focus the source pane and place the cursor on the symbol's name.
+	editor.active_pane_index = editor.symbols_dialog.source_pane_index
+
+	document_line_count := document.document_line_count(&source_editor_pane.document)
+	target_line := selected_symbol.line
+	if target_line >= document_line_count { target_line = document_line_count - 1 }
+
+	line_start_offset := document.document_line_start(&source_editor_pane.document, target_line)
+	line_text         := document.document_get_line(&source_editor_pane.document, target_line, context.temp_allocator)
+	target_column     := selected_symbol.column
+	if int(target_column) > len(line_text) { target_column = u32(len(line_text)) }
+
+	source_editor_pane.cursor_line      = target_line
+	source_editor_pane.cursor_column    = target_column
+	source_editor_pane.cursor_offset    = line_start_offset + target_column
+	source_editor_pane.selection_active = false
+
+	editor.cursor_visible = true
+	editor.cursor_timer = 0
+
+	// Position the target line at the top of the pane's text area
+	// instead of just making it visible. In diff mode the layout is
+	// row-indexed and shared between panes, so we defer to the existing
+	// scroll-into-view behaviour there.
+	if editor.diff_state.active || editor.line_height <= 0 {
+		sync_cursor_from_offset(editor)
+	} else {
+		target_scroll_y := f32(target_line) * f32(editor.line_height)
+		if target_scroll_y < 0 { target_scroll_y = 0 }
+		source_editor_pane.scroll_y        = target_scroll_y
+		source_editor_pane.scroll_y_target = target_scroll_y
+		source_editor_pane.scroll_line     = target_line
+	}
+}
+
 editor_destroy :: proc(editor: ^Editor) {
 	for pane_index in 0..<len(editor.panes) {
 		pane_destroy(&editor.panes[pane_index])
 	}
-	browse_state_destroy(editor)
+	for &registered_binding in editor.bindings {
+		if registered_binding.destroy != nil {
+			registered_binding.destroy(registered_binding.state)
+		}
+	}
+	delete(editor.bindings)
 	diff_state_destroy(&editor.diff_state)
-	symbols_dialog_destroy(&editor.symbols_dialog)
+	symbols_pkg.destroy(&editor.symbols_dialog)
 	find_state_destroy(&editor.find)
 	replace_state_destroy(&editor.replace)
-	find_in_files_destroy(&editor.find_in_files)
 	replace_in_files_destroy(&editor.replace_in_files)
-	save_as_dialog_destroy(&editor.save_as_dialog)
-	git_history_dialog_destroy(&editor.git_history_dialog)
-	open_docs_dialog_destroy(&editor.open_docs_dialog)
-	terminal_picker_pkg.destroy(&editor.terminal_picker)
-	tasks_dialog_destroy(&editor.tasks_dialog)
 	project_config_destroy(&editor.project_config)
-	breakpoint_condition_dialog_destroy(&editor.breakpoint_condition_dialog)
-	hover_pkg.destroy(&editor.hover_popup)
-	completion_popup_pkg.destroy(&editor.completion_popup)
-	signature_popup_pkg.destroy(&editor.signature_popup)
 	editor_lsp_destroy_all(editor)
 	editor_settings_destroy(&editor.settings)
 	for background_index in 0..<len(editor.background_documents) {
@@ -874,11 +1528,16 @@ editor_active_terminal :: proc(editor: ^Editor) -> ^terminal.Terminal {
 	return editor.terminals[editor.active_terminal_index].terminal
 }
 
-// Project the editor's terminal list into the read-only view the
-// `terminal_picker` subpackage consumes. Allocated in `allocator` (usually
-// temp_allocator — one slice per event, no stable storage required).
+// --- terminal_picker host trampolines ------------------------------------
+//
+// The picker calls these via its Host callbacks; they cast `user_data`
+// back to `^Editor` and apply the requested mutation. Keeps the
+// terminal_picker subpackage's import graph clean: it never depends on
+// the editor package.
+
 @(private)
-terminal_picker_entries :: proc(editor: ^Editor, allocator := context.temp_allocator) -> []terminal_picker_pkg.Entry {
+terminal_picker_host_list_entries :: proc(user_data: rawptr, allocator: runtime.Allocator) -> []terminal_picker_pkg.Entry {
+	editor := cast(^Editor)user_data
 	entries := make([]terminal_picker_pkg.Entry, len(editor.terminals), allocator)
 	for entry, entry_index in editor.terminals {
 		entries[entry_index] = terminal_picker_pkg.Entry{
@@ -889,24 +1548,18 @@ terminal_picker_entries :: proc(editor: ^Editor, allocator := context.temp_alloc
 	return entries
 }
 
-// Open the terminal picker over the current terminals slice. Mirrors the
-// old `terminal_picker_open` proc but now goes through the subpackage so
-// the Editor struct holds zero picker-specific logic.
 @(private)
-editor_open_terminal_picker :: proc(editor: ^Editor) {
-	if len(editor.terminals) == 0 { return }
-	entries := terminal_picker_entries(editor, context.temp_allocator)
-	initial_selection := editor.active_terminal_index
-	if initial_selection < 0 { initial_selection = 0 }
-	terminal_picker_pkg.open(&editor.terminal_picker, entries, initial_selection)
+terminal_picker_host_initial_selection :: proc(user_data: rawptr) -> int {
+	editor := cast(^Editor)user_data
+	return max(0, editor.active_terminal_index)
 }
 
-// Switch the active terminal to the entry the picker activated. Replaces
-// the inline pane-swap dance that used to live in
-// `terminal_picker_activate` — the picker no longer touches `editor.panes`
-// directly, it just hands back the chosen index.
+// Switch the active terminal to whichever entry the picker activated.
+// Same pane-swap dance the old `editor_activate_terminal_at` did,
+// reached now through the Host callback rather than a direct call.
 @(private)
-editor_activate_terminal_at :: proc(editor: ^Editor, entry_index: int) {
+terminal_picker_host_activate :: proc(user_data: rawptr, entry_index: int) {
+	editor := cast(^Editor)user_data
 	if entry_index < 0 || entry_index >= len(editor.terminals) { return }
 	editor.active_terminal_index = entry_index
 
@@ -918,6 +1571,119 @@ editor_activate_terminal_at :: proc(editor: ^Editor, entry_index: int) {
 	} else {
 		editor_terminal_show(editor)
 	}
+}
+
+// --- open_docs host trampolines ------------------------------------------
+
+@(private)
+open_docs_host_list_entries :: proc(user_data: rawptr, source_pane_index: int, allocator: runtime.Allocator) -> []open_docs_pkg.EntrySource {
+	editor := cast(^Editor)user_data
+	sources := make([dynamic]open_docs_pkg.EntrySource, 0, 16, allocator)
+
+	// Source pane (active) first so the user's current doc is the top row.
+	if source_pane_index >= 0 && source_pane_index < len(editor.panes) {
+		if source_editor_pane := pane_as_editor(&editor.panes[source_pane_index]); source_editor_pane != nil {
+			append(&sources, open_docs_pkg.EntrySource{
+				location   = .ActivePane,
+				pane_index = source_pane_index,
+				is_dirty   = document.document_is_dirty(&source_editor_pane.document),
+				label      = open_docs_format_label(source_editor_pane, source_pane_index, .ActivePane, allocator),
+			})
+		}
+	}
+
+	// Other-pane doc, if a split is active.
+	if editor.split_active {
+		for visible_pane_index in 0..<len(editor.panes) {
+			if visible_pane_index == source_pane_index { continue }
+			other_editor_pane := pane_as_editor(&editor.panes[visible_pane_index])
+			if other_editor_pane == nil { continue }
+			append(&sources, open_docs_pkg.EntrySource{
+				location   = .OtherPane,
+				pane_index = visible_pane_index,
+				is_dirty   = document.document_is_dirty(&other_editor_pane.document),
+				label      = open_docs_format_label(other_editor_pane, visible_pane_index, .OtherPane, allocator),
+			})
+		}
+	}
+
+	// Background documents — most-recently-stashed first.
+	for reverse_index := len(editor.background_documents) - 1; reverse_index >= 0; reverse_index -= 1 {
+		background_editor_pane := &editor.background_documents[reverse_index]
+		append(&sources, open_docs_pkg.EntrySource{
+			location         = .Background,
+			background_index = reverse_index,
+			is_dirty         = document.document_is_dirty(&background_editor_pane.document),
+			label            = open_docs_format_label(background_editor_pane, -1, .Background, allocator),
+		})
+	}
+	return sources[:]
+}
+
+@(private)
+open_docs_host_activate :: proc(user_data: rawptr, source_pane_index: int, location: open_docs_pkg.EntryLocation, pane_index, background_index: int) {
+	editor := cast(^Editor)user_data
+	switch location {
+	case .ActivePane:
+		// Picking the currently-active doc — just close (handled by
+		// the modal itself).
+
+	case .OtherPane:
+		if pane_index >= 0 && pane_index < len(editor.panes) {
+			editor.active_pane_index = pane_index
+		}
+
+	case .Background:
+		// Pull the stashed doc into the pane the dialog opened from.
+		editor_swap_background_into_pane(editor, source_pane_index, background_index)
+	}
+	editor.cursor_visible = true
+	editor.cursor_timer   = 0
+}
+
+@(private)
+open_docs_format_label :: proc(editor_pane: ^EditorPane, pane_index: int, location: open_docs_pkg.EntryLocation, allocator := context.temp_allocator) -> string {
+	dirty_marker := document.document_is_dirty(&editor_pane.document) ? "* " : "  "
+
+	display_name: string
+	full_path:    string
+	switch {
+	case len(editor_pane.display_title_override) > 0:
+		display_name = editor_pane.display_title_override
+	case len(editor_pane.file_path) > 0:
+		display_name = open_docs_filepath_base(editor_pane.file_path)
+		full_path    = editor_pane.file_path
+	case:
+		display_name = "untitled"
+	}
+
+	location_tag: string
+	switch location {
+	case .ActivePane: location_tag = "[active]"
+	case .OtherPane:  location_tag = fmt.tprintf("[Pane %d]", pane_index + 1)
+	case .Background: location_tag = ""
+	}
+
+	if len(full_path) > 0 && len(location_tag) > 0 {
+		return strings.clone(fmt.tprintf("%s%s — %s    %s", dirty_marker, display_name, full_path, location_tag), allocator)
+	}
+	if len(full_path) > 0 {
+		return strings.clone(fmt.tprintf("%s%s — %s", dirty_marker, display_name, full_path), allocator)
+	}
+	if len(location_tag) > 0 {
+		return strings.clone(fmt.tprintf("%s%s    %s", dirty_marker, display_name, location_tag), allocator)
+	}
+	return strings.clone(fmt.tprintf("%s%s", dirty_marker, display_name), allocator)
+}
+
+@(private)
+open_docs_filepath_base :: proc(file_path: string) -> string {
+	if len(file_path) == 0 { return file_path }
+	for character_index := len(file_path) - 1; character_index >= 0; character_index -= 1 {
+		current_character := file_path[character_index]
+		if current_character == '/' || current_character == '\\' { return file_path[character_index+1:] }
+	}
+	return file_path
 }
 
 // Display number of the active terminal entry, or 0 when nothing's open.
@@ -1196,8 +1962,7 @@ editor_open_string_in_pane :: proc(editor: ^Editor, pane_index: int, content_tex
 	}
 	editor.panes[pane_index].content = new_editor_pane
 
-	// Build the per-pane symbol index now that the doc + language are wired
-	// up. `pane_rebuild_symbols` is defined in symbols.odin.
+	// Build the per-pane symbol index now that the doc + language are wired up.
 	if new_editor_pane.language != nil {
 		if editor_pane := pane_as_editor(&editor.panes[pane_index]); editor_pane != nil {
 			pane_rebuild_symbols(editor_pane)
@@ -1364,7 +2129,7 @@ editor_needs_render :: proc(editor: ^Editor) -> bool {
 
 // True when a modal dialog (help, browse, future popups) currently owns input.
 editor_is_modal_open :: proc(editor: ^Editor) -> bool {
-	return editor.help.visible || editor.show_browse || editor.show_symbols || editor.show_find_in_files || editor.show_replace_in_files || editor.show_save_as || editor.show_close_confirm || editor.show_git_history || editor.show_open_docs || editor.terminal_picker.visible || editor.show_tasks_dialog || editor.show_breakpoint_condition || editor.menu_bar.open_menu_index >= 0
+	return editor.help.visible || editor.browse_view.visible || editor.symbols_dialog.visible || editor.find_in_files.visible || editor.show_replace_in_files || editor.save_as_dialog.visible || editor.close_confirm_dialog.visible || editor.git_history_dialog.visible || editor.open_docs_dialog.visible || editor.terminal_picker.visible || editor.tasks_dialog.visible || editor.breakpoint_condition_dialog.visible || editor.menu_bar.open_menu_index >= 0
 }
 
 // --- Project root ---------------------------------------------------------

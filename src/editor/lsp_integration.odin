@@ -4,8 +4,11 @@ import "core:os"
 import "core:path/filepath"
 import "core:strings"
 
+import completion_popup_pkg "./completion_popup"
 import "../document"
+import hover_pkg "./hover"
 import "../lsp"
+import signature_popup_pkg "./signature_popup"
 import "../syntax"
 
 // --- Language id resolution ------------------------------------------------
@@ -190,19 +193,19 @@ editor_lsp_maybe_trigger_completion :: proc(editor: ^Editor, just_typed_text: st
 
 	switch last_byte {
 	case '.':
-		completion_popup_trigger_at_cursor(editor)
+		completion_popup_pkg.trigger_at_cursor_via_api(&editor.completion_popup, &editor.editor_api)
 
 	case '(':
-		signature_popup_request_at_cursor(editor)
+		signature_popup_pkg.request_at_cursor_via_api(&editor.signature_popup, &editor.editor_api)
 
 	case ',':
 		// Refresh signature help so the active parameter underline
 		// follows along as the user moves through the argument list.
-		signature_popup_request_at_cursor(editor)
+		signature_popup_pkg.request_at_cursor_via_api(&editor.signature_popup, &editor.editor_api)
 
 	case ')':
 		// Closing the call expression closes the popup.
-		signature_popup_close(editor)
+		signature_popup_pkg.close(&editor.signature_popup)
 
 	case '"', ':', '/':
 		// `"` always fires only on `import` lines so plain string literals
@@ -212,7 +215,7 @@ editor_lsp_maybe_trigger_completion :: proc(editor: ^Editor, just_typed_text: st
 		// same reason: `name : int` and division `a / b` would otherwise
 		// pop the dropdown constantly.
 		if line_is_import(&editor_pane.document, editor_pane.cursor_line) {
-			completion_popup_trigger_at_cursor(editor)
+			completion_popup_pkg.trigger_at_cursor_via_api(&editor.completion_popup, &editor.editor_api)
 		}
 	}
 }
@@ -283,9 +286,9 @@ editor_lsp_update :: proc(editor: ^Editor) {
 
 	// Pull any freshly-arrived hover / completion / signature result into
 	// the corresponding popup.
-	hover_popup_update(editor)
-	completion_popup_update(editor)
-	signature_popup_update(editor)
+	hover_pkg.update_via_api(&editor.hover_popup, &editor.editor_api)
+	completion_popup_pkg.update_via_api(&editor.completion_popup, &editor.editor_api)
+	signature_popup_pkg.update_via_api(&editor.signature_popup, &editor.editor_api)
 
 	DIDCHANGE_DEBOUNCE_SECONDS :: 0.15
 	for pane_index in 0..<len(editor.panes) {

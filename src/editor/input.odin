@@ -3,10 +3,18 @@ package editor
 import "vendor:sdl3"
 import "vendor:sdl3/ttf"
 
+import browse_pkg "./browse"
 import "../dap"
 import "../document"
+import find_in_files_pkg "./find_in_files"
+import git_history_pkg "./git_history"
 import help_pkg "./help"
+import completion_popup_pkg "./completion_popup"
+import hover_pkg "./hover"
+import signature_popup_pkg "./signature_popup"
+import tasks_dialog_pkg "./tasks_dialog"
 import "../markdown"
+import open_docs_pkg "./open_docs"
 import terminal_picker_pkg "./terminal_picker"
 import "../keybindings"
 import "../terminal"
@@ -50,103 +58,16 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 	// Each modal handler reports back whether it changed anything visible
 	// via a `needs_redraw` bool; we funnel that through `editor_mark_dirty`
 	// so the modal package stays unaware of the editor's dirty-tracking.
-	if editor.help.visible {
-		needs_redraw := false
-		#partial switch event.type {
-		case .KEY_DOWN:
-			pressed_key := event.key.key
-			switch pressed_key {
-			case sdl3.K_F1, sdl3.K_ESCAPE:
-				needs_redraw = help_pkg.close(&editor.help)
-			case sdl3.K_UP:
-				help_pkg.scroll_by(&editor.help, -editor.line_height)
-				needs_redraw = true
-			case sdl3.K_DOWN:
-				help_pkg.scroll_by(&editor.help, editor.line_height)
-				needs_redraw = true
-			case sdl3.K_PAGEUP:
-				page_step := max(i32(1), editor.line_height * 8)
-				help_pkg.scroll_by(&editor.help, -page_step)
-				needs_redraw = true
-			case sdl3.K_PAGEDOWN:
-				page_step := max(i32(1), editor.line_height * 8)
-				help_pkg.scroll_by(&editor.help, page_step)
-				needs_redraw = true
-			case sdl3.K_HOME:
-				help_pkg.scroll_to_top(&editor.help)
-				needs_redraw = true
-			case sdl3.K_END:
-				help_pkg.scroll_to_bottom(&editor.help)
-				needs_redraw = true
-			}
-		case .MOUSE_WHEEL:
-			help_pkg.scroll_by(&editor.help, -i32(event.wheel.y * f32(editor.line_height) * 3))
-			needs_redraw = true
-		case .MOUSE_MOTION:
-			needs_redraw = help_pkg.handle_mouse_motion(&editor.help, event.motion.x, event.motion.y)
-		case .MOUSE_BUTTON_DOWN:
-			if event.button.button == sdl3.BUTTON_LEFT {
-				needs_redraw = help_pkg.handle_mouse_down(&editor.help, event.button.x, event.button.y)
-			}
-		case .MOUSE_BUTTON_UP:
-			if event.button.button == sdl3.BUTTON_LEFT {
-				needs_redraw = help_pkg.handle_mouse_up(&editor.help)
-			}
-		}
+	// Plugin-style bindings are tried first, in registration order.
+	// The first one whose `visible` returns true takes the event.
+	for &registered_binding in editor.bindings {
+		if registered_binding.visible == nil || !registered_binding.visible(registered_binding.state) { continue }
+		consumed, needs_redraw := registered_binding.handle_event(registered_binding.state, &editor.editor_api, event)
 		if needs_redraw { editor_mark_dirty(editor) }
-		return
-	}
-	if editor.show_browse {
-		browse_handle_event(editor, event)
-		return
-	}
-	if editor.show_symbols {
-		symbols_dialog_handle_event(editor, event)
-		return
-	}
-	if editor.show_find_in_files {
-		find_in_files_handle_event(editor, event)
-		return
+		if consumed { return }
 	}
 	if editor.show_replace_in_files {
 		replace_in_files_handle_event(editor, event)
-		return
-	}
-	if editor.show_save_as {
-		save_as_dialog_handle_event(editor, event)
-		return
-	}
-	if editor.show_close_confirm {
-		close_confirm_dialog_handle_event(editor, event)
-		return
-	}
-	if editor.show_git_history {
-		git_history_dialog_handle_event(editor, event)
-		return
-	}
-	if editor.show_open_docs {
-		open_docs_dialog_handle_event(editor, event)
-		return
-	}
-	if editor.terminal_picker.visible {
-		entries := terminal_picker_entries(editor, context.temp_allocator)
-		intent, needs_redraw := terminal_picker_pkg.handle_event(&editor.terminal_picker, event, entries)
-		if intent != nil {
-			#partial switch intent_value in intent {
-			case terminal_picker_pkg.Activate:
-				editor_activate_terminal_at(editor, intent_value.entry_index)
-			}
-			needs_redraw = true
-		}
-		if needs_redraw { editor_mark_dirty(editor) }
-		return
-	}
-	if editor.show_tasks_dialog {
-		tasks_dialog_handle_event(editor, event)
-		return
-	}
-	if editor.show_breakpoint_condition {
-		breakpoint_condition_dialog_handle_event(editor, event)
 		return
 	}
 
@@ -179,9 +100,10 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 				// Typing in the document dismisses the hover popup — it
 				// only makes sense as long as the cursor sits on the
 				// symbol it was anchored to.
-				if editor.hover_popup.visible { hover_popup_close(editor) }
-				// Mirror keystrokes into the completion popup filter when it's open.
-				_ = completion_popup_consume_text(editor, input_text)
+				if editor.hover_popup.visible { hover_pkg.close(&editor.hover_popup) }
+				// completion_popup mirrors keystrokes into its filter via
+				// its binding's handle_event (called earlier in the dispatch
+				// loop) — no explicit call needed here.
 				editor_insert_text(editor, input_text)
 				// Fire completion automatically on LSP trigger characters
 				// (`.`, `"` inside `import`). Has to run AFTER the insert
@@ -205,22 +127,15 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 		key_modifiers := event.key.mod
 
 		if pressed_key == sdl3.K_ESCAPE && editor.hover_popup.visible {
-			hover_popup_close(editor)
+			hover_pkg.close(&editor.hover_popup)
 			return
 		}
 		if pressed_key == sdl3.K_ESCAPE && editor.signature_popup.visible {
-			signature_popup_close(editor)
+			signature_popup_pkg.close(&editor.signature_popup)
 			return
 		}
 
 		if editor_dispatch_shortcut(editor, pressed_key, key_modifiers) { return }
-
-		// Completion popup intercepts navigation + Enter/Tab while open. It
-		// passes text-input events through so the user can keep typing —
-		// the filter is updated via the consume_text hook below.
-		if editor.completion_popup.visible {
-			if completion_popup_handle_key(editor, event) { return }
-		}
 
 		// Route remaining keys to the active pane.
 		#partial switch &content_value in editor_active_pane(editor).content {
@@ -342,19 +257,19 @@ editor_dispatch_shortcut :: proc(editor: ^Editor, pressed_key: sdl3.Keycode, key
 
 	#partial switch action {
 	case .Help:               if help_pkg.toggle(&editor.help) { editor_mark_dirty(editor) }
-	case .FileBrowser:        browse_open(editor)
-	case .GitHistory:         git_history_dialog_open(editor)
-	case .OpenDocs:           open_docs_dialog_open(editor)
+	case .FileBrowser:        browse_pkg.open(&editor.browse_view, &editor.editor_api)
+	case .GitHistory:         git_history_pkg.open_via_api(&editor.git_history_dialog, &editor.editor_api)
+	case .OpenDocs:           if editor_active_editor_pane(editor) != nil { open_docs_pkg.open_with_hooks(&editor.open_docs_dialog, editor.open_docs_hooks, editor.active_pane_index) }
 	case .MarkdownPreview:    markdown_preview_open(editor)
-	case .Symbols:            symbols_dialog_open(editor)
-	case .Tasks:              tasks_dialog_open(editor)
+	case .Symbols:            symbols_open(editor)
+	case .Tasks:              tasks_dialog_pkg.open_via_api(&editor.tasks_dialog, &editor.editor_api)
 	case .ToggleDebugPanel:   debug_panel_toggle(editor)
 	case .ToggleDiff:         diff_toggle(editor)
 	case .StepOver:           dap.client_step_over(editor.active_dap_client)
 	case .StepIn:             dap.client_step_in(editor.active_dap_client)
 	case .ToggleTerminal:     editor_toggle_terminal(editor)
 	case .NewTerminal:        editor_terminal_create_new(editor)
-	case .PickTerminal:       editor_open_terminal_picker(editor)
+	case .PickTerminal:       terminal_picker_pkg.open_with_hooks(&editor.terminal_picker, editor.terminal_picker_hooks)
 	case .SwapPanes:
 		find_close(editor)
 		replace_close(editor, false)
@@ -368,8 +283,8 @@ editor_dispatch_shortcut :: proc(editor: ^Editor, pressed_key: sdl3.Keycode, key
 	case .MoveToRightPane:
 		find_close(editor); replace_close(editor, false); editor_move_active_to_pane(editor, 1)
 	case .ToggleWrap:         editor_toggle_wrap(editor)
-	case .Hover:              hover_popup_request_at_cursor(editor)
-	case .TriggerCompletion:  completion_popup_trigger_at_cursor(editor)
+	case .Hover:              hover_pkg.request_at_cursor_via_api(&editor.hover_popup, &editor.editor_api)
+	case .TriggerCompletion:  completion_popup_pkg.trigger_at_cursor_via_api(&editor.completion_popup, &editor.editor_api)
 	case .SaveFile:           editor_save_active_file(editor)
 	case .SaveFileAs:         editor_save_as_active_file(editor)
 	case .CloseFile:
@@ -389,7 +304,7 @@ editor_dispatch_shortcut :: proc(editor: ^Editor, pressed_key: sdl3.Keycode, key
 		// Toggle: a second press closes the bar. No-op when the active pane
 		// isn't an editor.
 		if find_active(editor) { find_close(editor) } else { find_open(editor) }
-	case .FindInFiles:        find_in_files_open(editor)
+	case .FindInFiles:        find_in_files_pkg.open_via_api(&editor.find_in_files, &editor.editor_api)
 	case .ReplaceToggle:
 		if replace_active(editor) { replace_close(editor, false) } else { replace_open(editor) }
 	case .ReplaceInFiles:     replace_in_files_open(editor)
@@ -463,7 +378,8 @@ editor_handle_key :: proc(editor: ^Editor, event: ^sdl3.Event) {
 
 	case sdl3.K_BACKSPACE:
 		if is_diff_mode { return }
-		_ = completion_popup_consume_backspace(editor)
+		// completion_popup mirrors backspace into its filter via the
+		// binding's handle_event (called earlier).
 		if delete_selection(editor) { return }
 		if editor_pane.cursor_offset > 0 {
 			deletion_length := prev_char_len(editor)

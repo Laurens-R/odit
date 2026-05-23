@@ -4,6 +4,7 @@ import "core:fmt"
 import "vendor:sdl3"
 
 import "../document"
+import "./textutil"
 import "../ui"
 
 // --- Types -----------------------------------------------------------------
@@ -196,7 +197,7 @@ replace_recompute_matches :: proc(editor: ^Editor, editor_pane: ^EditorPane) {
 		search_position := 0
 		for search_position <= len(line_bytes) {
 			if len(editor.replace.matches) >= FIND_MAX_MATCHES { break }
-			consumed_byte_count, matched := glob_match_at(line_bytes[search_position:], query_bytes)
+			consumed_byte_count, matched := textutil.glob_match_at(line_bytes[search_position:], query_bytes)
 			if !matched {
 				search_position += 1
 				continue

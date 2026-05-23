@@ -4,6 +4,7 @@ import "core:fmt"
 import "vendor:sdl3"
 
 import "../document"
+import "./textutil"
 import "../ui"
 
 // --- Types -----------------------------------------------------------------
@@ -146,7 +147,7 @@ find_recompute :: proc(editor: ^Editor) {
 		search_position := 0
 		for search_position <= len(line_bytes) {
 			if len(editor.find.matches) >= FIND_MAX_MATCHES { break }
-			consumed_byte_count, matched := glob_match_at(line_bytes[search_position:], query_bytes)
+			consumed_byte_count, matched := textutil.glob_match_at(line_bytes[search_position:], query_bytes)
 			if !matched {
 				search_position += 1
 				continue
@@ -178,65 +179,6 @@ find_recompute :: proc(editor: ^Editor) {
 	}
 
 	find_jump_to_current(editor)
-}
-
-// Shortest-prefix glob matcher. Returns the number of bytes consumed at the
-// start of `text` and whether a match was found. `*` matches any byte sequence
-// (not crossing '\n') and `?` matches a single non-'\n' byte.
-//
-// Since we only ever call this on a single line of text (no '\n' present), the
-// newline guard is defensive; the matcher won't synthesize a '\n' on its own.
-//
-// Shared with the Replace bar in replace.odin — keep package-private.
-@(private)
-glob_match_at :: proc(text: []byte, pattern: []byte) -> (consumed: int, matched: bool) {
-	text_index    := 0
-	pattern_index := 0
-	star_text_index    := -1
-	star_pattern_index := -1
-
-	for text_index < len(text) {
-		if pattern_index < len(pattern) && pattern[pattern_index] == '*' {
-			star_text_index    = text_index
-			star_pattern_index = pattern_index
-			pattern_index += 1
-			if pattern_index == len(pattern) {
-				// Trailing '*' — shortest match consumes nothing past here.
-				return text_index, true
-			}
-			continue
-		}
-		if pattern_index < len(pattern) {
-			pattern_byte := pattern[pattern_index]
-			text_byte    := text[text_index]
-			if text_byte == '\n' {
-				// Match must stay on a single line — neither '?' nor a literal
-				// in the query is allowed to consume a newline.
-				if star_pattern_index == -1 { return 0, false }
-				return 0, false
-			}
-			if pattern_byte == '?' || pattern_byte == text_byte {
-				text_index += 1
-				pattern_index += 1
-				if pattern_index == len(pattern) { return text_index, true }
-				continue
-			}
-		}
-		if star_pattern_index != -1 {
-			star_text_index += 1
-			if star_text_index > len(text) { return 0, false }
-			text_index    = star_text_index
-			pattern_index = star_pattern_index + 1
-			if pattern_index == len(pattern) { return text_index, true }
-			continue
-		}
-		return 0, false
-	}
-
-	// Text exhausted — only matches if remaining pattern is all '*'s.
-	for pattern_index < len(pattern) && pattern[pattern_index] == '*' { pattern_index += 1 }
-	if pattern_index == len(pattern) { return text_index, true }
-	return 0, false
 }
 
 // --- Navigation ------------------------------------------------------------

@@ -4,9 +4,17 @@ import "core:strings"
 import "vendor:sdl3"
 import "vendor:sdl3/ttf"
 
+import browse_pkg "./browse"
 import "../dap"
+import find_in_files_pkg "./find_in_files"
+import completion_popup_pkg "./completion_popup"
+import git_history_pkg "./git_history"
 import help_pkg "./help"
+import hover_pkg "./hover"
+import open_docs_pkg "./open_docs"
+import tasks_dialog_pkg "./tasks_dialog"
 import "../terminal"
+import terminal_picker_pkg "./terminal_picker"
 import "../ui"
 
 // --- Action vocabulary -----------------------------------------------------
@@ -682,10 +690,10 @@ menu_execute_action :: proc(editor: ^Editor, action: MenuActionKind) {
 	switch action {
 	case .None: return
 
-	case .FileOpen:            browse_open(editor)
+	case .FileOpen:            browse_pkg.open(&editor.browse_view, &editor.editor_api)
 	case .FileSave:            editor_save_active_file(editor)
 	case .FileSaveAs:          editor_save_as_active_file(editor)
-	case .FileSwitchDocument:  open_docs_dialog_open(editor)
+	case .FileSwitchDocument:  if editor_active_editor_pane(editor) != nil { open_docs_pkg.open_with_hooks(&editor.open_docs_dialog, editor.open_docs_hooks, editor.active_pane_index) }
 	case .FileClose:           editor_close_active_file(editor)
 	case .FileQuit:            editor.quit_requested = true
 
@@ -695,9 +703,9 @@ menu_execute_action :: proc(editor: ^Editor, action: MenuActionKind) {
 	case .EditPaste:           menu_paste_in_active_pane(editor)
 	case .EditFind:            menu_toggle_find(editor)
 	case .EditReplace:         menu_toggle_replace(editor)
-	case .EditFindInFiles:     find_in_files_open(editor)
+	case .EditFindInFiles:     find_in_files_pkg.open_via_api(&editor.find_in_files, &editor.editor_api)
 	case .EditReplaceInFiles:  replace_in_files_open(editor)
-	case .EditCompletion:      completion_popup_trigger_at_cursor(editor)
+	case .EditCompletion:      completion_popup_pkg.trigger_at_cursor_via_api(&editor.completion_popup, &editor.editor_api)
 
 	case .ViewToggleWrap:      editor_toggle_wrap(editor)
 	case .ViewToggleDiff:      diff_toggle(editor)
@@ -708,16 +716,16 @@ menu_execute_action :: proc(editor: ^Editor, action: MenuActionKind) {
 	case .ViewMoveToLeftPane:  editor_move_active_to_pane(editor, 0)
 	case .ViewMoveToRightPane: editor_move_active_to_pane(editor, 1)
 
-	case .NavSymbolJump:       symbols_dialog_open(editor)
-	case .NavGitHistory:       git_history_dialog_open(editor)
-	case .NavLspHover:         hover_popup_request_at_cursor(editor)
+	case .NavSymbolJump:       symbols_open(editor)
+	case .NavGitHistory:       git_history_pkg.open_via_api(&editor.git_history_dialog, &editor.editor_api)
+	case .NavLspHover:         hover_pkg.request_at_cursor_via_api(&editor.hover_popup, &editor.editor_api)
 
 	case .TerminalShowHide:    editor_toggle_terminal(editor)
 	case .TerminalNew:         editor_terminal_create_new(editor)
-	case .TerminalSwitch:      editor_open_terminal_picker(editor)
+	case .TerminalSwitch:      terminal_picker_pkg.open_with_hooks(&editor.terminal_picker, editor.terminal_picker_hooks)
 	case .TerminalCloseActive: editor_terminal_destroy_active(editor)
 
-	case .DebugTasks:          tasks_dialog_open(editor)
+	case .DebugTasks:          tasks_dialog_pkg.open_via_api(&editor.tasks_dialog, &editor.editor_api)
 	case .DebugTogglePanel:    debug_panel_toggle(editor)
 	case .DebugContinue:       dap.client_continue(editor.active_dap_client)
 	case .DebugStop:           editor_dap_stop_session(editor)

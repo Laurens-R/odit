@@ -8,6 +8,7 @@ import "core:unicode/utf8"
 import "vendor:sdl3"
 
 import "../document"
+import "./textutil"
 import "../ui"
 
 // --- Types -----------------------------------------------------------------
@@ -352,7 +353,7 @@ replace_in_files_scan_file :: proc(editor: ^Editor, full_file_path, relative_pat
 		search_position := 0
 		for search_position <= len(line_bytes) {
 			if len(state.results) >= RIF_MAX_RESULTS { return }
-			consumed_byte_count, matched := glob_match_at(line_bytes[search_position:], query_bytes)
+			consumed_byte_count, matched := textutil.glob_match_at(line_bytes[search_position:], query_bytes)
 			if !matched {
 				search_position += 1
 				continue
@@ -367,7 +368,7 @@ replace_in_files_scan_file :: proc(editor: ^Editor, full_file_path, relative_pat
 				line          = line_index,
 				column        = u32(search_position),
 				match_length  = u32(consumed_byte_count),
-				snippet       = sanitize_snippet(snippet_bytes),
+				snippet       = textutil.sanitize_snippet(snippet_bytes),
 				status        = .Pending,
 			})
 
@@ -390,8 +391,8 @@ compute_max_prefix_chars :: proc(results: []ReplaceInFilesResult) -> int {
 	max_prefix_chars := 0
 	for result in results {
 		prefix_chars := utf8.rune_count_in_string(result.relative_path) + 2 +
-			digit_count_u32(result.line   + 1) +
-			digit_count_u32(result.column + 1)
+			textutil.digit_count_u32(result.line   + 1) +
+			textutil.digit_count_u32(result.column + 1)
 		if prefix_chars > max_prefix_chars { max_prefix_chars = prefix_chars }
 	}
 	return max_prefix_chars
@@ -1102,7 +1103,7 @@ replace_in_files_render_result_rows :: proc(
 		padding_string := strings.repeat(" ", padding_chars, context.temp_allocator)
 
 		combined_row := strings.concatenate({prefix_string, padding_string, result.snippet}, context.temp_allocator)
-		row_label := truncate_to_runes_with_ellipsis(combined_row, max_chars_per_row)
+		row_label := textutil.truncate_to_runes_with_ellipsis(combined_row, max_chars_per_row)
 
 		text_color := is_selected ? theme.title_foreground : theme.text_foreground
 		if result.status == .Replaced { text_color = replaced_label_color }

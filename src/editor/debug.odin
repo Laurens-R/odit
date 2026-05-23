@@ -5,6 +5,7 @@ import "core:math"
 import "core:strings"
 import "vendor:sdl3"
 
+import breakpoint_condition_pkg "./breakpoint_condition"
 import "../dap"
 import "../document"
 import "../ui"
@@ -421,6 +422,25 @@ breakpoint_condition_at :: proc(editor: ^Editor, file_path: string, line: u32) -
 		if bp.line == line { return bp.condition, true }
 	}
 	return "", false
+}
+
+// --- Breakpoint-condition host trampolines --------------------------------
+//
+// Two thin shims the breakpoint_condition modal calls via its `Host`
+// callbacks. They cast the opaque `user_data` back to `^Editor` and
+// forward to the real procs above. Keeps the modal's import graph
+// clean: it never depends on the editor package.
+
+@(private)
+breakpoint_condition_host_existing :: proc(user_data: rawptr, file_path: string, line: u32) -> (existing: string, had_bp: bool) {
+	editor := cast(^Editor)user_data
+	return breakpoint_condition_at(editor, file_path, line)
+}
+
+@(private)
+breakpoint_condition_host_set :: proc(user_data: rawptr, file_path: string, line: u32, condition_text: string) {
+	editor := cast(^Editor)user_data
+	breakpoint_set_condition_at(editor, file_path, line, condition_text)
 }
 
 // --- Disc primitives ------------------------------------------------------
@@ -1319,7 +1339,7 @@ editor_pane_gutter_toggle_breakpoint :: proc(editor: ^Editor, pane: ^Pane, edito
 	if clicked_line >= total_line_count { return false }
 
 	if shift_held {
-		breakpoint_condition_dialog_open(editor, editor_pane.file_path, clicked_line)
+		breakpoint_condition_pkg.open_with_hooks(&editor.breakpoint_condition_dialog, editor.breakpoint_condition_hooks, editor_pane.file_path, clicked_line)
 	} else {
 		breakpoint_toggle_at(editor, editor_pane.file_path, clicked_line)
 	}

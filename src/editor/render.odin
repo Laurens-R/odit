@@ -7,8 +7,7 @@ import "vendor:sdl3/ttf"
 
 import "../dap"
 import "../document"
-import help_pkg "./help"
-import terminal_picker_pkg "./terminal_picker"
+import symbols_pkg "./symbols"
 import "../lsp"
 import "../syntax"
 import "../terminal"
@@ -146,7 +145,7 @@ editor_update :: proc(editor: ^Editor, delta_time: f64) {
 	// keystroke anywhere in the editor. F6 is skipped — opening it already
 	// forces a fresh rebuild, and rebuilding while its filtered_indices
 	// slice is live would invalidate the dialog's indices.
-	if !editor.show_symbols {
+	if !editor.symbols_dialog.visible {
 		for pane_index in 0..<len(editor.panes) {
 			#partial switch &content_value in editor.panes[pane_index].content {
 			case EditorPane:
@@ -365,52 +364,23 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 	// its 2-px left divider lines up with the editor pane boundary cleanly.
 	debug_panel_render(editor, renderer, window_width, window_height)
 
-	// Modal overlays render on top of everything else.
-	if editor.show_browse {
-		browse_render(editor, renderer, window_width, window_height)
-	}
-	if editor.show_symbols {
-		symbols_dialog_render(editor, renderer, window_width, window_height)
-	}
-	if editor.help.visible {
-		ui_context := editor_make_ui_context(editor, renderer)
-		help_pkg.render(&editor.help, &ui_context, window_width, window_height)
-	}
-	if editor.show_find_in_files {
-		find_in_files_render(editor, renderer, window_width, window_height)
+	// Modal overlays render on top of everything else. Plugin-style
+	// bindings draw in registration order; each binding short-circuits
+	// itself on `visible` so iteration is cheap.
+	bindings_ui_context := editor_make_ui_context(editor, renderer)
+	for &registered_binding in editor.bindings {
+		if registered_binding.visible == nil || !registered_binding.visible(registered_binding.state) { continue }
+		if registered_binding.render != nil {
+			registered_binding.render(registered_binding.state, &editor.editor_api, renderer, &bindings_ui_context, window_width, window_height)
+		}
 	}
 	if editor.show_replace_in_files {
 		replace_in_files_render(editor, renderer, window_width, window_height)
 	}
-	if editor.show_save_as {
-		save_as_dialog_render(editor, renderer, window_width, window_height)
-	}
-	if editor.show_close_confirm {
-		close_confirm_dialog_render(editor, renderer, window_width, window_height)
-	}
-	if editor.show_git_history {
-		git_history_dialog_render(editor, renderer, window_width, window_height)
-	}
-	if editor.show_open_docs {
-		open_docs_dialog_render(editor, renderer, window_width, window_height)
-	}
-	if editor.terminal_picker.visible {
-		ui_context := editor_make_ui_context(editor, renderer)
-		entries := terminal_picker_entries(editor, context.temp_allocator)
-		terminal_picker_pkg.render(&editor.terminal_picker, &ui_context, entries, window_width, window_height)
-	}
-	if editor.show_tasks_dialog {
-		tasks_dialog_render(editor, renderer, window_width, window_height)
-	}
-	if editor.show_breakpoint_condition {
-		breakpoint_condition_dialog_render(editor, renderer, window_width, window_height)
-	}
 
-	// LSP hover + completion + signature popups float above pane content
-	// but under modal overlays.
-	hover_popup_render(editor, renderer, window_width, window_height)
-	completion_popup_render(editor, renderer, window_width, window_height)
-	signature_popup_render(editor, renderer, window_width, window_height)
+	// All popups + modals (hover, signature, completion, file
+	// browser, save-as, etc.) are registered bindings and drawn
+	// through the iteration above.
 
 	// Menu bar paints last so it sits above pane content, and the dropdown
 	// overlays whatever's underneath. Modal overlays earlier still draw on

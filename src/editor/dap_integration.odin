@@ -1,9 +1,13 @@
 package editor
 
+import "base:runtime"
 import "core:fmt"
 import "core:strings"
 
+import binding_pkg "./binding"
 import "../dap"
+import tasks_dialog_pkg "./tasks_dialog"
+import "../terminal"
 
 // --- Session lifecycle ----------------------------------------------------
 
@@ -46,7 +50,7 @@ editor_dap_start_session :: proc(editor: ^Editor) -> ^dap.Client {
 	// picked" — open the dialog instead of silently launching the first
 	// entry.
 	if profile_count > 1 && (editor.active_debug_configuration_index < 0 || editor.active_debug_configuration_index >= profile_count) {
-		tasks_dialog_open(editor)
+		tasks_dialog_pkg.open_via_api(&editor.tasks_dialog, &editor.editor_api)
 		return nil
 	}
 	configuration_index := editor.active_debug_configuration_index
@@ -391,4 +395,157 @@ dap_write_json_string :: proc(builder: ^strings.Builder, text: string) {
 @(private)
 debug_status_set :: proc(editor: ^Editor, message: string) {
 	debug_output_append(editor, strings.trim_right_space(message))
+}
+
+// --- Build + debug execution + Tasks-dialog API trampolines -------------
+
+// Spawn the build profile at `build_index` inside a fresh terminal
+// session. `pending_debug_index >= 0` queues a debug launch to run
+// once the build exits with code 0.
+@(private)
+tasks_run_build_profile :: proc(editor: ^Editor, build_index: int, pending_debug_index: int) -> bool {
+	config := &editor.project_config
+	if build_index < 0 || build_index >= len(config.build_profiles) { return false }
+	profile := &config.build_profiles[build_index]
+	command_tokens := build_profile_active_command(profile)
+	if command_tokens == nil || len(command_tokens) == 0 {
+		debug_status_set(editor, fmt.tprintf("Build '%s' has no command for this platform", profile.name))
+		return false
+	}
+
+	command_line := tasks_format_command_line(editor, command_tokens, profile.name)
+	working_dir  := project_expand_placeholders(profile.working_dir, editor, profile.name)
+
+	new_terminal := editor_terminal_create_for_build(editor, command_line, working_dir, profile.name, pending_debug_index)
+	if new_terminal == nil {
+		debug_status_set(editor, fmt.tprintf("Failed to start build: %s", profile.name))
+		return false
+	}
+	debug_status_set(editor, fmt.tprintf("Building: %s", profile.name))
+	editor_mark_dirty(editor)
+	return true
+}
+
+@(private="file")
+tasks_format_command_line :: proc(editor: ^Editor, tokens: []string, build_name: string) -> string {
+	builder: strings.Builder
+	strings.builder_init(&builder, 0, 128, context.temp_allocator)
+	for token, token_index in tokens {
+		if token_index > 0 { strings.write_byte(&builder, ' ') }
+		expanded := project_expand_placeholders(token, editor, build_name)
+		needs_quotes := false
+		for character in expanded {
+			if character == ' ' || character == '\t' { needs_quotes = true; break }
+		}
+		if needs_quotes {
+			strings.write_byte(&builder, '"')
+			strings.write_string(&builder, expanded)
+			strings.write_byte(&builder, '"')
+		} else {
+			strings.write_string(&builder, expanded)
+		}
+	}
+	return strings.to_string(builder)
+}
+
+@(private)
+tasks_start_debug_profile :: proc(editor: ^Editor, debug_index: int) {
+	config := &editor.project_config
+	if debug_index < 0 || debug_index >= len(config.debug_profiles) { return }
+	profile := &config.debug_profiles[debug_index]
+
+	if len(profile.build_profile) > 0 {
+		build_index := tasks_find_build_profile_index(config, profile.build_profile)
+		if build_index >= 0 {
+			tasks_run_build_profile(editor, build_index, debug_index)
+			return
+		}
+		debug_status_set(editor, fmt.tprintf("Build profile '%s' not found — launching anyway", profile.build_profile))
+	}
+	editor.active_debug_configuration_index = debug_index
+	editor_dap_start_session(editor)
+}
+
+@(private="file")
+tasks_find_build_profile_index :: proc(config: ^ProjectConfig, name: string) -> int {
+	for profile, profile_index in config.build_profiles {
+		if profile.name == name { return profile_index }
+	}
+	return -1
+}
+
+@(private)
+tasks_poll_terminal_build_exits :: proc(editor: ^Editor) {
+	for &entry in editor.terminals {
+		if !entry.is_build_job        { continue }
+		if entry.build_exit_observed  { continue }
+		if entry.terminal == nil      { continue }
+		exited, exit_code := terminal.terminal_check_process_exit(entry.terminal)
+		if !exited { continue }
+		entry.build_exit_observed = true
+
+		profile_name := entry.build_profile_name
+		pending      := entry.pending_debug_profile_index
+		if exit_code == 0 {
+			debug_status_set(editor, fmt.tprintf("Build '%s' OK", profile_name))
+		} else {
+			debug_status_set(editor, fmt.tprintf("Build '%s' failed (exit %d) — see terminal", profile_name, exit_code))
+		}
+		editor_mark_dirty(editor)
+
+		if pending >= 0 && exit_code == 0 {
+			editor.active_debug_configuration_index = pending
+			editor.debug_state.panel_visible = true
+			editor_output_pane_show(editor)
+			editor_dap_start_session(editor)
+		}
+	}
+}
+
+// --- EditorAPI trampolines for Tasks dialog -----------------------------
+
+@(private)
+editor_api_project_loaded_path :: proc(editor_ptr: rawptr) -> string {
+	editor := cast(^Editor)editor_ptr
+	return editor.project_config.loaded_from_path
+}
+
+@(private)
+editor_api_list_build_profiles :: proc(editor_ptr: rawptr, allocator: runtime.Allocator) -> []binding_pkg.BuildProfileSummary {
+	editor := cast(^Editor)editor_ptr
+	profiles := editor.project_config.build_profiles
+	out := make([]binding_pkg.BuildProfileSummary, len(profiles), allocator)
+	for profile, index in profiles {
+		out[index] = binding_pkg.BuildProfileSummary{
+			name        = strings.clone(profile.name,        allocator),
+			description = strings.clone(profile.description, allocator),
+		}
+	}
+	return out
+}
+
+@(private)
+editor_api_list_debug_profiles :: proc(editor_ptr: rawptr, allocator: runtime.Allocator) -> []binding_pkg.DebugProfileSummary {
+	editor := cast(^Editor)editor_ptr
+	profiles := editor.project_config.debug_profiles
+	out := make([]binding_pkg.DebugProfileSummary, len(profiles), allocator)
+	for profile, index in profiles {
+		out[index] = binding_pkg.DebugProfileSummary{
+			name          = strings.clone(profile.name,          allocator),
+			build_profile = strings.clone(profile.build_profile, allocator),
+		}
+	}
+	return out
+}
+
+@(private)
+editor_api_run_build_profile :: proc(editor_ptr: rawptr, build_index: int) {
+	editor := cast(^Editor)editor_ptr
+	tasks_run_build_profile(editor, build_index, /*pending_debug_index=*/ -1)
+}
+
+@(private)
+editor_api_start_debug_profile :: proc(editor_ptr: rawptr, debug_index: int) {
+	editor := cast(^Editor)editor_ptr
+	tasks_start_debug_profile(editor, debug_index)
 }
