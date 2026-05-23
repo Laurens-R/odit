@@ -2,6 +2,7 @@ package editor
 
 import "vendor:sdl3"
 
+import debug_pkg "./debug"
 import "../document"
 import hover_pkg "./hover"
 import "../terminal"
@@ -23,7 +24,7 @@ set_cursor :: proc(editor: ^Editor, target_cursor: ^sdl3.Cursor) {
 // arrow otherwise.
 @(private)
 editor_update_cursor :: proc(editor: ^Editor, mouse_x, mouse_y: f32) {
-	debug_wants_ew, debug_wants_ns := debug_panel_handle_cursor_kind(editor, mouse_x, mouse_y)
+	debug_wants_ew, debug_wants_ns := debug_pkg.handle_cursor_kind(&editor.debug_state, mouse_x, mouse_y)
 	if editor.divider_dragging || divider_hit_test(editor, mouse_x, mouse_y) || debug_wants_ew {
 		set_cursor(editor, editor.cursor_resize_ew)
 	} else if debug_wants_ns {
@@ -107,10 +108,10 @@ editor_mouse_down :: proc(editor: ^Editor, mouse_x: f32, mouse_y: f32, shift_hel
 		return
 	}
 
-	// Debug panel sits on the right edge and isn't a pane. Its hit-test
-	// returns true for any click landing inside, so we have to dispatch
-	// before the regular pane routing.
-	if debug_panel_handle_click(editor, mouse_x, mouse_y) { return }
+	// Debug panel input is dispatched via its binding's
+	// handle_event (registered in editor_init); the binding loop in
+	// input.odin runs before pane routing so panel clicks are
+	// captured before reaching here.
 
 	// Find bar swallows clicks that land on it (so the user can poke at it
 	// without dismissing find). A click anywhere else closes find and falls
@@ -272,7 +273,8 @@ scrollbar_apply_to_output_pane :: proc(editor: ^Editor, output_pane: ^OutputPane
 // `ui.Scrollbar`.
 @(private)
 editor_scrollbar_update_hover :: proc(editor: ^Editor, mouse_x, mouse_y: f32) {
-	debug_panel_update_hover(editor, mouse_x, mouse_y)
+	// Debug panel hover updates are handled by its binding's
+	// handle_event for MOUSE_MOTION (registered in editor_init).
 	for pane_index in 0..<editor_visible_pane_count(editor) {
 		#partial switch &content_value in editor.panes[pane_index].content {
 		case EditorPane:
@@ -366,14 +368,8 @@ is_word_byte :: proc(byte_value: u8) -> bool {
 
 @(private)
 editor_mouse_drag :: proc(editor: ^Editor, mouse_x: f32, mouse_y: f32) {
-	// Debug-panel resize handles take top priority once latched — needs the
-	// live window width, but mouse_drag doesn't carry it. Read it back from
-	// the active panes (their cumulative width + the panel width).
-	if debug_panel_is_dragging(&editor.debug_state) {
-		window_width := editor.panes[0].rectangle.w + debug_panel_width(editor)
-		if editor.split_active { window_width += editor.panes[1].rectangle.w + 2 }
-		if debug_panel_handle_drag(editor, mouse_x, mouse_y, window_width) { return }
-	}
+	// Debug-panel drag is handled by its binding's handle_event
+	// (registered in editor_init).
 
 	// Scrollbar drag takes top priority — once latched, every motion event
 	// just maps to a new scroll position until the user releases the
@@ -465,7 +461,8 @@ editor_pane_mouse_drag :: proc(editor: ^Editor, pane: ^Pane, editor_pane: ^Edito
 @(private)
 editor_mouse_up :: proc(editor: ^Editor, mouse_x, mouse_y: f32) {
 	editor.divider_dragging = false
-	debug_panel_handle_mouse_up(editor)
+	// Debug-panel mouse-up handled by its binding's handle_event
+	// (registered in editor_init).
 	for pane_index in 0..<len(editor.panes) {
 		#partial switch &content_value in editor.panes[pane_index].content {
 		case EditorPane:

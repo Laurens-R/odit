@@ -6,6 +6,7 @@ import "core:strings"
 
 import binding_pkg "./binding"
 import "../dap"
+import debug_pkg "./debug"
 import tasks_dialog_pkg "./tasks_dialog"
 import "../terminal"
 
@@ -226,7 +227,7 @@ editor_dap_update :: proc(editor: ^Editor) {
 	// If the client has terminated since last frame, sweep its session state
 	// off the editor so the panel reverts to the idle placeholders.
 	if dap.client_has_exited(client) {
-		debug_session_clear(&editor.debug_state)
+		debug_pkg.session_clear(&editor.debug_state)
 		editor.active_dap_client = nil
 		debug_status_set(editor, "Debug session ended.")
 		editor_mark_dirty(editor)
@@ -284,7 +285,7 @@ editor_dap_flush_file_breakpoints :: proc(editor: ^Editor, file_path: string) {
 	if client == nil { return }
 	if len(file_path) == 0 { return }
 
-	bps := breakpoints_for_file(editor, file_path)
+	bps := debug_pkg.breakpoints_for_file(&editor.debug_state, file_path)
 	scratch := make([dynamic]dap.SourceBreakpoint, 0, len(bps), context.temp_allocator)
 	for bp in bps {
 		// Disabled breakpoints get omitted entirely — adapter has no

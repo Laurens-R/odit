@@ -7,6 +7,7 @@ import "core:path/filepath"
 import "core:strings"
 
 import close_confirm_pkg "./close_confirm"
+import diff_pkg "./diff"
 import "../document"
 import save_as_pkg "./save_as"
 import "../syntax"
@@ -260,7 +261,7 @@ editor_close_active_pane_content :: proc(editor: ^Editor) {
 	// Both panes are editors — collapse. Diff mode is a two-pane-only
 	// feature so it dies with the split.
 	if editor.diff_state.active {
-		diff_state_destroy(&editor.diff_state)
+		diff_pkg.destroy(&editor.diff_state)
 	}
 
 	if editor.active_pane_index == 0 {

@@ -23,6 +23,7 @@ package binding
 import "base:runtime"
 import "vendor:sdl3"
 
+import "../../dap"
 import "../../markdown"
 import "../../ui"
 
@@ -97,6 +98,7 @@ EditorAPI :: struct {
 
 	// UI metrics.
 	line_height:               proc(editor: rawptr) -> i32,
+	character_width:           proc(editor: rawptr) -> i32,
 
 	// --- LSP popups (hover / signature / completion) ---------------
 	// All operate against the active pane. Request* return true when
@@ -133,6 +135,28 @@ EditorAPI :: struct {
 	list_debug_profiles:        proc(editor: rawptr, allocator: runtime.Allocator) -> []DebugProfileSummary,
 	run_build_profile:          proc(editor: rawptr, build_index: int),
 	start_debug_profile:        proc(editor: rawptr, debug_index: int),
+
+	// --- DAP (debugger) primitives ---------------------------------
+	active_dap_client:          proc(editor: rawptr) -> ^dap.Client,
+	dap_action:                 proc(editor: rawptr, action: DapAction),
+	dap_flush_file_breakpoints: proc(editor: rawptr, path: string),
+
+	// --- Menu action dispatch --------------------------------------
+	// The menu subpackage emits its own ActionKind via this
+	// callback; the editor's trampoline routes to the actual
+	// editor proc. Typed as a rawptr (the ActionKind value cast to
+	// uint) so binding/binding.odin doesn't have to import the
+	// menu subpackage and avoid a cycle.
+	dispatch_menu_action:       proc(editor: rawptr, action: u32),
+}
+
+DapAction :: enum {
+	StartSession,
+	StopSession,
+	Continue,
+	StepOver,
+	StepInto,
+	StepOut,
 }
 
 // --- Neutral payload types -----------------------------------------------
@@ -171,11 +195,16 @@ Theme :: struct {
 	background_color:          sdl3.FColor,
 	foreground_color:          sdl3.FColor,
 	status_bar_background:     sdl3.FColor,
+	status_bar_foreground:     sdl3.FColor,
 	divider_color:             sdl3.FColor,
 	cursor_color:              sdl3.FColor,
 	selection_color:           sdl3.FColor,
 	line_number_color:         sdl3.FColor,
 	syntax_keyword_foreground: sdl3.FColor,
+	syntax_type_foreground:    sdl3.FColor,
+	breakpoint_color:          sdl3.FColor,
+	breakpoint_disabled_color: sdl3.FColor,
+	git_deleted_foreground:    sdl3.FColor,
 }
 
 BuildProfileSummary :: struct {

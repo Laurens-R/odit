@@ -7,6 +7,7 @@ import browse_pkg "./browse"
 import "../dap"
 import "../document"
 import find_in_files_pkg "./find_in_files"
+import replace_in_files_pkg "./replace_in_files"
 import git_history_pkg "./git_history"
 import help_pkg "./help"
 import completion_popup_pkg "./completion_popup"
@@ -51,7 +52,9 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 	// behaves as a modal and consumes everything; when nothing is open it
 	// only consumes clicks on the menu-bar strip itself and lets the rest
 	// pass through to the panes / modals below.
-	if menu_bar_handle_event(editor, event) { return }
+	// Menu bar is the first binding in `editor.bindings` so it
+	// gets first crack at every event via the iteration below.
+
 
 	// Modal dialogs intercept input.
 	//
@@ -65,10 +68,6 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 		consumed, needs_redraw := registered_binding.handle_event(registered_binding.state, &editor.editor_api, event)
 		if needs_redraw { editor_mark_dirty(editor) }
 		if consumed { return }
-	}
-	if editor.show_replace_in_files {
-		replace_in_files_handle_event(editor, event)
-		return
 	}
 
 	// Find mode intercepts text + key events but lets mouse wheel and mouse
@@ -192,9 +191,9 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 		if ctrl_held {
 			editor_zoom(editor, event.wheel.y)
 		} else {
-			// Debug panel claims the wheel when the cursor is over it so its
-			// scrollable sub-sections work like every other scroll viewport.
-			if debug_panel_handle_wheel(editor, event.wheel.mouse_x, event.wheel.mouse_y, event.wheel.y) { return }
+			// Debug panel wheel is handled by its binding's
+			// handle_event (registered earlier in this event loop).
+
 			pane_hit_index := editor_pane_at(editor, event.wheel.mouse_x, event.wheel.mouse_y)
 			if pane_hit_index >= 0 { editor.active_pane_index = pane_hit_index }
 			// Each pane content type can scroll its own way. For editor panes,
@@ -307,7 +306,7 @@ editor_dispatch_shortcut :: proc(editor: ^Editor, pressed_key: sdl3.Keycode, key
 	case .FindInFiles:        find_in_files_pkg.open_via_api(&editor.find_in_files, &editor.editor_api)
 	case .ReplaceToggle:
 		if replace_active(editor) { replace_close(editor, false) } else { replace_open(editor) }
-	case .ReplaceInFiles:     replace_in_files_open(editor)
+	case .ReplaceInFiles:     replace_in_files_pkg.open_via_api(&editor.replace_in_files, &editor.editor_api)
 	case .None:
 		return false
 	case:

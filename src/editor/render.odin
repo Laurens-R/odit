@@ -1,14 +1,17 @@
 package editor
 
 import "core:fmt"
+import "core:math"
 import "core:strings"
 import "vendor:sdl3"
 import "vendor:sdl3/ttf"
 
 import "../dap"
+import debug_pkg "./debug"
 import "../document"
 import symbols_pkg "./symbols"
 import "../lsp"
+import menu_pkg "./menu"
 import "../syntax"
 import "../terminal"
 import "../ui"
@@ -72,7 +75,7 @@ editor_update :: proc(editor: ^Editor, delta_time: f64) {
 
 	// Alt-key state is polled here because SDL3 KEY_UP events don't reach
 	// the editor — the menu bar uses this to toggle mnemonic underlines.
-	menu_bar_poll_alt_state(editor)
+	if menu_pkg.poll_alt_state(&editor.menu_bar) { editor_mark_dirty(editor) }
 
 	// Drain LSP inbound messages + fire debounced didChange notifications.
 	editor_lsp_update(editor)
@@ -360,10 +363,6 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 		render_string(editor, renderer, project_label, project_x, status_bar_y + 2, editor.status_bar_foreground)
 	}
 
-	// Debug panel — sidebar on the right edge. Drawn after the status bar so
-	// its 2-px left divider lines up with the editor pane boundary cleanly.
-	debug_panel_render(editor, renderer, window_width, window_height)
-
 	// Modal overlays render on top of everything else. Plugin-style
 	// bindings draw in registration order; each binding short-circuits
 	// itself on `visible` so iteration is cheap.
@@ -374,9 +373,6 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 			registered_binding.render(registered_binding.state, &editor.editor_api, renderer, &bindings_ui_context, window_width, window_height)
 		}
 	}
-	if editor.show_replace_in_files {
-		replace_in_files_render(editor, renderer, window_width, window_height)
-	}
 
 	// All popups + modals (hover, signature, completion, file
 	// browser, save-as, etc.) are registered bindings and drawn
@@ -386,8 +382,8 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 	// overlays whatever's underneath. Modal overlays earlier still draw on
 	// top of any subsequently-opened dialog — those close the menu before
 	// opening anyway, so there's no ordering conflict in practice.
-	menu_bar_render(editor, renderer, window_width)
-	menu_bar_render_dropdown(editor, renderer, window_width, window_height)
+	// Menu bar + dropdown are rendered via the menu binding in the
+	// iteration above.
 }
 
 // --- Per-content renderers ------------------------------------------------
@@ -953,9 +949,9 @@ render_debug_current_line :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, edi
 render_breakpoint_marker :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, editor_pane: ^EditorPane, view_x, screen_y: i32, line_index: u32) {
 	if editor.diff_state.active        { return }
 	if len(editor_pane.file_path) == 0 { return }
-	found, enabled := breakpoint_at_line(editor, editor_pane.file_path, line_index)
+	found, enabled := debug_pkg.at_line(&editor.debug_state, editor_pane.file_path, line_index)
 	if !found { return }
-	condition_text, _ := breakpoint_condition_at(editor, editor_pane.file_path, line_index)
+	condition_text, _ := debug_pkg.condition_at(&editor.debug_state, editor_pane.file_path, line_index)
 	has_condition := len(condition_text) > 0
 
 	dot_radius := f32(editor.line_height) * 0.30
@@ -1143,4 +1139,51 @@ digit_count :: proc(number: u32) -> u32 {
 		remaining_value /= 10
 	}
 	return digit_total
+}
+
+// --- Disc primitives (gutter breakpoint markers) ----------------------
+
+@(private="file")
+draw_filled_disc :: proc(renderer: ^sdl3.Renderer, center_x, center_y, radius: f32, color: sdl3.FColor) {
+	if radius <= 0 { return }
+	sdl3.SetRenderDrawColorFloat(renderer, color.r, color.g, color.b, color.a)
+	radius_squared := radius * radius
+	r_int := i32(radius + 0.5)
+	for y_offset := -r_int; y_offset <= r_int; y_offset += 1 {
+		y_squared := f32(y_offset) * f32(y_offset)
+		if y_squared > radius_squared { continue }
+		x_half_width := math.sqrt_f32(radius_squared - y_squared)
+		sdl3.RenderLine(renderer,
+			center_x - x_half_width, center_y + f32(y_offset),
+			center_x + x_half_width, center_y + f32(y_offset))
+	}
+}
+
+@(private="file")
+draw_hollow_disc :: proc(renderer: ^sdl3.Renderer, center_x, center_y, radius: f32, color: sdl3.FColor) {
+	if radius <= 0 { return }
+	sdl3.SetRenderDrawColorFloat(renderer, color.r, color.g, color.b, color.a)
+	inner_radius := radius - 1.5
+	if inner_radius < 0 { inner_radius = 0 }
+	outer_squared := radius * radius
+	inner_squared := inner_radius * inner_radius
+	r_int := i32(radius + 0.5)
+	for y_offset := -r_int; y_offset <= r_int; y_offset += 1 {
+		y_squared := f32(y_offset) * f32(y_offset)
+		if y_squared > outer_squared { continue }
+		outer_x := math.sqrt_f32(outer_squared - y_squared)
+		if y_squared >= inner_squared {
+			sdl3.RenderLine(renderer,
+				center_x - outer_x, center_y + f32(y_offset),
+				center_x + outer_x, center_y + f32(y_offset))
+		} else {
+			inner_x := math.sqrt_f32(inner_squared - y_squared)
+			sdl3.RenderLine(renderer,
+				center_x - outer_x, center_y + f32(y_offset),
+				center_x - inner_x, center_y + f32(y_offset))
+			sdl3.RenderLine(renderer,
+				center_x + inner_x, center_y + f32(y_offset),
+				center_x + outer_x, center_y + f32(y_offset))
+		}
+	}
 }

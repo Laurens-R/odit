@@ -5,6 +5,8 @@ import "base:runtime"
 
 import NS "core:sys/darwin/Foundation"
 
+import menu_pkg "./menu"
+
 // macOS-only: drives the system menu bar at the top of the screen from the
 // same `MENUS` table used by the in-app strip on Windows/Linux. The in-app
 // strip is force-hidden on Darwin (see `menu_bar_is_visible`) so this is the
@@ -12,7 +14,7 @@ import NS "core:sys/darwin/Foundation"
 //
 // Click → callback flow:
 //   1. AppKit fires `menu_action_callback` with the clicked NSMenuItem.
-//   2. The item's `tag` was set to `int(MenuActionKind)` at build time.
+//   2. The item's `tag` was set to `int(menu_pkg.ActionKind)` at build time.
 //   3. We dispatch via the same `menu_execute_action` the in-app menu uses.
 //
 // Key equivalents are intentionally NOT set on the NSMenuItems. Shortcuts
@@ -30,7 +32,7 @@ macos_menu_editor: ^Editor
 
 // AppKit invokes this via a selector registered on NSObject. The selector
 // name doesn't matter — what matters is that every NSMenuItem points at it,
-// and each item carries its `MenuActionKind` in its `tag`.
+// and each item carries its `menu_pkg.ActionKind` in its `tag`.
 @(private="file")
 menu_action_callback :: proc "c" (unused: rawptr, selector: NS.SEL, sender: ^NS.Object) {
 	if macos_menu_editor == nil { return }
@@ -42,7 +44,7 @@ menu_action_callback :: proc "c" (unused: rawptr, selector: NS.SEL, sender: ^NS.
 	context = runtime.default_context()
 	menu_item := cast(^NS.MenuItem)sender
 	action_tag := NS.MenuItem_tag(menu_item)
-	action := MenuActionKind(action_tag)
+	action := menu_pkg.ActionKind(action_tag)
 	menu_execute_action(macos_menu_editor, action)
 }
 
@@ -70,7 +72,7 @@ editor_install_native_menu :: proc(editor: ^Editor) {
 	macos_menu_append_action(app_menu, "Quit Odit", .FileQuit, action_selector)
 	NS.Menu_setSubmenu(main_menu, app_menu, app_menu_item)
 
-	for menu_def in MENUS {
+	for menu_def in menu_pkg.MENUS {
 		title_string := macos_nsstring(menu_def.title)
 		container_item := NS.MenuItem_alloc()
 		container_item = NS.MenuItem_init(container_item)
@@ -101,7 +103,7 @@ editor_install_native_menu :: proc(editor: ^Editor) {
 }
 
 @(private="file")
-macos_menu_append_action :: proc(parent: ^NS.Menu, label: string, action: MenuActionKind, selector: NS.SEL) {
+macos_menu_append_action :: proc(parent: ^NS.Menu, label: string, action: menu_pkg.ActionKind, selector: NS.SEL) {
 	title := macos_nsstring(label)
 	// `Menu_addItemWithTitle` allocates an NSMenuItem with the title, action
 	// selector, and an empty key-equivalent — exactly what we want. The
