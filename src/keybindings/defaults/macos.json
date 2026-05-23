@@ -44,13 +44,18 @@
     { "key": "Y",   "modifiers": ["Gui"],            "action": "Redo" },
     { "key": "A",   "modifiers": ["Gui"],            "action": "SelectAll" },
     { "key": "C",   "modifiers": ["Gui"],            "action": "Copy" },
+    { "key": "X",   "modifiers": ["Gui"],            "action": "Cut" },
     { "key": "V",   "modifiers": ["Gui"],            "action": "Paste" },
+    { "key": "D",   "modifiers": ["Gui"],            "action": "AddCursorAtNextMatch" },
+    { "key": "Up",   "modifiers": ["Ctrl","Shift"], "action": "AddCursorAbove" },
+    { "key": "Down", "modifiers": ["Ctrl","Shift"], "action": "AddCursorBelow" },
 
     { "key": "C",   "modifiers": ["Gui","Shift"],    "action": "TerminalCopy" },
     { "key": "V",   "modifiers": ["Gui","Shift"],    "action": "TerminalPaste" },
 
     { "key": "R",   "modifiers": ["Gui"],            "action": "BrowseRename" },
     { "key": "N",   "modifiers": ["Gui"],            "action": "BrowseNewFile" },
+    { "key": "N",   "modifiers": ["Gui","Shift"],    "action": "BrowseNewFolder" },
     { "key": "Z",   "modifiers": ["Gui"],            "action": "BrowseUndo" },
     { "key": "P",   "modifiers": ["Gui"],            "action": "BrowseSetProjectRoot" }
   ]

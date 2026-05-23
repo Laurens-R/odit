@@ -17,12 +17,19 @@ open :: proc(state: ^State, pane_index: int, anchor_line, anchor_column: u32) {
 }
 
 // Replace the snapshot with a fresh list of items from an LSP
-// response. Clones every string and pre-measures label / detail width.
+// response. Clones every string. Pre-measures label / detail width
+// when `ui_context` has a usable font; otherwise leaves widths at 0
+// and the renderer fills them in lazily on the next paint
+// (`ensure_item_widths_measured`). The LSP poll path runs outside
+// the render loop and doesn't have a real `ui.Context` to hand in,
+// so the lazy path is the common case.
 set_items :: proc(state: ^State, ui_context: ^ui.Context, sources: []ItemSource) {
 	clear_items(state)
 	state.request_pending = false
 	state.selected_index  = 0
 	state.scroll_offset   = 0
+
+	can_measure := ui_context != nil && ui_context.font != nil
 
 	for source in sources {
 		label_copy  := strings.clone(source.label)
@@ -30,8 +37,10 @@ set_items :: proc(state: ^State, ui_context: ^ui.Context, sources: []ItemSource)
 		insert_copy := strings.clone(source.insert_text)
 		label_width:  i32 = 0
 		detail_width: i32 = 0
-		if len(label_copy)  > 0 { label_width,  _ = ui.text_size(ui_context, label_copy)  }
-		if len(detail_copy) > 0 { detail_width, _ = ui.text_size(ui_context, detail_copy) }
+		if can_measure {
+			if len(label_copy)  > 0 { label_width,  _ = ui.text_size(ui_context, label_copy)  }
+			if len(detail_copy) > 0 { detail_width, _ = ui.text_size(ui_context, detail_copy) }
+		}
 		append(&state.items_snapshot, Item{
 			label              = label_copy,
 			detail             = detail_copy,
@@ -39,6 +48,25 @@ set_items :: proc(state: ^State, ui_context: ^ui.Context, sources: []ItemSource)
 			label_pixel_width  = label_width,
 			detail_pixel_width = detail_width,
 		})
+	}
+}
+
+// Fill in any missing per-item label / detail pixel widths using
+// the render-time `ui_context`. Cheap on subsequent frames (the
+// width != 0 fast path skips). Called by the renderer before it
+// uses the widths to size the popup.
+@(private)
+ensure_item_widths_measured :: proc(state: ^State, ui_context: ^ui.Context) {
+	if ui_context == nil || ui_context.font == nil { return }
+	for &item in state.items_snapshot {
+		if item.label_pixel_width == 0 && len(item.label) > 0 {
+			width, _ := ui.text_size(ui_context, item.label)
+			item.label_pixel_width = width
+		}
+		if item.detail_pixel_width == 0 && len(item.detail) > 0 {
+			width, _ := ui.text_size(ui_context, item.detail)
+			item.detail_pixel_width = width
+		}
 	}
 }
 

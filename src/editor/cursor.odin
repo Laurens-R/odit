@@ -4,12 +4,11 @@ import "../document"
 
 @(private)
 editor_insert_text :: proc(editor: ^Editor, text_to_insert: string) {
-	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return }
-	delete_selection(editor)
-	document.document_insert(&editor_pane.document, editor_pane.cursor_offset, text_to_insert)
-	editor_pane.cursor_offset += u32(len(text_to_insert))
-	pane_mark_document_modified(editor, editor_pane)
-	sync_cursor_from_offset(editor)
+	// Routes through the multi-cursor primitive so every code path that
+	// inserts text picks up multi-caret editing for free. With only the
+	// primary cursor present (the common case) it lowers to a single
+	// document.document_insert wrapped in a one-edit compound.
+	multi_insert_text(editor, text_to_insert)
 }
 
 // Remove one "tab's worth" of leading whitespace from the current line of the
@@ -51,32 +50,35 @@ editor_outdent_line :: proc(editor: ^Editor) {
 
 @(private)
 editor_insert_newline_with_indent :: proc(editor: ^Editor) {
-	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return }
+	pane := editor_active_editor_pane(editor); if pane == nil { return }
+	cursors := pane_gather_cursors(pane)
+	plans   := make([dynamic]EditPlan, 0, len(cursors), context.temp_allocator)
 
-	indent_source_line := editor_pane.cursor_line
-	if editor_pane.selection_active {
-		low_offset := min(editor_pane.selection_anchor, editor_pane.cursor_offset)
-		indent_source_line = document.document_offset_to_line(&editor_pane.document, low_offset)
+	for cursor_value, cursor_index in cursors {
+		indent_source_line := cursor_value.line
+		if cursor_value.selection_active {
+			low_offset := min(cursor_value.selection_anchor, cursor_value.offset)
+			indent_source_line = document.document_offset_to_line(&pane.document, low_offset)
+		}
+		source_line_text := document.document_get_line(&pane.document, indent_source_line, context.temp_allocator)
+		indent_end_index := 0
+		for indent_end_index < len(source_line_text) {
+			character_value := source_line_text[indent_end_index]
+			if character_value != ' ' && character_value != '\t' { break }
+			indent_end_index += 1
+		}
+		insert_text := "\n"
+		if indent_end_index > 0 {
+			buffer := make([]byte, 1 + indent_end_index, context.temp_allocator)
+			buffer[0] = '\n'
+			copy(buffer[1:], source_line_text[:indent_end_index])
+			insert_text = string(buffer)
+		}
+		append(&plans, plan_replace_selection_with_text(cursor_value, insert_text, cursor_index))
 	}
 
-	source_line_text := document.document_get_line(&editor_pane.document, indent_source_line, context.temp_allocator)
-
-	indent_end_index := 0
-	for indent_end_index < len(source_line_text) {
-		character_value := source_line_text[indent_end_index]
-		if character_value != ' ' && character_value != '\t' { break }
-		indent_end_index += 1
-	}
-
-	if indent_end_index == 0 {
-		editor_insert_text(editor, "\n")
-		return
-	}
-
-	newline_with_indent_buffer := make([]byte, 1 + indent_end_index, context.temp_allocator)
-	newline_with_indent_buffer[0] = '\n'
-	copy(newline_with_indent_buffer[1:], source_line_text[:indent_end_index])
-	editor_insert_text(editor, string(newline_with_indent_buffer))
+	apply_edit_plans(editor, pane, cursors[:], plans[:])
+	ensure_cursor_visible(editor)
 }
 
 @(private)

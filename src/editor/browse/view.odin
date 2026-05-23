@@ -50,6 +50,9 @@ handle_event :: proc(state: ^State, event: ^sdl3.Event, bindings: ^keybindings.B
 		case .BrowseNewFile:
 			browse_prompt.open_new_file(&state.prompt)
 			return nil, true
+		case .BrowseNewFolder:
+			browse_prompt.open_new_folder(&state.prompt)
+			return nil, true
 		case .BrowseUndo:
 			return Undo{}, true
 		case .BrowseSetProjectRoot:
@@ -190,7 +193,7 @@ render :: proc(state: ^State, ui_context: ^ui.Context, chrome: Chrome, viewport_
 		ui.draw_text(ui_context, state.error_message, content_x, error_y, chrome.error_text)
 	}
 
-	hint_text := "Enter open  Ctrl+P set project root  Ctrl+R rename  Ctrl+N new  Ctrl+Z undo  F3 flat  Esc"
+	hint_text := "Enter open  Ctrl+P set project root  Ctrl+R rename  Ctrl+N new file  Ctrl+Shift+N new folder  Ctrl+Z undo  F3 flat  Esc"
 	hint_width, _ := ui.text_size(ui_context, hint_text)
 	footer_x := i32(dialog_rectangle.x + (dialog_rectangle.w - f32(hint_width)) / 2)
 	footer_y := i32(dialog_rectangle.y + dialog_rectangle.h) - line_step - 10

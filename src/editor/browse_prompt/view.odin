@@ -73,7 +73,13 @@ render :: proc(state: ^State, ui_context: ^ui.Context, viewport_width, viewport_
 	popup_y := (viewport_height - popup_height) / 2
 	popup_rectangle := sdl3.FRect{f32(popup_x), f32(popup_y), f32(popup_width), f32(popup_height)}
 
-	title := state.kind == .Rename ? "Rename" : "New File"
+	title: string
+	switch state.kind {
+	case .Rename:    title = "Rename"
+	case .NewFile:   title = "New File"
+	case .NewFolder: title = "New Folder"
+	case .None:      title = ""
+	}
 	content_rectangle := ui.draw_window(ui_context, popup_rectangle, title, theme)
 
 	line_step     := ui_context.line_height
@@ -83,9 +89,10 @@ render :: proc(state: ^State, ui_context: ^ui.Context, viewport_width, viewport_
 
 	headline_text: string
 	switch state.kind {
-	case .Rename:  headline_text = strings.concatenate({`Rename "`, state.target_name, `" to:`}, context.temp_allocator)
-	case .NewFile: headline_text = "New file name:"
-	case .None:    return
+	case .Rename:    headline_text = strings.concatenate({`Rename "`, state.target_name, `" to:`}, context.temp_allocator)
+	case .NewFile:   headline_text = "New file name:"
+	case .NewFolder: headline_text = "New folder name:"
+	case .None:      return
 	}
 	ui.draw_text(ui_context, headline_text, content_x, content_y, theme.text_foreground)
 	content_y += line_step + 6
@@ -102,7 +109,13 @@ render :: proc(state: ^State, ui_context: ^ui.Context, viewport_width, viewport_
 	button_start_x := content_x + (content_width - total_button_row_width) / 2
 	button_y := i32(popup_rectangle.y + popup_rectangle.h) - button_height - 12
 
-	primary_label := state.kind == .Rename ? "Rename" : "Create"
+	primary_label: string
+	switch state.kind {
+	case .Rename:    primary_label = "Rename"
+	case .NewFile:   primary_label = "Create"
+	case .NewFolder: primary_label = "Create"
+	case .None:      primary_label = ""
+	}
 
 	state.primary_rectangle = sdl3.FRect{f32(button_start_x),                              f32(button_y), f32(button_width), f32(button_height)}
 	state.cancel_rectangle  = sdl3.FRect{f32(button_start_x + button_width + button_gap), f32(button_y), f32(button_width), f32(button_height)}

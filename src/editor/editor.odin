@@ -91,6 +91,21 @@ EditorPane :: struct {
 	selection_anchor:  u32, // byte offset of selection anchor (other end is cursor_offset)
 	mouse_dragging:    bool, // left mouse button held; motion extends selection
 
+	// Additional carets beyond the primary (above) — only populated
+	// while multi-cursor editing is active. Each caret carries its own
+	// optional selection. The primary cursor remains the one LSP,
+	// hover, completion, find/replace, and persistence speak to; the
+	// edit primitives in `multicursor.odin` fold the additionals in on
+	// typing / backspace / delete / arrow motion / Tab / Shift+Tab.
+	additional_cursors: [dynamic]Cursor,
+
+	// Alt+drag box-select state. While active, the drag rebuilds
+	// `additional_cursors` every motion event to span the lines
+	// between the anchor row and the current pointer row at the same
+	// visual column. Reset to {false, 0} on mouse-up.
+	box_select_active:        bool,
+	box_select_anchor_offset: u32,
+
 	gutter_width:    i32, // line-number gutter width in pixels (set during render)
 
 	// Symbol re-analysis bookkeeping. `symbols_dirty` flips true whenever the

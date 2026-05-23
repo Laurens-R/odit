@@ -94,7 +94,7 @@ editor_scroll :: proc(editor: ^Editor, line_delta: i32) {
 }
 
 @(private)
-editor_mouse_down :: proc(editor: ^Editor, mouse_x: f32, mouse_y: f32, shift_held: bool, click_count: i32 = 1) {
+editor_mouse_down :: proc(editor: ^Editor, mouse_x: f32, mouse_y: f32, shift_held: bool, click_count: i32 = 1, add_cursor_modifier_held: bool = false, alt_held: bool = false) {
 	// Any click in the editor dismisses the LSP hover popup — it's
 	// anchored to a specific symbol, so clicking elsewhere counts as
 	// "the user moved on".
@@ -151,7 +151,7 @@ editor_mouse_down :: proc(editor: ^Editor, mouse_x: f32, mouse_y: f32, shift_hel
 			scrollbar_apply_to_editor_pane(editor, &content_value, mouse_y)
 			return
 		}
-		editor_pane_mouse_down(editor, pane, &content_value, mouse_x, mouse_y, shift_held, click_count)
+		editor_pane_mouse_down(editor, pane, &content_value, mouse_x, mouse_y, shift_held, click_count, add_cursor_modifier_held, alt_held)
 
 	case TerminalPane:
 		if content_value.terminal == nil { return }
@@ -309,7 +309,7 @@ divider_hit_test :: proc(editor: ^Editor, mouse_x, mouse_y: f32) -> bool {
 }
 
 @(private="file")
-editor_pane_mouse_down :: proc(editor: ^Editor, pane: ^Pane, editor_pane: ^EditorPane, mouse_x: f32, mouse_y: f32, shift_held: bool, click_count: i32) {
+editor_pane_mouse_down :: proc(editor: ^Editor, pane: ^Pane, editor_pane: ^EditorPane, mouse_x: f32, mouse_y: f32, shift_held: bool, click_count: i32, add_cursor_modifier_held: bool = false, alt_held: bool = false) {
 	// Gutter click → toggle a breakpoint at that line. Has to run before the
 	// regular cursor-placement path so the same gesture doesn't also reposition
 	// the text cursor. Shift+click in the gutter opens the conditional-bp
@@ -317,6 +317,51 @@ editor_pane_mouse_down :: proc(editor: ^Editor, pane: ^Pane, editor_pane: ^Edito
 	if editor_pane_gutter_toggle_breakpoint(editor, pane, editor_pane, mouse_x, mouse_y, shift_held) { return }
 
 	clicked_offset := screen_to_offset(editor, pane, editor_pane, mouse_x, mouse_y)
+
+	// Cmd/Ctrl+click spawns an additional caret at the click point
+	// without disturbing existing carets — the canonical Sublime/VSCode
+	// multi-cursor gesture. We swallow the rest of the path (selection
+	// reset, double-click word expand) so the new cursor isn't paired
+	// with a selection.
+	if add_cursor_modifier_held && !shift_held {
+		// Don't add a duplicate of the primary or any existing caret.
+		duplicate := clicked_offset == editor_pane.cursor_offset
+		if !duplicate {
+			for additional_cursor in editor_pane.additional_cursors {
+				if additional_cursor.offset == clicked_offset { duplicate = true; break }
+			}
+		}
+		if !duplicate {
+			new_line := document.document_offset_to_line(&editor_pane.document, clicked_offset)
+			new_line_start := document.document_line_start(&editor_pane.document, new_line)
+			append(&editor_pane.additional_cursors, Cursor{
+				offset = clicked_offset,
+				line   = new_line,
+				column = clicked_offset - new_line_start,
+			})
+		}
+		editor.cursor_visible = true
+		editor.cursor_timer = 0
+		return
+	}
+
+	// Any other click without Shift collapses extra carets first.
+	if !shift_held { pane_collapse_to_primary(editor_pane) }
+
+	// Alt+drag begins a box-select that spawns one caret per covered
+	// line. We start the box at the click point and update the carets
+	// as the drag moves in editor_pane_mouse_drag.
+	if alt_held && !shift_held {
+		editor_pane.selection_active = false
+		editor_pane.cursor_offset    = clicked_offset
+		editor_pane.mouse_dragging   = true
+		editor_pane.box_select_active = true
+		editor_pane.box_select_anchor_offset = clicked_offset
+		editor.cursor_visible = true
+		editor.cursor_timer = 0
+		sync_cursor_from_offset(editor)
+		return
+	}
 
 	if shift_held {
 		if !editor_pane.selection_active {
@@ -327,8 +372,9 @@ editor_pane_mouse_down :: proc(editor: ^Editor, pane: ^Pane, editor_pane: ^Edito
 		editor_pane.selection_anchor = clicked_offset
 		editor_pane.selection_active = true
 	}
-	editor_pane.cursor_offset  = clicked_offset
-	editor_pane.mouse_dragging = true
+	editor_pane.cursor_offset    = clicked_offset
+	editor_pane.mouse_dragging   = true
+	editor_pane.box_select_active = false
 	editor.cursor_visible = true
 	editor.cursor_timer = 0
 	sync_cursor_from_offset(editor)
@@ -358,7 +404,7 @@ editor_pane_mouse_down :: proc(editor: ^Editor, pane: ^Pane, editor_pane: ^Edito
 // Word-boundary predicate for double-click selection. Matches the identifier
 // class used by completion / hover so a double-click selects exactly what the
 // surrounding code already treats as one symbol.
-@(private="file")
+@(private)
 is_word_byte :: proc(byte_value: u8) -> bool {
 	return (byte_value >= 'a' && byte_value <= 'z') ||
 	       (byte_value >= 'A' && byte_value <= 'Z') ||
@@ -449,6 +495,10 @@ editor_mouse_drag :: proc(editor: ^Editor, mouse_x: f32, mouse_y: f32) {
 
 @(private="file")
 editor_pane_mouse_drag :: proc(editor: ^Editor, pane: ^Pane, editor_pane: ^EditorPane, mouse_x: f32, mouse_y: f32) {
+	if editor_pane.box_select_active {
+		editor_pane_box_select_drag(editor, pane, editor_pane, mouse_x, mouse_y)
+		return
+	}
 	new_offset := screen_to_offset(editor, pane, editor_pane, mouse_x, mouse_y)
 	if new_offset == editor_pane.cursor_offset { return }
 	editor_pane.cursor_offset = new_offset
@@ -456,6 +506,80 @@ editor_pane_mouse_drag :: proc(editor: ^Editor, pane: ^Pane, editor_pane: ^Edito
 	editor.cursor_visible = true
 	editor.cursor_timer = 0
 	sync_cursor_from_offset(editor)
+}
+
+// Rebuild the multi-cursor set so it covers one caret per line between
+// the anchor and the current pointer, all at the same visual column.
+// Lines too short to reach that column get a caret at end-of-line —
+// matching VSCode's column-mode drag.
+@(private="file")
+editor_pane_box_select_drag :: proc(editor: ^Editor, pane: ^Pane, editor_pane: ^EditorPane, mouse_x: f32, mouse_y: f32) {
+	anchor_line   := document.document_offset_to_line(&editor_pane.document, editor_pane.box_select_anchor_offset)
+	anchor_start  := document.document_line_start(&editor_pane.document, anchor_line)
+	anchor_column := editor_pane.box_select_anchor_offset - anchor_start
+
+	// Decode the pointer's target column from its X coordinate the same
+	// way screen_to_offset would, but without anchoring to a specific
+	// line — we want the raw visual column for ALL covered lines.
+	scroll_x_pixels := i32(editor_pane.scroll_x)
+	if editor_pane.wrap_mode { scroll_x_pixels = 0 }
+	relative_x := i32(mouse_x) - pane.rectangle.x - editor.padding_x - editor_pane.gutter_width + scroll_x_pixels
+	target_visual_column: i32 = 0
+	if relative_x > 0 && editor.character_width > 0 {
+		target_visual_column = (relative_x + editor.character_width / 2) / editor.character_width
+	}
+	if target_visual_column < 0 { target_visual_column = 0 }
+
+	// Line under the pointer, reusing the same Y→line math
+	// `screen_to_offset` already validates against `total_line_count`.
+	total_line_count := document.document_line_count(&editor_pane.document)
+	if total_line_count == 0 { return }
+	title_bar_height := f32(editor_title_bar_height(editor))
+	document_y := mouse_y - f32(pane.rectangle.y) - title_bar_height - f32(editor.padding_y) + editor_pane.scroll_y
+	if document_y < 0 { document_y = 0 }
+	pointer_line: u32 = 0
+	if editor.line_height > 0 {
+		pointer_line = u32(document_y / f32(editor.line_height))
+	}
+	if pointer_line >= total_line_count { pointer_line = total_line_count - 1 }
+
+	low_line  := anchor_line
+	high_line := pointer_line
+	if low_line > high_line { low_line, high_line = high_line, low_line }
+
+	clear(&editor_pane.additional_cursors)
+	primary_set := false
+	for line in low_line..=high_line {
+		line_start := document.document_line_start(&editor_pane.document, line)
+		line_text  := document.document_get_line(&editor_pane.document, line, context.temp_allocator)
+		byte_column := visual_to_byte_column(line_text, target_visual_column)
+		caret_offset := line_start + u32(byte_column)
+		anchor_offset_on_line := line_start + min(anchor_column, u32(len(line_text)))
+		selection_present := caret_offset != anchor_offset_on_line
+		if line == pointer_line && !primary_set {
+			editor_pane.cursor_offset    = caret_offset
+			editor_pane.selection_active = selection_present
+			editor_pane.selection_anchor = anchor_offset_on_line
+			primary_set = true
+			continue
+		}
+		append(&editor_pane.additional_cursors, Cursor{
+			offset           = caret_offset,
+			line             = line,
+			column           = u32(byte_column),
+			selection_active = selection_present,
+			selection_anchor = anchor_offset_on_line,
+		})
+	}
+	if !primary_set {
+		// Defensive — should always have been set by the loop above.
+		editor_pane.cursor_offset = editor_pane.box_select_anchor_offset
+		editor_pane.selection_active = false
+	}
+	editor.cursor_visible = true
+	editor.cursor_timer = 0
+	sync_cursor_from_offset(editor)
+	pane_dedupe_cursors(editor_pane)
 }
 
 @(private)
@@ -466,7 +590,8 @@ editor_mouse_up :: proc(editor: ^Editor, mouse_x, mouse_y: f32) {
 	for pane_index in 0..<len(editor.panes) {
 		#partial switch &content_value in editor.panes[pane_index].content {
 		case EditorPane:
-			content_value.mouse_dragging = false
+			content_value.mouse_dragging   = false
+			content_value.box_select_active = false
 			ui.scrollbar_end_drag(&content_value.scrollbar)
 		case TerminalPane:
 			ui.scrollbar_end_drag(&content_value.scrollbar)

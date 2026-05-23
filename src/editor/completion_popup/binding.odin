@@ -71,14 +71,13 @@ update_via_api :: proc(state: ^State, api: ^binding.EditorAPI) {
 			insert_text = raw_item.insert_text,
 		}
 	}
-	// `set_items` needs a `ui.Context` for label/detail width
-	// pre-measurement. We don't have one here (no renderer), so
-	// pre-measurement happens lazily during render. Approximate by
-	// passing a zeroed context — widths will all read 0 until the
-	// next set_items call from the render path. (Acceptable: the
-	// renderer recomputes width via item.label_pixel_width.)
-	dummy_ui_context := ui.Context{}
-	set_items(state, &dummy_ui_context, sources)
+	// We're outside the render loop so we don't have a real
+	// `ui.Context`. Pass an empty one — `set_items` skips
+	// pre-measurement when there's no font, and the renderer
+	// fills in widths lazily on its first paint via
+	// `ensure_item_widths_measured`.
+	empty_ui_context := ui.Context{}
+	set_items(state, &empty_ui_context, sources)
 }
 
 @(private="file")

@@ -43,13 +43,18 @@
     { "key": "Y",   "modifiers": ["Ctrl"],            "action": "Redo" },
     { "key": "A",   "modifiers": ["Ctrl"],            "action": "SelectAll" },
     { "key": "C",   "modifiers": ["Ctrl"],            "action": "Copy" },
+    { "key": "X",   "modifiers": ["Ctrl"],            "action": "Cut" },
     { "key": "V",   "modifiers": ["Ctrl"],            "action": "Paste" },
+    { "key": "D",   "modifiers": ["Ctrl"],            "action": "AddCursorAtNextMatch" },
+    { "key": "Up",   "modifiers": ["Ctrl","Shift"],   "action": "AddCursorAbove" },
+    { "key": "Down", "modifiers": ["Ctrl","Shift"],   "action": "AddCursorBelow" },
 
     { "key": "C",   "modifiers": ["Ctrl","Shift"],    "action": "TerminalCopy" },
     { "key": "V",   "modifiers": ["Ctrl","Shift"],    "action": "TerminalPaste" },
 
     { "key": "R",   "modifiers": ["Ctrl"],            "action": "BrowseRename" },
     { "key": "N",   "modifiers": ["Ctrl"],            "action": "BrowseNewFile" },
+    { "key": "N",   "modifiers": ["Ctrl","Shift"],    "action": "BrowseNewFolder" },
     { "key": "Z",   "modifiers": ["Ctrl"],            "action": "BrowseUndo" },
     { "key": "P",   "modifiers": ["Ctrl"],            "action": "BrowseSetProjectRoot" }
   ]

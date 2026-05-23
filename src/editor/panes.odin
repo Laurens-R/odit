@@ -61,6 +61,7 @@ editor_pane_destroy_in_place :: proc(editor_pane: ^EditorPane) {
 	for symbol in editor_pane.symbols { delete(symbol.name) }
 	delete(editor_pane.symbols)
 	delete(editor_pane.symbol_names)
+	delete(editor_pane.additional_cursors)
 }
 
 // --- Per-pane geometry helpers -----------------------------------------

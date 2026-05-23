@@ -37,7 +37,8 @@
       "Bash(mkdir -p ~/.config/odit)",
       "Bash(/Users/laurens/Projects/odit/vendor/macos/lsp/ols --version)",
       "Read(//opt/homebrew/share/odin/vendor/**)",
-      "Read(//usr/local/**)"
+      "Read(//usr/local/**)",
+      "Bash(echo \"Exit: $?\")"
     ],
     "additionalDirectories": [
       "/Users/laurens/.config/odit"

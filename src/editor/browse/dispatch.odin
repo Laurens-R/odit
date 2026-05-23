@@ -32,9 +32,10 @@ dispatch_event :: proc(state: ^State, api: ^binding.EditorAPI, bindings: ^keybin
 	// do_create_file. user_data carries the State pointer so the
 	// trampolines can find the surrounding browse state.
 	prompt_host := browse_prompt.Host{
-		user_data      = state,
-		apply_rename   = prompt_host_apply_rename,
-		apply_new_file = prompt_host_apply_new_file,
+		user_data        = state,
+		apply_rename     = prompt_host_apply_rename,
+		apply_new_file   = prompt_host_apply_new_file,
+		apply_new_folder = prompt_host_apply_new_folder,
 	}
 
 	intent, redraw := handle_event(state, event, bindings, &prompt_host)
@@ -176,6 +177,12 @@ prompt_host_apply_new_file :: proc(user_data: rawptr, file_name: string) {
 	do_create_file(state, file_name)
 }
 
+@(private)
+prompt_host_apply_new_folder :: proc(user_data: rawptr, folder_name: string) {
+	state := cast(^State)user_data
+	do_create_folder(state, folder_name)
+}
+
 @(private="file")
 do_rename :: proc(state: ^State, old_name, new_name: string) {
 	if old_name == new_name { return }
@@ -229,6 +236,36 @@ do_create_file :: proc(state: ^State, file_name: string) {
 }
 
 @(private="file")
+do_create_folder :: proc(state: ^State, folder_name: string) {
+	current_directory := state.current_working_directory
+	new_full_path, _ := filepath.join({current_directory, folder_name}, context.temp_allocator)
+
+	// Refuse to clobber an existing file or directory at the same path.
+	if existing_handle, open_error := os.open(new_full_path); open_error == nil {
+		os.close(existing_handle)
+		set_error(state, fmt.tprintf("Path already exists: %s", folder_name))
+		return
+	}
+
+	// `make_directory` creates a single level; intermediate components
+	// that don't exist will fail. The user can chain mkdirs by drilling
+	// down through the browser if they want a deeper path.
+	if make_error := os.make_directory(new_full_path); make_error != nil {
+		set_error(state, fmt.tprintf("Cannot create folder: %v", make_error))
+		return
+	}
+
+	append(&state.undo_stack, UndoEntry{
+		operation = .CreateFolder,
+		path_a    = strings.clone(new_full_path),
+		path_b    = "",
+	})
+
+	reload_directory_path := strings.clone(current_directory, context.temp_allocator)
+	load_directory(state, reload_directory_path)
+}
+
+@(private="file")
 do_undo :: proc(state: ^State) {
 	undo_stack_length := len(state.undo_stack)
 	if undo_stack_length == 0 { return }
@@ -250,6 +287,14 @@ do_undo :: proc(state: ^State) {
 	case .Create:
 		if remove_error := os.remove(undo_entry.path_a); remove_error != nil {
 			set_error(state, fmt.tprintf("Cannot undo create: %v", remove_error))
+			return
+		}
+	case .CreateFolder:
+		// `os.remove` on a directory only succeeds when the directory
+		// is still empty — exactly what we want so the undo doesn't
+		// silently nuke files the user dropped into it after creating.
+		if remove_error := os.remove(undo_entry.path_a); remove_error != nil {
+			set_error(state, fmt.tprintf("Cannot undo create folder: %v", remove_error))
 			return
 		}
 	}

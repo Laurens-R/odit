@@ -862,6 +862,40 @@ render_doc_line_into :: proc(
 		}
 	}
 
+	// Additional-cursor selection bands. Painted BEFORE the glyph pass
+	// so the text sits on top — the primary selection above relies on
+	// the same ordering, and stacking extras after the glyphs would
+	// hide every character behind the highlight.
+	if is_active && len(editor_pane.additional_cursors) > 0 {
+		line_byte_start := document.document_line_start(&editor_pane.document, line_index)
+		line_byte_end   := line_byte_start + u32(len(line_text))
+		for additional_cursor in editor_pane.additional_cursors {
+			if !additional_cursor.selection_active { continue }
+			selection_low_offset  := min(additional_cursor.offset, additional_cursor.selection_anchor)
+			selection_high_offset := max(additional_cursor.offset, additional_cursor.selection_anchor)
+			if selection_high_offset <= line_byte_start || selection_low_offset > line_byte_end { continue }
+			low_byte_index := selection_low_offset > line_byte_start ? int(selection_low_offset - line_byte_start) : 0
+			low_visual_column := i32(byte_to_visual_column[low_byte_index])
+			high_visual_column: i32
+			if selection_high_offset > line_byte_end {
+				high_visual_column = i32(byte_to_visual_column[len(line_text)]) + 1
+			} else {
+				high_byte_index := int(selection_high_offset - line_byte_start)
+				high_visual_column = i32(byte_to_visual_column[high_byte_index])
+			}
+			if high_visual_column > low_visual_column {
+				selection_rectangle := sdl3.FRect{
+					f32(text_x_position + low_visual_column * editor.character_width),
+					f32(screen_y),
+					f32((high_visual_column - low_visual_column) * editor.character_width),
+					f32(editor.line_height),
+				}
+				sdl3.SetRenderDrawColorFloat(renderer, editor.selection_color.r, editor.selection_color.g, editor.selection_color.b, editor.selection_color.a)
+				sdl3.RenderFillRect(renderer, &selection_rectangle)
+			}
+		}
+	}
+
 	if len(display_text) > 0 {
 		render_line_with_syntax(editor, renderer, editor_pane, display_text, text_x_position, screen_y)
 	}
@@ -892,6 +926,24 @@ render_doc_line_into :: proc(
 				character_end_index = min(character_end_index, len(line_text))
 				render_string(editor, renderer, line_text[cursor_byte_column:character_end_index], cursor_x_position, screen_y, editor.background_color)
 			}
+		}
+	}
+
+	// Additional caret bars — selection bands for these were already
+	// painted before the glyph pass above so the text sits in front
+	// of the highlight.
+	if is_active && len(editor_pane.additional_cursors) > 0 && editor.cursor_visible {
+		for additional_cursor in editor_pane.additional_cursors {
+			if additional_cursor.line != line_index { continue }
+			cursor_byte_column := int(additional_cursor.column)
+			cursor_visual_column := byte_to_visual_column[clamp(cursor_byte_column, 0, len(line_text))]
+			cursor_x_position := text_x_position + i32(cursor_visual_column) * editor.character_width
+			cursor_rectangle := sdl3.FRect{
+				f32(cursor_x_position), f32(screen_y),
+				2, f32(editor.line_height),
+			}
+			sdl3.SetRenderDrawColorFloat(renderer, editor.cursor_color.r, editor.cursor_color.g, editor.cursor_color.b, 1.0)
+			sdl3.RenderFillRect(renderer, &cursor_rectangle)
 		}
 	}
 
@@ -1069,6 +1121,26 @@ render_wrapped_doc_line :: proc(
 		}
 		sdl3.SetRenderDrawColorFloat(renderer, editor.cursor_color.r, editor.cursor_color.g, editor.cursor_color.b, 1.0)
 		sdl3.RenderFillRect(renderer, &cursor_rectangle)
+	}
+
+	// Additional carets in wrap mode (caret-only — per-cursor selection
+	// painting is MVP-skipped just like the primary's selection here).
+	if is_active && len(editor_pane.additional_cursors) > 0 && editor.cursor_visible {
+		for additional_cursor in editor_pane.additional_cursors {
+			if additional_cursor.line != line_index { continue }
+			cursor_byte_column := int(additional_cursor.column)
+			cursor_visual_column := i32(byte_to_visual_column[clamp(cursor_byte_column, 0, len(line_text))])
+			current_visual_row := cursor_visual_column / columns_per_row
+			column_within_row  := cursor_visual_column - current_visual_row * columns_per_row
+			cursor_x_position := text_x_position + column_within_row * editor.character_width
+			cursor_y_position := screen_y + current_visual_row * editor.line_height
+			cursor_rectangle := sdl3.FRect{
+				f32(cursor_x_position), f32(cursor_y_position),
+				2, f32(editor.line_height),
+			}
+			sdl3.SetRenderDrawColorFloat(renderer, editor.cursor_color.r, editor.cursor_color.g, editor.cursor_color.b, 1.0)
+			sdl3.RenderFillRect(renderer, &cursor_rectangle)
+		}
 	}
 
 	// Line number on the first visual row only — shifted right by one char-

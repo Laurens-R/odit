@@ -12,6 +12,8 @@ dispatch_event :: proc(state: ^State, host: ^Host, event: ^sdl3.Event) -> (needs
 			if host.apply_rename != nil { host.apply_rename(host.user_data, intent_value.old_name, intent_value.new_name) }
 		case SubmitNewFile:
 			if host.apply_new_file != nil { host.apply_new_file(host.user_data, intent_value.name) }
+		case SubmitNewFolder:
+			if host.apply_new_folder != nil { host.apply_new_folder(host.user_data, intent_value.name) }
 		}
 	}
 	return redraw

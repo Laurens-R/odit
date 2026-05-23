@@ -134,6 +134,18 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 			return
 		}
 
+		// Escape collapses additional cursors back to the primary
+		// before anything else gets a crack at it. Has to run before the
+		// shortcut dispatch (Escape itself isn't a binding) and before
+		// per-pane key handling so the next keystroke acts on the
+		// surviving single caret.
+		if pressed_key == sdl3.K_ESCAPE {
+			if active_pane := editor_active_editor_pane(editor); active_pane != nil && pane_has_multiple_cursors(active_pane) {
+				pane_collapse_to_primary(active_pane)
+				return
+			}
+		}
+
 		if editor_dispatch_shortcut(editor, pressed_key, key_modifiers) { return }
 
 		// Route remaining keys to the active pane.
@@ -224,7 +236,17 @@ editor_handle_event :: proc(editor: ^Editor, event: ^sdl3.Event) {
 		if event.button.button == sdl3.BUTTON_LEFT {
 			key_modifiers := sdl3.GetModState()
 			shift_held := .LSHIFT in key_modifiers || .RSHIFT in key_modifiers
-			editor_mouse_down(editor, event.button.x, event.button.y, shift_held, i32(event.button.clicks))
+			ctrl_held  := .LCTRL  in key_modifiers || .RCTRL  in key_modifiers
+			gui_held   := .LGUI   in key_modifiers || .RGUI   in key_modifiers
+			alt_held   := .LALT   in key_modifiers || .RALT   in key_modifiers
+			// Cmd on macOS, Ctrl on other platforms: spawn an additional
+			// caret at the click point instead of moving the primary.
+			when ODIN_OS == .Darwin {
+				add_cursor_modifier_held := gui_held
+			} else {
+				add_cursor_modifier_held := ctrl_held
+			}
+			editor_mouse_down(editor, event.button.x, event.button.y, shift_held, i32(event.button.clicks), add_cursor_modifier_held, alt_held)
 		}
 
 	case .MOUSE_BUTTON_UP:
@@ -282,6 +304,9 @@ editor_dispatch_shortcut :: proc(editor: ^Editor, pressed_key: sdl3.Keycode, key
 	case .MoveToRightPane:
 		find_close(editor); replace_close(editor, false); editor_move_active_to_pane(editor, 1)
 	case .ToggleWrap:         editor_toggle_wrap(editor)
+	case .AddCursorAbove:     editor_add_cursor_above(editor)
+	case .AddCursorBelow:     editor_add_cursor_below(editor)
+	case .AddCursorAtNextMatch: editor_add_cursor_at_next_match(editor)
 	case .Hover:              hover_pkg.request_at_cursor_via_api(&editor.hover_popup, &editor.editor_api)
 	case .TriggerCompletion:  completion_popup_pkg.trigger_at_cursor_via_api(&editor.completion_popup, &editor.editor_api)
 	case .SaveFile:           editor_save_active_file(editor)
@@ -353,6 +378,10 @@ editor_handle_key :: proc(editor: ^Editor, event: ^sdl3.Event) {
 	case .Copy:
 		clipboard_copy(editor)
 		return
+	case .Cut:
+		if is_diff_mode { return }
+		clipboard_cut(editor)
+		return
 	case .Paste:
 		if is_diff_mode { return }
 		clipboard_paste(editor)
@@ -370,66 +399,35 @@ editor_handle_key :: proc(editor: ^Editor, event: ^sdl3.Event) {
 	case sdl3.K_TAB:
 		if is_diff_mode { return }
 		if shift_held {
-			editor_outdent_line(editor)
+			multi_outdent_selection(editor)
 		} else {
-			editor_insert_text(editor, "    ")
+			multi_indent_selection(editor)
 		}
 
 	case sdl3.K_BACKSPACE:
 		if is_diff_mode { return }
 		// completion_popup mirrors backspace into its filter via the
 		// binding's handle_event (called earlier).
-		if delete_selection(editor) { return }
-		if editor_pane.cursor_offset > 0 {
-			deletion_length := prev_char_len(editor)
-			document.document_delete(&editor_pane.document, editor_pane.cursor_offset - deletion_length, deletion_length)
-			editor_pane.cursor_offset -= deletion_length
-			pane_mark_document_modified(editor, editor_pane)
-			sync_cursor_from_offset(editor)
-		}
+		multi_backspace(editor)
 
 	case sdl3.K_DELETE:
 		if is_diff_mode { return }
-		if delete_selection(editor) { return }
-		document_length := document.document_length(&editor_pane.document)
-		if editor_pane.cursor_offset < document_length {
-			deletion_length := next_char_len(editor)
-			document.document_delete(&editor_pane.document, editor_pane.cursor_offset, deletion_length)
-			pane_mark_document_modified(editor, editor_pane)
-			sync_cursor_from_offset(editor)
-		}
+		multi_delete_forward(editor)
 
 	case sdl3.K_LEFT:
-		if !shift_held && collapse_selection(editor, false) { return }
-		update_selection_for_nav(editor, shift_held)
-		if editor_pane.cursor_offset > 0 {
-			editor_pane.cursor_offset -= prev_char_len(editor)
-			sync_cursor_from_offset(editor)
-		}
+		move_all_cursors_horizontal(editor, -1, shift_held)
 
 	case sdl3.K_RIGHT:
-		if !shift_held && collapse_selection(editor, true) { return }
-		update_selection_for_nav(editor, shift_held)
-		document_length := document.document_length(&editor_pane.document)
-		if editor_pane.cursor_offset < document_length {
-			editor_pane.cursor_offset += next_char_len(editor)
-			sync_cursor_from_offset(editor)
-		}
+		move_all_cursors_horizontal(editor, +1, shift_held)
 
 	case sdl3.K_UP:
-		update_selection_for_nav(editor, shift_held)
-		if editor_pane.cursor_line > 0 {
-			move_cursor_vertical(editor, -1)
-		}
+		move_all_cursors_vertical(editor, -1, shift_held)
 
 	case sdl3.K_DOWN:
-		update_selection_for_nav(editor, shift_held)
-		total_line_count := document.document_line_count(&editor_pane.document)
-		if editor_pane.cursor_line < total_line_count - 1 {
-			move_cursor_vertical(editor, 1)
-		}
+		move_all_cursors_vertical(editor, +1, shift_held)
 
 	case sdl3.K_HOME:
+		pane_collapse_to_primary(editor_pane)
 		update_selection_for_nav(editor, shift_held)
 		if ctrl_held {
 			editor_pane.cursor_offset = 0
@@ -439,6 +437,7 @@ editor_handle_key :: proc(editor: ^Editor, event: ^sdl3.Event) {
 		sync_cursor_from_offset(editor)
 
 	case sdl3.K_END:
+		pane_collapse_to_primary(editor_pane)
 		update_selection_for_nav(editor, shift_held)
 		if ctrl_held {
 			editor_pane.cursor_offset = document.document_length(&editor_pane.document)
@@ -450,6 +449,7 @@ editor_handle_key :: proc(editor: ^Editor, event: ^sdl3.Event) {
 		sync_cursor_from_offset(editor)
 
 	case sdl3.K_PAGEUP:
+		pane_collapse_to_primary(editor_pane)
 		update_selection_for_nav(editor, shift_held)
 		lines_to_move := editor_pane.visible_lines > 1 ? editor_pane.visible_lines - 1 : 1
 		if editor_pane.cursor_line >= lines_to_move {
@@ -459,6 +459,7 @@ editor_handle_key :: proc(editor: ^Editor, event: ^sdl3.Event) {
 		}
 
 	case sdl3.K_PAGEDOWN:
+		pane_collapse_to_primary(editor_pane)
 		update_selection_for_nav(editor, shift_held)
 		total_line_count := document.document_line_count(&editor_pane.document)
 		lines_to_move := editor_pane.visible_lines > 1 ? editor_pane.visible_lines - 1 : 1
@@ -478,6 +479,7 @@ editor_handle_key :: proc(editor: ^Editor, event: ^sdl3.Event) {
 editor_undo_active :: proc(editor: ^Editor) {
 	if editor.diff_state.active { return }
 	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return }
+	pane_collapse_to_primary(editor_pane)
 	if new_offset, ok := document.document_undo(&editor_pane.document); ok {
 		editor_pane.cursor_offset = new_offset
 	}
@@ -490,6 +492,7 @@ editor_undo_active :: proc(editor: ^Editor) {
 editor_redo_active :: proc(editor: ^Editor) {
 	if editor.diff_state.active { return }
 	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return }
+	pane_collapse_to_primary(editor_pane)
 	if new_offset, ok := document.document_redo(&editor_pane.document); ok {
 		editor_pane.cursor_offset = new_offset
 	}

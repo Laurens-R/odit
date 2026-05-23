@@ -20,7 +20,10 @@ Action :: enum {
 	SaveFile, SaveFileAs, CloseFile,
 
 	// Editing
-	Undo, Redo, Copy, Paste, SelectAll,
+	Undo, Redo, Copy, Cut, Paste, SelectAll,
+
+	// Multi-cursor
+	AddCursorAbove, AddCursorBelow, AddCursorAtNextMatch,
 
 	// Pane navigation
 	FocusLeftPane, FocusRightPane,
@@ -54,7 +57,7 @@ Action :: enum {
 	Hover, TriggerCompletion,
 
 	// File browser (active only while the F2 browse modal is open)
-	BrowseRename, BrowseNewFile, BrowseUndo, BrowseSetProjectRoot,
+	BrowseRename, BrowseNewFile, BrowseNewFolder, BrowseUndo, BrowseSetProjectRoot,
 }
 
 Modifier :: enum u8 {
@@ -168,7 +171,7 @@ Scope :: enum { Global, Browse }
 
 action_scope :: proc(action: Action) -> Scope {
 	#partial switch action {
-	case .BrowseRename, .BrowseNewFile, .BrowseUndo, .BrowseSetProjectRoot:
+	case .BrowseRename, .BrowseNewFile, .BrowseNewFolder, .BrowseUndo, .BrowseSetProjectRoot:
 		return .Browse
 	}
 	return .Global
@@ -238,8 +241,12 @@ parse_action_name :: proc(name: string) -> (Action, bool) {
 	case "Undo":                  return .Undo, true
 	case "Redo":                  return .Redo, true
 	case "Copy":                  return .Copy, true
+	case "Cut":                   return .Cut, true
 	case "Paste":                 return .Paste, true
 	case "SelectAll":             return .SelectAll, true
+	case "AddCursorAbove":        return .AddCursorAbove, true
+	case "AddCursorBelow":        return .AddCursorBelow, true
+	case "AddCursorAtNextMatch":  return .AddCursorAtNextMatch, true
 	case "FocusLeftPane":         return .FocusLeftPane, true
 	case "FocusRightPane":        return .FocusRightPane, true
 	case "MoveToLeftPane":        return .MoveToLeftPane, true
@@ -270,6 +277,7 @@ parse_action_name :: proc(name: string) -> (Action, bool) {
 	case "TriggerCompletion":     return .TriggerCompletion, true
 	case "BrowseRename":          return .BrowseRename, true
 	case "BrowseNewFile":         return .BrowseNewFile, true
+	case "BrowseNewFolder":       return .BrowseNewFolder, true
 	case "BrowseUndo":            return .BrowseUndo, true
 	case "BrowseSetProjectRoot": return .BrowseSetProjectRoot, true
 	}

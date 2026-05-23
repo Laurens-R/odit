@@ -78,8 +78,9 @@ Chrome :: struct {
 }
 
 UndoOp :: enum {
-	Rename, // path_a = old absolute path, path_b = new absolute path
-	Create, // path_a = created absolute path (path_b unused)
+	Rename,       // path_a = old absolute path, path_b = new absolute path
+	Create,       // path_a = created absolute path (path_b unused)
+	CreateFolder, // path_a = created absolute path (path_b unused)
 }
 
 UndoEntry :: struct {

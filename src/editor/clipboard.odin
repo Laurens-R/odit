@@ -22,5 +22,17 @@ clipboard_paste :: proc(editor: ^Editor) {
 	defer sdl3.free(rawptr(raw_clipboard_pointer))
 	clipboard_text := string(cstring(raw_clipboard_pointer))
 	if len(clipboard_text) == 0 { return }
-	editor_insert_text(editor, clipboard_text)
+	multi_insert_text(editor, clipboard_text)
+}
+
+// Copy the active selection to the clipboard, then delete it. With no
+// selection this is a no-op (matches the conventional Cut behavior so
+// an accidental Ctrl+X on an empty selection doesn't wipe a line).
+@(private)
+clipboard_cut :: proc(editor: ^Editor) {
+	editor_pane := editor_active_editor_pane(editor); if editor_pane == nil { return }
+	_, _, has_selection := selection_range(editor)
+	if !has_selection { return }
+	clipboard_copy(editor)
+	multi_insert_text(editor, "")
 }

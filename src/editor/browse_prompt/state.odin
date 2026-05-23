@@ -15,6 +15,7 @@ Kind :: enum {
 	None,
 	Rename,
 	NewFile,
+	NewFolder,
 }
 
 Focus :: enum {
@@ -40,17 +41,20 @@ State :: struct {
 Intent :: union {
 	SubmitRename,
 	SubmitNewFile,
+	SubmitNewFolder,
 }
-SubmitRename  :: struct { old_name, new_name: string }
-SubmitNewFile :: struct { name: string }
+SubmitRename    :: struct { old_name, new_name: string }
+SubmitNewFile   :: struct { name: string }
+SubmitNewFolder :: struct { name: string }
 
 // Host callbacks. The host applies rename / create as filesystem
 // operations (and updates whatever sibling browser state needs
 // refreshing).
 Host :: struct {
-	user_data:       rawptr,
-	apply_rename:    proc(user_data: rawptr, old_name, new_name: string),
-	apply_new_file:  proc(user_data: rawptr, file_name: string),
+	user_data:        rawptr,
+	apply_rename:     proc(user_data: rawptr, old_name, new_name: string),
+	apply_new_file:   proc(user_data: rawptr, file_name: string),
+	apply_new_folder: proc(user_data: rawptr, folder_name: string),
 }
 
 // --- Lifecycle ------------------------------------------------------------
@@ -92,6 +96,16 @@ open_new_file :: proc(state: ^State) {
 	}
 	clear(&state.value_buffer)
 	state.kind           = .NewFile
+	state.focused_widget = .Input
+}
+
+open_new_folder :: proc(state: ^State) {
+	if len(state.target_name) > 0 {
+		delete(state.target_name)
+		state.target_name = ""
+	}
+	clear(&state.value_buffer)
+	state.kind           = .NewFolder
 	state.focused_widget = .Input
 }
 
@@ -146,9 +160,10 @@ try_submit :: proc(state: ^State) -> (intent: Intent, needs_redraw: bool) {
 	close(state)
 
 	switch kind {
-	case .Rename:  return SubmitRename{old_name = old_name_clone, new_name = new_name_clone}, true
-	case .NewFile: return SubmitNewFile{name = new_name_clone}, true
-	case .None:    return nil, true
+	case .Rename:    return SubmitRename{old_name = old_name_clone, new_name = new_name_clone}, true
+	case .NewFile:   return SubmitNewFile{name = new_name_clone}, true
+	case .NewFolder: return SubmitNewFolder{name = new_name_clone}, true
+	case .None:      return nil, true
 	}
 	return nil, true
 }

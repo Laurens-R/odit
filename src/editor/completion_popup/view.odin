@@ -48,6 +48,10 @@ render :: proc(state: ^State, ui_context: ^ui.Context, chrome: Chrome, anchor: A
 	renderer := ui_context.renderer
 	if renderer == nil { return }
 
+	// Items polled from the LSP layer outside the render loop have
+	// no font available — fill in any missing pixel widths now.
+	ensure_item_widths_measured(state, ui_context)
+
 	filtered := filtered_indices(state); defer delete(filtered)
 
 	visible_lines := len(filtered)
