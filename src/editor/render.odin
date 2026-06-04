@@ -173,6 +173,17 @@ editor_pane_update :: proc(editor: ^Editor, editor_pane: ^EditorPane, delta_time
 	interpolation_factor := f32(delta_time * SCROLL_SMOOTHNESS)
 	if interpolation_factor > 1.0 { interpolation_factor = 1.0 }
 
+	// Clamp scroll_y to the live max before stepping — the document
+	// can shrink (delete, undo, swap doc) while scroll_y_target is
+	// out at the bottom-of-the-pad limit.
+	{
+		max_vertical_scroll := editor_vertical_max_scroll(editor, editor_pane)
+		if editor_pane.scroll_y_target > max_vertical_scroll { editor_pane.scroll_y_target = max_vertical_scroll }
+		if editor_pane.scroll_y_target < 0                   { editor_pane.scroll_y_target = 0 }
+		if editor_pane.scroll_y        > max_vertical_scroll { editor_pane.scroll_y        = max_vertical_scroll }
+		if editor_pane.scroll_y        < 0                   { editor_pane.scroll_y        = 0 }
+	}
+
 	if editor_pane.scroll_y != editor_pane.scroll_y_target {
 		editor_pane.scroll_y += (editor_pane.scroll_y_target - editor_pane.scroll_y) * interpolation_factor
 		if abs(editor_pane.scroll_y_target - editor_pane.scroll_y) < 0.5 {
@@ -182,6 +193,19 @@ editor_pane_update :: proc(editor: ^Editor, editor_pane: ^EditorPane, delta_time
 			editor_pane.scroll_line = u32(editor_pane.scroll_y / f32(editor.line_height))
 		}
 		is_animating = true
+	}
+
+	// Clamp scroll_x to the live max before stepping. The widest line
+	// in view can shrink between frames (the user deletes a long line,
+	// scrolls vertically to a region without overflow, flips wrap on,
+	// resizes the pane wider, …); without this the animation would
+	// happily keep pulling scroll_x into empty space past the content.
+	{
+		max_horizontal_scroll := editor_horizontal_max_scroll(editor, editor_pane)
+		if editor_pane.scroll_x_target > max_horizontal_scroll { editor_pane.scroll_x_target = max_horizontal_scroll }
+		if editor_pane.scroll_x_target < 0                     { editor_pane.scroll_x_target = 0 }
+		if editor_pane.scroll_x        > max_horizontal_scroll { editor_pane.scroll_x        = max_horizontal_scroll }
+		if editor_pane.scroll_x        < 0                     { editor_pane.scroll_x        = 0 }
 	}
 
 	if editor_pane.scroll_x != editor_pane.scroll_x_target {
@@ -386,47 +410,46 @@ editor_render :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, window_width: i
 	// iteration above.
 }
 
-// Widest line currently in the viewport, measured in visual columns
-// after tab expansion. Drives the horizontal scrollbar's content
-// width. Uses a tight no-allocation scan rather than
-// `build_line_display` — that one materialises a tab-expanded copy
-// of every line, which on every render was tanking framerate on
-// files with long lines.
+// Widest line currently in the viewport, in bytes — approximate but
+// cheap. The earlier shape walked each visible line's content via
+// `document_get_line`, which materialises every line into a temp
+// allocation on every frame. During smooth scrolling that added up
+// to many MB/frame of allocator traffic; the new shape reads only
+// piece-tree line-start offsets (O(log N) each, no allocation), so
+// the per-frame cost stays trivial.
+//
+// Tabs and multi-byte chars are folded into the trailing pad the
+// caller adds — close enough for scrollbar sizing.
 @(private)
 widest_visible_line_chars :: proc(editor_pane: ^EditorPane) -> u32 {
 	total_line_count := document.document_line_count(&editor_pane.document)
 	if total_line_count == 0 { return 0 }
+	document_byte_length := document.document_length(&editor_pane.document)
 	end_line_index := min(editor_pane.scroll_line + editor_pane.visible_lines + 2, total_line_count)
 	widest: u32 = 0
 	for line_index := editor_pane.scroll_line; line_index < end_line_index; line_index += 1 {
-		line_length := fast_visual_line_length(&editor_pane.document, line_index)
+		line_length := line_byte_length_fast(&editor_pane.document, line_index, total_line_count, document_byte_length)
 		if line_length > widest { widest = line_length }
 	}
 	if editor_pane.cursor_line < total_line_count {
-		cursor_line_length := fast_visual_line_length(&editor_pane.document, editor_pane.cursor_line)
+		cursor_line_length := line_byte_length_fast(&editor_pane.document, editor_pane.cursor_line, total_line_count, document_byte_length)
 		if cursor_line_length > widest { widest = cursor_line_length }
 	}
 	return widest
 }
 
-// O(line_length) visual-column count: counts UTF-8 lead bytes (so
-// multi-byte runes count as one column) and expands tabs to the next
-// `TAB_WIDTH` boundary. No allocations, no intermediate strings —
-// the inner loop is roughly memchr-cheap.
 @(private="file")
-fast_visual_line_length :: proc(document_value: ^document.Document, line_index: u32) -> u32 {
-	line_text := document.document_get_line(document_value, line_index, context.temp_allocator)
-	visual_columns: u32 = 0
-	for byte_value in transmute([]u8)line_text {
-		switch {
-		case byte_value == '\t':
-			visual_columns += u32(TAB_WIDTH) - (visual_columns % u32(TAB_WIDTH))
-		case byte_value < 0x80, byte_value >= 0xC0: // ASCII or UTF-8 lead byte
-			visual_columns += 1
-		// UTF-8 continuation bytes (0x80..0xBF) contribute nothing.
-		}
+line_byte_length_fast :: proc(document_value: ^document.Document, line_index, total_line_count, document_byte_length: u32) -> u32 {
+	this_line_start := document.document_line_start(document_value, line_index)
+	next_line_start: u32
+	if line_index + 1 < total_line_count {
+		next_line_start = document.document_line_start(document_value, line_index + 1)
+		if next_line_start > 0 { next_line_start -= 1 } // strip the trailing newline byte
+	} else {
+		next_line_start = document_byte_length
 	}
-	return visual_columns
+	if next_line_start <= this_line_start { return 0 }
+	return next_line_start - this_line_start
 }
 
 // --- Per-content renderers ------------------------------------------------
@@ -490,7 +513,10 @@ render_editor_pane :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, pane: ^Pan
 			content_height_pixels = f32(len(editor.diff_state.rows)) * f32(editor.line_height)
 			current_scroll_value  = editor.diff_state.scroll_y
 		} else {
-			content_height_pixels = f32(total_line_count) * f32(editor.line_height)
+			// Match `editor_vertical_max_scroll`: include the trailing
+			// pad so the scrollbar thumb hits the bottom of the track
+			// at the same scroll value the wheel / drag clamps to.
+			content_height_pixels = f32((total_line_count + VERTICAL_TRAILING_PAD_LINES) * u32(editor.line_height))
 			current_scroll_value  = editor_pane.scroll_y
 		}
 
@@ -1226,18 +1252,17 @@ render_wrapped_doc_line :: proc(
 // with the default foreground.
 @(private="file")
 render_line_with_syntax :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, editor_pane: ^EditorPane, display_text: string, text_x, screen_y: i32, visible_left_x: i32 = min(i32), visible_right_x: i32 = max(i32)) {
-	// Clip the whole line to the visible horizontal window first.
-	// `display_text` is post-tab-expansion, so byte offset == visual
-	// column — slicing by column is exact. Skipping the off-screen
-	// portion is the difference between rendering 60 visible chars
-	// and shaping a 50,000-byte minified line on every frame.
-	visible_first_column, visible_last_column := visible_column_range(editor, display_text, text_x, visible_left_x, visible_right_x)
-	if visible_last_column <= visible_first_column { return }
-
+	// Skip render entirely when the whole line is outside the visible
+	// horizontal band. The earlier version of this code SLICED the
+	// display_text down to the visible columns — that was a cache-buster
+	// for `text_cache_get` (keyed on string content), which made the
+	// renderer create + destroy ttf.Text objects on every horizontal
+	// scroll tick. The current shape only filters tokens at endpoint
+	// granularity so substrings stay stable across small scroll deltas
+	// and cache reuse stays high.
 	if editor_pane.language == nil {
-		clipped_text := display_text[visible_first_column:visible_last_column]
-		clipped_x    := text_x + i32(visible_first_column) * editor.character_width
-		render_string(editor, renderer, clipped_text, clipped_x, screen_y, editor.foreground_color)
+		if !range_overlaps_visible(text_x, text_x + i32(len(display_text)) * editor.character_width, visible_left_x, visible_right_x) { return }
+		render_string(editor, renderer, display_text, text_x, screen_y, editor.foreground_color)
 		return
 	}
 
@@ -1247,48 +1272,23 @@ render_line_with_syntax :: proc(editor: ^Editor, renderer: ^sdl3.Renderer, edito
 
 	for token in tokens {
 		if token.end <= token.start { continue }
-		// Trim token to the visible window. Tokens that span a long
-		// off-screen range (e.g. a multi-line string body) get sliced
-		// down so render_string doesn't shape the off-screen bytes.
-		clipped_start := max(int(visible_first_column), token.start)
-		clipped_end   := min(int(visible_last_column),  token.end)
-		if clipped_end <= clipped_start { continue }
-		token_text := display_text[clipped_start:clipped_end]
+		token_start_x := text_x + i32(token.start) * editor.character_width
+		token_end_x   := text_x + i32(token.end)   * editor.character_width
+		if !range_overlaps_visible(token_start_x, token_end_x, visible_left_x, visible_right_x) { continue }
+		token_text := display_text[token.start:token.end]
 		token_color := syntax_color_for(editor, token.kind)
-		token_x_position := text_x + i32(clipped_start) * editor.character_width
-		render_string(editor, renderer, token_text, token_x_position, screen_y, token_color)
+		render_string(editor, renderer, token_text, token_start_x, screen_y, token_color)
 	}
 }
 
-// Convert the requested visible-pixel window into a byte/column range
-// inside `display_text`. Returns [0, len(display_text)] when called
-// without bounds (callers that don't pass visible_left/right_x). The
-// `display_text` byte index == visual column because tabs have
-// already been expanded by `build_line_display`.
+// True when [start_x, end_x) overlaps the visible window
+// [visible_left_x, visible_right_x). Either bound can be unset
+// (min/max i32) for callers that don't want to clip.
 @(private="file")
-visible_column_range :: proc(editor: ^Editor, display_text: string, text_x: i32, visible_left_x: i32, visible_right_x: i32) -> (first_column, last_column: int) {
-	first_column = 0
-	last_column  = len(display_text)
-	if editor.character_width <= 0 { return }
-	if visible_left_x != min(i32) {
-		if visible_left_x > text_x {
-			first_column = int((visible_left_x - text_x) / editor.character_width)
-			if first_column < 0                { first_column = 0 }
-			if first_column > len(display_text) { first_column = len(display_text) }
-		}
-	}
-	if visible_right_x != max(i32) {
-		if visible_right_x > text_x {
-			// +1 column of slack so partially-visible glyphs on the
-			// right edge still get rendered.
-			last_column = int((visible_right_x - text_x) / editor.character_width) + 1
-			if last_column < 0                { last_column = 0 }
-			if last_column > len(display_text) { last_column = len(display_text) }
-		} else {
-			last_column = 0
-		}
-	}
-	return
+range_overlaps_visible :: proc(start_x, end_x, visible_left_x, visible_right_x: i32) -> bool {
+	if visible_right_x != max(i32) && start_x >= visible_right_x { return false }
+	if visible_left_x  != min(i32) && end_x   <= visible_left_x  { return false }
+	return true
 }
 
 @(private="file")

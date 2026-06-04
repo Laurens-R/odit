@@ -45,8 +45,43 @@ editor_scroll_horizontal :: proc(editor: ^Editor, column_delta: i32) {
 	if editor_pane.wrap_mode { return }
 	scroll_step_pixels := f32(column_delta * editor.character_width)
 	new_scroll_target  := editor_pane.scroll_x_target + scroll_step_pixels
-	if new_scroll_target < 0 { new_scroll_target = 0 }
+	max_scroll := editor_horizontal_max_scroll(editor, editor_pane)
+	if new_scroll_target < 0          { new_scroll_target = 0 }
+	if new_scroll_target > max_scroll { new_scroll_target = max_scroll }
+	// Snap both `scroll_x` and `scroll_x_target` so the viewport moves
+	// with the gesture instead of trailing behind the smooth-scroll
+	// animation. macOS sends a long tail of momentum wheel events
+	// after a flick — letting each one only inch scroll_x by the
+	// 18.0/sec interpolation factor produced the "queue catching up"
+	// feel after the gesture ends. The vertical wheel still smooths
+	// because it's gated by visible_lines (a screenful at a time),
+	// but horizontal motion is fine-grained enough to feel direct.
 	editor_pane.scroll_x_target = new_scroll_target
+	editor_pane.scroll_x        = new_scroll_target
+}
+
+// Furthest valid `scroll_x` for the pane: the gap between the widest
+// visible line (plus the trailing pad the renderer uses) and the
+// pane's text-area viewport width. Returns 0 when the widest line
+// already fits — the caller then clamps scroll to the left edge.
+@(private)
+editor_horizontal_max_scroll :: proc(editor: ^Editor, editor_pane: ^EditorPane) -> f32 {
+	if editor.character_width <= 0 { return 0 }
+
+	pane_index := -1
+	for index in 0..<len(editor.panes) {
+		if pane_as_editor(&editor.panes[index]) == editor_pane { pane_index = index; break }
+	}
+	if pane_index < 0 { return 0 }
+	pane_rectangle := editor.panes[pane_index].rectangle
+
+	text_area_width := f32(pane_rectangle.w - editor.padding_x - editor_pane.gutter_width - editor.padding_x)
+	if text_area_width <= 0 { return 0 }
+
+	widest_chars := widest_visible_line_chars(editor_pane)
+	content_width := f32((i32(widest_chars) + 8) * editor.character_width)
+	if content_width <= text_area_width { return 0 }
+	return content_width - text_area_width
 }
 
 // Flip wrap-mode for the active pane. Horizontal scroll resets to zero on
@@ -84,13 +119,27 @@ editor_scroll :: proc(editor: ^Editor, line_delta: i32) {
 	}
 
 	active_editor_pane := editor_active_editor_pane(editor); if active_editor_pane == nil { return }
-	total_line_count := i32(document.document_line_count(&active_editor_pane.document))
-	visible_line_count := i32(active_editor_pane.visible_lines)
-	if visible_line_count == 0 { visible_line_count = 1 }
-	max_scroll_line_count := max(i32(0), total_line_count - visible_line_count)
-	max_scroll_y := f32(max_scroll_line_count * editor.line_height)
+	max_scroll_y := editor_vertical_max_scroll(editor, active_editor_pane)
 	new_scroll_target := active_editor_pane.scroll_y_target + f32(line_delta * editor.line_height)
 	active_editor_pane.scroll_y_target = clamp(new_scroll_target, 0, max_scroll_y)
+}
+
+// Furthest valid `scroll_y` for an editor pane: enough to bring the
+// last line to the top, plus a few lines of trailing pad so the user
+// can scroll past the bottom and breathe. Mirrors the horizontal
+// pad — without it the bottom line sits flush against the find/replace
+// bar with nowhere to scroll further.
+@(private)
+VERTICAL_TRAILING_PAD_LINES :: 5
+
+@(private)
+editor_vertical_max_scroll :: proc(editor: ^Editor, editor_pane: ^EditorPane) -> f32 {
+	if editor.line_height <= 0 { return 0 }
+	total_line_count := i32(document.document_line_count(&editor_pane.document))
+	visible_line_count := i32(editor_pane.visible_lines)
+	if visible_line_count == 0 { visible_line_count = 1 }
+	max_scroll_line_count := max(i32(0), total_line_count - visible_line_count + VERTICAL_TRAILING_PAD_LINES)
+	return f32(max_scroll_line_count * editor.line_height)
 }
 
 @(private)
@@ -254,10 +303,7 @@ scrollbar_apply_to_editor_pane :: proc(editor: ^Editor, editor_pane: ^EditorPane
 		editor.diff_state.scroll_y_target = new_scroll
 		return
 	}
-	total_line_count := f32(document.document_line_count(&editor_pane.document))
-	content_height  := total_line_count * f32(editor.line_height)
-	viewport_height := f32(editor_pane.visible_lines) * f32(editor.line_height)
-	max_scroll := max(f32(0), content_height - viewport_height)
+	max_scroll := editor_vertical_max_scroll(editor, editor_pane)
 	new_scroll := ui.scrollbar_drag_to(&editor_pane.scrollbar, mouse_y, max_scroll)
 	editor_pane.scroll_y        = new_scroll
 	editor_pane.scroll_y_target = new_scroll
